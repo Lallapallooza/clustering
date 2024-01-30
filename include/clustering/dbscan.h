@@ -54,7 +54,7 @@ class DBSCAN {
   /**
    * @brief Runs the DBSCAN clustering algorithm.
    *
-   * Identifies core points in parallel and then sequentially expands clusters
+   * Identifies core points sequentially and then expands clusters in parallel
    * from these core points.
    */
   void run() {
