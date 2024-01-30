@@ -22,6 +22,7 @@ making it ideal for machine learning, data mining, and complex data analysis tas
 CPMAddPackage(
     NAME clustering
     GITHUB_REPOSITORY Lallapallooza/clustering
+    GIT_TAG 0.0.1 # Choose tag 
     OPTIONS "CLUSTERING_USE_AVX2 ON"
 )
 target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
