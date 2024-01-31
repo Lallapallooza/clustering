@@ -69,7 +69,7 @@ For memory efficiency, this library significantly outperforms scikit-learn.
 
 To run your own benchmark:
 ```bash
-cd benchmark
+cd tools
 ./bench.sh --binary=path/to/build/clustering_demo --n_points=1024,4096,16384,100000 --n_dims=2,3,10,50,100 --n_jobs=100500
 ```
 CPU Performance with 1 Job
