@@ -75,14 +75,14 @@ static void BM_KDTreeQuery(benchmark::State &state) {
 BENCHMARK(BM_KDTreeConstruction<KDTree<float>>)
   ->Ranges({{2, 1 << 8}, {2, 1 << 5}})
     ->RangeMultiplier(2);
-BENCHMARK(BM_KDTreeConstruction<KDTree<float, KDTreeDistanceType::kEucledian, NewAllocator<KDTreeNode>>>)
+BENCHMARK(BM_KDTreeConstruction<KDTree<float, KDTreeDistanceType::kEucledian, 16, NewAllocator<KDTreeNode>>>)
   ->Ranges({{2, 1 << 8}, {2, 1 << 5}})
     ->RangeMultiplier(2);
 
 BENCHMARK(BM_KDTreeQuery<KDTree<float>>)
   ->Ranges({{2, 1 << 8}, {2, 1 << 5}})
     ->RangeMultiplier(2);
-BENCHMARK(BM_KDTreeQuery<KDTree<float, KDTreeDistanceType::kEucledian, NewAllocator<KDTreeNode>>>)
+BENCHMARK(BM_KDTreeQuery<KDTree<float, KDTreeDistanceType::kEucledian, 16, NewAllocator<KDTreeNode>>>)
   ->Ranges({{2, 1 << 8}, {2, 1 << 5}})
     ->RangeMultiplier(2);
 

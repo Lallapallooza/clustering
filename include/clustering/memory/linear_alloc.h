@@ -7,9 +7,9 @@ class LinearAllocator {
   static_assert(std::is_trivially_destructible<T>::value, "T must be trivially destructible");
 
  public:
-  LinearAllocator(size_t size)
-    : size(size * sizeof(T)),
-      memory(new char[size * sizeof(T)]),
+  LinearAllocator(size_t count)
+    : size(count * sizeof(T)),
+      memory(new char[count * sizeof(T)]),
       next(memory) {}
 
   ~LinearAllocator() {
