@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 project(clustering)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES})
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 include(CheckCXXCompilerFlag)
 include(cmake/CPM.cmake)
 

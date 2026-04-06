@@ -264,7 +264,9 @@ class NDArray {
     AlignedAllocator(const typename NDArray<U, N>::template AlignedAllocator<Align>&) noexcept {}
 
     pointer allocate(size_type n, const_pointer hint = 0) {
-      if (auto p = static_cast<pointer>(aligned_alloc(Align, n * sizeof(T))))
+      size_type bytes = n * sizeof(T);
+      size_type aligned_bytes = (bytes + Align - 1) / Align * Align;
+      if (auto p = static_cast<pointer>(aligned_alloc(Align, aligned_bytes)))
         return p;
       throw std::bad_alloc();
     }
