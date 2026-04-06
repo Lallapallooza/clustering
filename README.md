@@ -22,7 +22,7 @@ making it ideal for machine learning, data mining, and complex data analysis tas
 CPMAddPackage(
     NAME clustering
     GITHUB_REPOSITORY Lallapallooza/clustering
-    GIT_TAG 0.0.1 # Choose tag 
+    GIT_TAG v0.2.0
     OPTIONS "CLUSTERING_USE_AVX2 ON"
 )
 target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
@@ -69,8 +69,10 @@ For memory efficiency, this library significantly outperforms scikit-learn.
 
 To run your own benchmark:
 ```bash
-cd tools
-./bench.sh --binary=path/to/build/clustering_demo --n_points=1024,4096,16384,100000 --n_dims=2,3,10,50,100 --n_jobs=100500
+uv venv && uv pip install -e .
+uv run benchmark                                    # full suite
+uv run benchmark --algo dbscan --sizes 1000 10000   # quick run
+uv run benchmark --list                             # show available recipes
 ```
 CPU Performance with 1 Job
 ![CPU1](resources/results_1job.png)
