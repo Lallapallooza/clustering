@@ -42,6 +42,21 @@
 
 # CMake
 cmake-build-*/
+build*/
+compile_commands.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyd
+*.so
+*.egg-info/
+dist/
+.envrc
+
+# Benchmark output
+benchmark_results/
 
 # Mongo Explorer plugin
 .idea/**/mongoSettings.xml

@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import importlib
+import itertools
+import json
+import multiprocessing
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from statistics import median
+from typing import Any, Callable
+
+import numpy as np
+import sklearn.cluster
+from sklearn.datasets import make_blobs
+from sklearn.metrics import adjusted_rand_score
+
+from pybench.recipe import DatasetSpec, Recipe, RunResult
+
+
+def make_data(n_samples: int, spec: DatasetSpec) -> np.ndarray:
+    """Generate reproducible float32 dataset from spec."""
+    X, _ = make_blobs(
+        n_samples=n_samples,
+        n_features=spec.n_features,
+        centers=spec.centers,
+        center_box=spec.center_box,
+        cluster_std=spec.cluster_std,
+        random_state=spec.random_state,
+    )
+    return X.astype(np.float32)
+
+
+def make_sklearn_reference(algo_name: str) -> Callable:
+    """Auto-construct a sklearn reference callable by algorithm name."""
+    class_name = algo_name.upper() if algo_name.upper() in ("DBSCAN", "OPTICS") else algo_name.capitalize()
+    cls = getattr(sklearn.cluster, class_name, None)
+    if cls is None:
+        cls = getattr(sklearn.cluster, algo_name.upper(), None)
+    if cls is None:
+        raise ValueError(f"No sklearn.cluster class found for algorithm '{algo_name}'")
+
+    def reference(data: np.ndarray, **params: Any) -> np.ndarray:
+        model = cls(**params)
+        labels = model.fit_predict(data)
+        return labels.astype(np.int32)
+
+    return reference
+
+
+def expand_param_grid(recipe: Recipe) -> list[dict[str, Any]]:
+    """Expand default_params + param_grid into a list of param dicts."""
+    if not recipe.param_grid:
+        return [dict(recipe.default_params)]
+
+    grid_keys = sorted(recipe.param_grid.keys())
+    grid_values = [recipe.param_grid[k] for k in grid_keys]
+
+    combos = []
+    for values in itertools.product(*grid_values):
+        params = dict(recipe.default_params)
+        for k, v in zip(grid_keys, values):
+            params[k] = v
+        combos.append(params)
+    return combos
+
+
+def _measure_peak_rss_worker(fn, data, params, pipe):
+    """Worker: run fn in a forked process, report peak RSS via pipe."""
+    import resource
+    fn(data, **params)
+    peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    pipe.send(peak_kb)
+    pipe.close()
+
+
+def _measure_peak_rss_mb(fn: Callable, data: np.ndarray, params: dict[str, Any]) -> float:
+    """Fork a child process, run fn, return its peak RSS in MB.
+
+    Forked child inherits the Python baseline but ru_maxrss is reset to
+    the fork-time RSS, so the delta from baseline is meaningful.
+    """
+    parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
+    p = multiprocessing.Process(
+        target=_measure_peak_rss_worker,
+        args=(fn, data, params, child_conn),
+    )
+    p.start()
+    child_conn.close()
+    p.join(timeout=300)
+    if p.exitcode != 0 or not parent_conn.poll():
+        parent_conn.close()
+        return 0.0
+    peak_kb = parent_conn.recv()
+    parent_conn.close()
+    return round(peak_kb / 1024, 2)
+
+
+def run_one(recipe: Recipe, size: int, dims: int | None = None,
+            params: dict[str, Any] | None = None) -> RunResult:
+    """Run both implementations n_runs times, return median timing + ARI."""
+    from dataclasses import replace
+
+    if params is None:
+        params = dict(recipe.default_params)
+
+    dataset = recipe.dataset
+    if dims is not None and dims != dataset.n_features:
+        dataset = replace(dataset, n_features=dims)
+
+    data = make_data(size, dataset)
+
+    theirs_fn = recipe.theirs
+    if theirs_fn is None:
+        theirs_fn = make_sklearn_reference(recipe.name)
+
+    ours_times: list[float] = []
+    theirs_times: list[float] = []
+
+    for _ in range(recipe.n_runs):
+        t0 = time.perf_counter()
+        result_ours = recipe.ours(data, **params)
+        ours_times.append(time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        result_theirs = theirs_fn(data, **params)
+        theirs_times.append(time.perf_counter() - t0)
+
+    ours_labels = result_ours
+    theirs_labels = result_theirs
+
+    # Measure peak RSS delta for one run of each (captures C++ allocations too)
+    ours_peak_mb = _measure_peak_rss_mb(recipe.ours, data, params)
+    theirs_peak_mb = _measure_peak_rss_mb(theirs_fn, data, params)
+
+    ours_median_ms = median(ours_times) * 1000.0
+    theirs_median_ms = median(theirs_times) * 1000.0
+    speedup = theirs_median_ms / ours_median_ms if ours_median_ms > 0 else float("inf")
+
+    ari = float(adjusted_rand_score(theirs_labels, ours_labels))
+    ours_noise_frac = float(np.mean(ours_labels == -1))
+    theirs_noise_frac = float(np.mean(theirs_labels == -1))
+
+    return RunResult(
+        recipe_name=recipe.name,
+        size=size,
+        dims=dataset.n_features,
+        params=params,
+        ours_median_ms=ours_median_ms,
+        theirs_median_ms=theirs_median_ms,
+        ours_peak_mb=round(ours_peak_mb, 2),
+        theirs_peak_mb=round(theirs_peak_mb, 2),
+        ari=ari,
+        ours_noise_frac=ours_noise_frac,
+        theirs_noise_frac=theirs_noise_frac,
+        speedup=speedup,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def run_suite(
+    recipes: dict[str, Recipe],
+    sizes: list[int] | None = None,
+    dims: list[int] | None = None,
+) -> list[RunResult]:
+    """Run all recipes across sizes x dims x param_grid, return results."""
+    results: list[RunResult] = []
+    for recipe in recipes.values():
+        effective_sizes = sizes if sizes is not None else list(recipe.default_sizes)
+        effective_dims = dims if dims is not None else list(recipe.default_dims)
+        param_combos = expand_param_grid(recipe)
+
+        for dim in effective_dims:
+            for size in effective_sizes:
+                for params in param_combos:
+                    result = run_one(recipe, size, dims=dim, params=params)
+                    results.append(result)
+    return results
+
+
+def save_results(results: list[RunResult], path: Path) -> None:
+    """Write results list to JSON file."""
+    from dataclasses import asdict
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        json.dump([asdict(r) for r in results], f, indent=2)
