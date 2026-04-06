@@ -58,14 +58,29 @@ class DBSCAN {
    * from these core points.
    */
   void run() {
+    // Phase 1: Parallel core-point identification
+    std::vector<uint8_t> is_core(m_points_dim0, 0);
+    m_thread_pool.parallelize_loop(0, m_points_dim0,
+      [this, &is_core](size_t start, size_t end) {
+        for (size_t i = start; i < end; ++i) {
+          if (isCorePoint(i)) {
+            is_core[i] = 1;
+          }
+        }
+      }).wait();
+
+    // Phase 2: Sequential cluster expansion from core points only
+    for (size_t i = 0; i < m_points_dim0; ++i) {
+      if (m_labels[i] == UNCLASSIFIED && is_core[i]) {
+        expandCluster(i, is_core);
+        ++m_clusterId;
+      }
+    }
+
+    // Phase 3: Mark remaining UNCLASSIFIED points as NOISY
     for (size_t i = 0; i < m_points_dim0; ++i) {
       if (m_labels[i] == UNCLASSIFIED) {
-        if (isCorePoint(i)) {
-          expandCluster(i);
-          m_clusterId += static_cast<size_t>(m_labels[i] != NOISY);
-        } else {
-          m_labels[i] = NOISY;
-        }
+        m_labels[i] = NOISY;
       }
     }
   }
@@ -123,41 +138,39 @@ class DBSCAN {
    *
    * @param idx The index of the core point from which to expand the cluster.
    */
-  void expandCluster(size_t idx) {
-    // Initial query to find all points within epsilon radius of the core point.
+  void expandCluster(size_t idx, const std::vector<uint8_t> &is_core) {
+    m_labels[idx] = m_clusterId;
+
     std::vector<size_t> seeds_vec = m_query_model.query(extractPoint(idx), m_eps);
     std::mutex          mutex;
 
-    // Loop until there are no more points to add to the cluster.
     while (!seeds_vec.empty()) {
-      std::vector<size_t> seeds_vec_cpy; // Temporary vector to hold new seeds found in this iteration.
-      seeds_vec_cpy.reserve(256);
+      std::vector<size_t> seeds_vec_cpy;
+      seeds_vec_cpy.reserve(seeds_vec.size());
 
       auto multi_fut = m_thread_pool.parallelize_loop(0, seeds_vec.size(),
-        [this, &seeds_vec, &seeds_vec_cpy, &mutex](size_t start, size_t end) {
-          std::vector<size_t> local_seeds_vec_cpy;  // Local vector to accumulate seeds found by this thread.
-          tsl::hopscotch_pg_set<size_t> local_uniq; // Set to ensure unique addition of points to the cluster.
+        [this, &seeds_vec, &seeds_vec_cpy, &mutex, &is_core](size_t start, size_t end) {
+          std::vector<size_t> local_seeds_vec_cpy;
+          tsl::hopscotch_pg_set<size_t> local_uniq;
 
           for (size_t i = start; i < end; ++i) {
             size_t point = seeds_vec[i];
 
-            // Skip already classified points.
             if (m_labels[point] != UNCLASSIFIED) {
               continue;
             }
 
-            // Query to find neighbors of the current point within epsilon radius.
+            // Assign cluster label to ALL density-reachable points (core and border)
+            m_labels[point] = m_clusterId;
+
+            // Only core points expand further
+            if (!is_core[point]) {
+              continue;
+            }
+
             NDArray<T, 1> query     = extractPoint(point);
             auto          neighbors = m_query_model.query(query, m_eps);
 
-            // Mark point as NOISY if it doesn't have enough neighbors to be a core point.
-            if (CLUSTERING_UNLIKELY(neighbors.size() < m_minPts)) {
-              m_labels[point] = NOISY;
-              continue;
-            }
-            m_labels[point] = m_clusterId;
-
-            // Iterate over neighbors and add them to the list of points to be processed if not already processed.
             for (size_t neighbor_id: neighbors) {
               if (m_labels[neighbor_id] == UNCLASSIFIED && local_uniq.insert(neighbor_id).second) {
                 local_seeds_vec_cpy.push_back(neighbor_id);
@@ -166,12 +179,10 @@ class DBSCAN {
           }
 
           std::lock_guard lock{mutex};
-          seeds_vec_cpy.insert(seeds_vec_cpy.end(), local_seeds_vec_cpy.begin(),local_seeds_vec_cpy.end());
+          seeds_vec_cpy.insert(seeds_vec_cpy.end(), local_seeds_vec_cpy.begin(), local_seeds_vec_cpy.end());
       });
 
       multi_fut.wait();
-
-      // Prepare for the next iteration.
       seeds_vec.swap(seeds_vec_cpy);
     }
   }
