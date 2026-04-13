@@ -19,7 +19,15 @@ benchmark = "pybench.cli:main"
 dev = [
     "pre-commit>=4.0",
     "ruff>=0.15",
+    "commitizen>=4.0",
 ]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "0.3.0"
+tag_format = "v$version"
+version_scheme = "semver"
+update_changelog_on_bump = false
 
 [tool.scikit-build]
 cmake.source-dir = "python"
