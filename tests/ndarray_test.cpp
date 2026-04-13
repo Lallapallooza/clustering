@@ -86,3 +86,69 @@ TEST(NDArrayStorage, DoubleElementType) {
   EXPECT_EQ(arr.dim(1), 4u);
   EXPECT_DOUBLE_EQ(static_cast<double>(arr[1][2]), 3.25);
 }
+
+TEST(OperatorCall, Rank2MatchesSubscript) {
+  NDArray<float, 2> arr({5, 7});
+  for (std::size_t i = 0; i < 5; ++i) {
+    for (std::size_t j = 0; j < 7; ++j) {
+      arr[i][j] = static_cast<float>(i * 31 + j * 7 + 1);
+    }
+  }
+  for (std::size_t i = 0; i < 5; ++i) {
+    for (std::size_t j = 0; j < 7; ++j) {
+      EXPECT_FLOAT_EQ(arr(i, j), static_cast<float>(arr[i][j]));
+    }
+  }
+}
+
+TEST(OperatorCall, Rank1MatchesSubscript) {
+  NDArray<float, 1> arr({11});
+  for (std::size_t i = 0; i < 11; ++i) {
+    arr[i] = static_cast<float>(i * 13 + 2);
+  }
+  for (std::size_t i = 0; i < 11; ++i) {
+    EXPECT_FLOAT_EQ(arr(i), static_cast<float>(arr[i]));
+  }
+}
+
+TEST(OperatorCall, Rank3MatchesSubscript) {
+  NDArray<float, 3> arr({2, 3, 4});
+  for (std::size_t i = 0; i < 2; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      for (std::size_t k = 0; k < 4; ++k) {
+        arr[i][j][k] = static_cast<float>(i * 100 + j * 10 + k);
+      }
+    }
+  }
+  for (std::size_t i = 0; i < 2; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      for (std::size_t k = 0; k < 4; ++k) {
+        EXPECT_FLOAT_EQ(arr(i, j, k), static_cast<float>(arr[i][j][k]));
+      }
+    }
+  }
+}
+
+TEST(IsContiguous, ContigInstantiationIsContiguous) {
+  NDArray<float, 2> arr({16, 8});
+  EXPECT_TRUE(arr.isContiguous());
+}
+
+TEST(IsContiguous, EmptyIsTriviallyContiguous) {
+  NDArray<float, 2> arr({0, 64});
+  EXPECT_TRUE(arr.isContiguous());
+}
+
+// Type-level contract: operator[] exists on Contig, is ill-formed on MaybeStrided.
+// Misuse is a build error, not a runtime trap.
+template <class A>
+concept has_subscript_chain = requires(A &arr) { arr[std::size_t{0}]; };
+
+static_assert(has_subscript_chain<NDArray<float, 2, Layout::Contig>>,
+              "operator[] must be available on Contig arrays");
+static_assert(!has_subscript_chain<NDArray<float, 2, Layout::MaybeStrided>>,
+              "operator[] must be ill-formed on MaybeStrided arrays");
+static_assert(has_subscript_chain<NDArray<double, 3, Layout::Contig>>,
+              "operator[] must be available on Contig arrays of any rank");
+static_assert(!has_subscript_chain<NDArray<double, 3, Layout::MaybeStrided>>,
+              "operator[] must be ill-formed on MaybeStrided arrays of any rank");
