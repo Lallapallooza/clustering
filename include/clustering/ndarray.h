@@ -440,6 +440,14 @@ public:
   }
 
   /**
+   * @brief Reports whether writes through @c operator(), @c Accessor, or @c flatIndex are allowed.
+   *
+   * Owned arrays are always mutable. Borrowed arrays carry the flag supplied at borrow time:
+   * @c borrow(const T*, ...) flips it off, @c borrow(T*, ...) leaves it on.
+   */
+  [[nodiscard]] inline bool isMutable() const noexcept { return m_mutable; }
+
+  /**
    * @brief Provides read-only access to the internal data array.
    *
    * @return Constant pointer to the data array.
