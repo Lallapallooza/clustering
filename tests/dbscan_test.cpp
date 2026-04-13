@@ -2,6 +2,9 @@
 
 #include "clustering/dbscan.h"
 
+using clustering::DBSCAN;
+using clustering::NDArray;
+
 TEST(DBSCAN, FindsTwoWellSeparatedClusters) {
   NDArray<float, 2> points({10, 2});
   for (std::size_t i = 0; i < 5; ++i) {

@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <type_traits>
 
+namespace clustering {
+
 template <typename T> class LinearAllocator {
   static_assert(std::is_trivially_destructible<T>::value, "T must be trivially destructible");
 
@@ -37,3 +39,5 @@ private:
   char *memory;
   char *next;
 };
+
+} // namespace clustering

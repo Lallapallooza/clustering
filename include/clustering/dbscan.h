@@ -14,6 +14,8 @@
 #define CLUSTERING_UNLIKELY(x) (x)
 #endif
 
+namespace clustering {
+
 /**
  * @brief Implements the DBSCAN clustering algorithm.
  *
@@ -209,3 +211,5 @@ private:
     return point;
   }
 };
+
+} // namespace clustering

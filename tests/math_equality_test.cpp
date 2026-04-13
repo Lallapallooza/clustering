@@ -5,6 +5,9 @@
 #include "clustering/math/equality.h"
 #include "clustering/ndarray.h"
 
+using clustering::Layout;
+using clustering::NDArray;
+
 TEST(MathArrayEqual, ShapeMismatchReturnsFalse) {
   NDArray<float, 2> a({2, 3});
   NDArray<float, 2> b({3, 2});

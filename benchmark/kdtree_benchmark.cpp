@@ -6,6 +6,12 @@
 #include "clustering/kdtree.h"
 #include "clustering/memory/new_alloc.h"
 
+using clustering::KDTree;
+using clustering::KDTreeDistanceType;
+using clustering::KDTreeNode;
+using clustering::NDArray;
+using clustering::NewAllocator;
+
 template <class T, float Min = -1.0f, float Max = 1.0f>
 static NDArray<T, 2> generateRandomPoints(size_t num_points, size_t dims) {
   std::random_device rd;

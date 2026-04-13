@@ -8,6 +8,10 @@
 #include "clustering/math/detail/matrix_desc.h"
 #include "clustering/ndarray.h"
 
+using clustering::Layout;
+using clustering::NDArray;
+using clustering::Range;
+
 namespace {
 
 // A tiny microkernel stub: reads a single element through strides exactly as a real inner loop

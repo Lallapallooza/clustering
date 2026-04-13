@@ -12,6 +12,8 @@
 #include <immintrin.h>
 #endif
 
+namespace clustering {
+
 /**
  * @brief Represents a node in a KDTree.
  *
@@ -391,3 +393,5 @@ private:
   const NDArray<T, 2> &m_points;      ///< NDArray of points in the KDTree
   std::vector<std::size_t> m_indices; ///< Shared index array for build
 };
+
+} // namespace clustering

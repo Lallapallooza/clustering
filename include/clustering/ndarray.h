@@ -84,7 +84,6 @@ bool operator!=(const AlignedAllocator<T, Align> &, const AlignedAllocator<U, Al
 }
 
 } // namespace detail
-} // namespace clustering
 
 /**
  * @brief Tag indicating whether an NDArray owns its buffer or borrows memory from elsewhere.
@@ -1047,3 +1046,5 @@ template <class T, std::size_t NA, Layout LA, std::size_t NB, Layout LB>
 bool sameStorage(const NDArray<T, NA, LA> &a, const NDArray<T, NB, LB> &b) noexcept {
   return a.baseData() == b.baseData();
 }
+
+} // namespace clustering

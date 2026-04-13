@@ -6,6 +6,11 @@
 
 #include "clustering/dbscan.h"
 
+using clustering::DBSCAN;
+using clustering::KDTree;
+using clustering::KDTreeDistanceType;
+using clustering::NDArray;
+
 NDArray<float, 2> readCSV(const std::string &filename, size_t num_points, size_t dimensions) {
   std::ifstream file(filename);
   if (!file.is_open()) {
