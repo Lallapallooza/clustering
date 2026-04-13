@@ -55,7 +55,7 @@ if(CLUSTERING_USE_AVX2)
     if(NOT CLUSTERING_COMPILER_SUPPORTS_AVX2)
         message(FATAL_ERROR "AVX2 not supported but requested")
     endif()
-    target_compile_options(clustering_header_lib INTERFACE -mavx2)
+    target_compile_options(clustering_header_lib INTERFACE -mavx2 -mfma)
     target_compile_definitions(
         clustering_header_lib
         INTERFACE CLUSTERING_USE_AVX2

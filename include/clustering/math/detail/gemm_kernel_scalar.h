@@ -35,21 +35,24 @@ template <> inline constexpr std::size_t kKernelNr<double> = 6;
  * Buffer layouts (shared with the AVX2 kernel variants that consume the same packed panels):
  *   - @p ap holds a @c kc x @c Mr panel of A, with element @c (r, k) at @c ap[k*Mr + r].
  *   - @p bp holds a @c kc x @c Nr panel of B, with element @c (k, c) at @c bp[k*Nr + c].
- *   - @p tile is a row-major @c Mr x @c Nr scratch buffer; element @c (r, c) at @c tile[r*Nr+c].
+ *   - @p tile is a column-major @c Mr x @c Nr scratch buffer; element @c (r, c) lands at
+ *     @c tile[c*Mr+r]. Column-major tile lets the AVX2 kernel epilogue @c _mm256_store_ps
+ *     each 8-row column as one contiguous 32-byte store; scalar and AVX2 kernels share this
+ *     layout so the outer loop's pre-load and writeback indexing is uniform across ISAs.
  *     The outer loop owns @p tile (32-byte aligned, on its stack) and is responsible for
  *     pre-loading it with @c beta-scaled @c C contributions when @c Beta == @c kGeneral.
  *     Cells outside the valid @c (mcTail x ncTail) sub-rectangle must be pre-zeroed by the
  *     outer loop so the kernel's writes to padded cells are harmless.
  *
  * Epilogue:
- *   - @c kZero:    @c tile[r*Nr+c] = alpha * acc[r][c] (kernel never reads @p tile).
- *   - @c kGeneral: @c tile[r*Nr+c] = alpha * acc[r][c] + beta * tile[r*Nr+c].
+ *   - @c kZero:    @c tile[c*Mr+r] = alpha * acc[r][c] (kernel never reads @p tile).
+ *   - @c kGeneral: @c tile[c*Mr+r] = alpha * acc[r][c] + beta * tile[c*Mr+r].
  *
  * @tparam T    Element type; @c float or @c double.
  * @tparam Beta Compile-time BetaKind selecting the epilogue.
  * @param ap    Packed A panel.
  * @param bp    Packed B panel.
- * @param tile  Mr x Nr scratch tile (row-major); read on @c kGeneral, written on both kinds.
+ * @param tile  Mr x Nr scratch tile (column-major); read on @c kGeneral, written on both kinds.
  * @param kc    K-dimension of the panels (number of inner products to accumulate).
  * @param alpha Scalar multiplier for the @c A*B product.
  * @param beta  Scalar multiplier for the prior tile content; ignored on @c kZero.
@@ -82,16 +85,16 @@ void gemmKernelMrNrScalar(const T *ap, const T *bp, T *tile, std::size_t kc, T a
   }
 
   if constexpr (Beta == BetaKind::kZero) {
-    for (std::size_t r = 0; r < kMr; ++r) {
-      for (std::size_t c = 0; c < kNr; ++c) {
-        tLocal[(r * kNr) + c] = alpha * acc[r][c];
+    for (std::size_t c = 0; c < kNr; ++c) {
+      for (std::size_t r = 0; r < kMr; ++r) {
+        tLocal[(c * kMr) + r] = alpha * acc[r][c];
       }
     }
   } else {
-    for (std::size_t r = 0; r < kMr; ++r) {
-      for (std::size_t c = 0; c < kNr; ++c) {
-        const T prior = tLocal[(r * kNr) + c];
-        tLocal[(r * kNr) + c] = (alpha * acc[r][c]) + (beta * prior);
+    for (std::size_t c = 0; c < kNr; ++c) {
+      for (std::size_t r = 0; r < kMr; ++r) {
+        const T prior = tLocal[(c * kMr) + r];
+        tLocal[(c * kMr) + r] = (alpha * acc[r][c]) + (beta * prior);
       }
     }
   }
