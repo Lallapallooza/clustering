@@ -6,6 +6,7 @@ add_executable(
     matrix_desc_test.cpp
     math_equality_test.cpp
     math_thread_test.cpp
+    gemm_scalar_test.cpp
 )
 target_link_libraries(
     clustering_tests
