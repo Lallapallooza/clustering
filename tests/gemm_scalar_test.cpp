@@ -64,11 +64,13 @@ void naiveGemmStrided(const NDArray<T, 2> &A, const NDArray<T, 2, LB> &B, NDArra
 
 // Thin wrapper that materializes the per-call Bp/Ap arenas and dispatches to the detail API.
 // Tests drive the outer loop directly; the public gemm() entry is not yet exposed.
+// Arenas use AlignedAllocator<T, 32> so AVX2 kernels (which consume ap/bp via _mm256_load_ps)
+// see 32-byte-aligned source pointers.
 template <class T, Layout LA, Layout LB>
 void runGemm(const NDArray<T, 2, LA> &A, const NDArray<T, 2, LB> &B, NDArray<T, 2> &C, T alpha,
              T beta) {
-  std::vector<T> apArena(kMc<T> * kKc<T>, T{0});
-  std::vector<T> bpArena(kKc<T> * kNc<T>, T{0});
+  std::vector<T, clustering::detail::AlignedAllocator<T, 32>> apArena(kMc<T> * kKc<T>, T{0});
+  std::vector<T, clustering::detail::AlignedAllocator<T, 32>> bpArena(kKc<T> * kNc<T>, T{0});
   auto Ad = describeMatrix(A);
   auto Bd = describeMatrix(B);
   auto Cd = describeMatrixMut(C);

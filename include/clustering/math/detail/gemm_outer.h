@@ -3,11 +3,16 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <type_traits>
 
 #include "clustering/math/detail/gemm_kernel_scalar.h"
 #include "clustering/math/detail/gemm_pack.h"
 #include "clustering/math/detail/matrix_desc.h"
 #include "clustering/math/thread.h"
+
+#ifdef CLUSTERING_USE_AVX2
+#include "clustering/math/detail/gemm_kernel_avx2_f32.h"
+#endif
 
 namespace clustering::math::detail {
 
@@ -79,8 +84,16 @@ void gemmRunReference(::clustering::detail::MatrixDescC<T> Ad,
     return;
   }
 
-  const auto kernelZero = &gemmKernelMrNrScalar<T, BetaKind::kZero>;
-  const auto kernelGeneral = &gemmKernelMrNrScalar<T, BetaKind::kGeneral>;
+  using KernelFn = void (*)(const T *, const T *, T *, std::size_t, T, T) noexcept;
+  KernelFn kernelZero = &gemmKernelMrNrScalar<T, BetaKind::kZero>;
+  KernelFn kernelGeneral = &gemmKernelMrNrScalar<T, BetaKind::kGeneral>;
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float>) {
+    kernelZero = &gemmKernel8x6Avx2F32<BetaKind::kZero>;
+    kernelGeneral = &gemmKernel8x6Avx2F32<BetaKind::kGeneral>;
+  }
+  // f64 AVX2 kernel plugs in here when the 4x6 variant lands.
+#endif
 
   // Goto order: jc (Nc) outermost, then pc (Kc), then ic (Mc); pack-A inside the pc loop and
   // pack-B once per jc. The first Kc-pass in each jc/ic uses the caller's beta; subsequent
@@ -117,14 +130,14 @@ void gemmRunReference(::clustering::detail::MatrixDescC<T> Ad,
             // are arithmetic noise that the writeback discards. For kZero the kernel writes
             // every cell unconditionally; tile contents pre-call are dead.
             if (effBeta != T{0}) {
-              for (std::size_t r = 0; r < kMr; ++r) {
-                for (std::size_t c = 0; c < kNr; ++c) {
+              for (std::size_t c = 0; c < kNr; ++c) {
+                for (std::size_t r = 0; r < kMr; ++r) {
                   if (r < mTail && c < nTail) {
                     const T &cell = cBase[(static_cast<std::ptrdiff_t>(ic + ir + r) * cRowStride) +
                                           (static_cast<std::ptrdiff_t>(jc + jr + c) * cColStride)];
-                    tile[(r * kNr) + c] = cell;
+                    tile[(c * kMr) + r] = cell;
                   } else {
-                    tile[(r * kNr) + c] = T{0};
+                    tile[(c * kMr) + r] = T{0};
                   }
                 }
               }
@@ -132,11 +145,11 @@ void gemmRunReference(::clustering::detail::MatrixDescC<T> Ad,
 
             kernel(apPanel, bpPanel, tile.data(), kc, alpha, effBeta);
 
-            for (std::size_t r = 0; r < mTail; ++r) {
-              for (std::size_t c = 0; c < nTail; ++c) {
+            for (std::size_t c = 0; c < nTail; ++c) {
+              for (std::size_t r = 0; r < mTail; ++r) {
                 T &cell = cBase[(static_cast<std::ptrdiff_t>(ic + ir + r) * cRowStride) +
                                 (static_cast<std::ptrdiff_t>(jc + jr + c) * cColStride)];
-                cell = tile[(r * kNr) + c];
+                cell = tile[(c * kMr) + r];
               }
             }
           }
