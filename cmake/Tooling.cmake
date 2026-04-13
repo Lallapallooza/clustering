@@ -42,6 +42,7 @@ if(CLUSTERING_IS_TOP_LEVEL)
             "${CMAKE_SOURCE_DIR}/include/clustering/*.h"
             "${CMAKE_SOURCE_DIR}/app/*.cpp"
             "${CMAKE_SOURCE_DIR}/benchmark/*.cpp"
+            "${CMAKE_SOURCE_DIR}/tests/*.cpp"
             "${CMAKE_SOURCE_DIR}/python/src/*.cpp"
         )
 

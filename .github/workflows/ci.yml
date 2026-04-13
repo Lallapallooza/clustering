@@ -28,6 +28,8 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-13 -DCLUSTERING_ENABLE_CLANG_TIDY=OFF
       - name: Build
         run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
 
   tidy:
     runs-on: ubuntu-24.04

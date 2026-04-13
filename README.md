@@ -92,12 +92,19 @@ cmake --build build -j
 ./build/kdtree_benchmark
 ```
 
-Useful flags:
+Run tests:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+Useful flags (all default ON when this is the top-level project, OFF when consumed as a subdirectory):
 
 - `-DCLUSTERING_BUILD_BENCHMARK=OFF` skip the Google Benchmark target.
+- `-DCLUSTERING_BUILD_TESTS=OFF` skip the GoogleTest target.
+- `-DCLUSTERING_ENABLE_CLANG_TIDY=OFF` skip clang-tidy.
 - `-DCLUSTERING_USE_AVX2=OFF` disable AVX2 (auto-detected by default).
 - `-DCLUSTERING_BUILD_WITH_SANITIZER=ON` build with ThreadSanitizer.
-- `-DCLUSTERING_ENABLE_CLANG_TIDY=OFF` skip clang-tidy (on by default when this is the top-level project).
 
 ### Pre-commit
 
