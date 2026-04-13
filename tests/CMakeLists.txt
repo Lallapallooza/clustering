@@ -9,6 +9,9 @@ add_executable(
     gemm_scalar_test.cpp
     gemm_avx2_f32_test.cpp
     gemm_plan_test.cpp
+    gemm_public_test.cpp
+    gemm_mutability_death_test.cpp
+    gemm_backend_dispatch_test.cpp
 )
 target_link_libraries(
     clustering_tests
