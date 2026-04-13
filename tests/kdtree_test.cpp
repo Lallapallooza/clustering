@@ -2,6 +2,9 @@
 
 #include "clustering/kdtree.h"
 
+using clustering::KDTree;
+using clustering::NDArray;
+
 TEST(KDTree, RadiusQueryFindsNearbyPoints) {
   NDArray<float, 2> points({4, 2});
   points[0][0] = 0.0f;

@@ -8,6 +8,13 @@
 
 #include "clustering/ndarray.h"
 
+using clustering::all;
+using clustering::Layout;
+using clustering::NDArray;
+using clustering::NDArrayStorage;
+using clustering::Range;
+using clustering::sameStorage;
+
 // is_always_equal must propagate through std::allocator_traits so std::vector picks the
 // pointer-stealing move path. Compile failure here is the contradiction signal.
 static_assert(

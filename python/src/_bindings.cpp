@@ -14,6 +14,8 @@
 #include "ndarray_adapter.h"
 
 namespace nb = nanobind;
+using clustering::DBSCAN;
+using clustering::NDArray;
 using clustering::python::borrowFromNumpyContig;
 using clustering::python::borrowFromNumpyContigReadOnly;
 using clustering::python::borrowFromNumpyStrided;

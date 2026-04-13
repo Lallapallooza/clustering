@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <type_traits>
 
+namespace clustering {
+
 template <typename T> class NewAllocator {
 public:
   NewAllocator(size_t size) {}
@@ -20,3 +22,5 @@ public:
 
   bool isDeallocSupported() { return true; }
 };
+
+} // namespace clustering
