@@ -1,4 +1,9 @@
-add_executable(clustering_tests kdtree_test.cpp dbscan_test.cpp)
+add_executable(
+    clustering_tests
+    kdtree_test.cpp
+    dbscan_test.cpp
+    ndarray_test.cpp
+)
 target_link_libraries(
     clustering_tests
     PRIVATE clustering_header_lib GTest::gtest_main

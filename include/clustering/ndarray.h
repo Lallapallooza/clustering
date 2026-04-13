@@ -1,10 +1,81 @@
 #pragma once
 
+#include <array>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <initializer_list>
+#include <memory>
+#include <new>
 #include <sstream>
+#include <type_traits>
 #include <vector>
+
+namespace clustering {
+namespace detail {
+
+/**
+ * @brief Stateless allocator that returns @p Align -byte aligned blocks from std::aligned_alloc.
+ *
+ * @tparam T Element type.
+ * @tparam Align Required alignment in bytes.
+ */
+template <class T, std::size_t Align> class AlignedAllocator : public std::allocator<T> {
+public:
+  using value_type = T;
+  using size_type = std::size_t;
+  using pointer = T *;
+  using const_pointer = const T *;
+
+  // is_always_equal + POCMA/POCCA/POCS = true_type lets std::vector pointer-steal on move and
+  // perform a fresh allocation on copy-assign without per-instance allocator state checks.
+  using is_always_equal = std::true_type;
+  using propagate_on_container_move_assignment = std::true_type;
+  using propagate_on_container_copy_assignment = std::true_type;
+  using propagate_on_container_swap = std::true_type;
+
+  template <typename U> struct rebind {
+    using other = AlignedAllocator<U, Align>;
+  };
+
+  AlignedAllocator() noexcept = default;
+
+  template <typename U> AlignedAllocator(const AlignedAllocator<U, Align> & /*unused*/) noexcept {}
+
+  pointer allocate(size_type n) {
+    // std::aligned_alloc(Align, 0) is implementation-defined; bypass it explicitly.
+    if (n == 0) {
+      return nullptr;
+    }
+    size_type bytes = n * sizeof(T);
+    size_type aligned_bytes = (bytes + Align - 1) / Align * Align;
+    if (auto *ptr = static_cast<pointer>(std::aligned_alloc(Align, aligned_bytes))) {
+      return ptr;
+    }
+    throw std::bad_alloc();
+  }
+
+  void deallocate(pointer ptr, size_type /*n*/) noexcept { std::free(ptr); }
+};
+
+template <class T, class U, std::size_t Align>
+bool operator==(const AlignedAllocator<T, Align> &, const AlignedAllocator<U, Align> &) noexcept {
+  return true;
+}
+
+template <class T, class U, std::size_t Align>
+bool operator!=(const AlignedAllocator<T, Align> &, const AlignedAllocator<U, Align> &) noexcept {
+  return false;
+}
+
+} // namespace detail
+} // namespace clustering
+
+/**
+ * @brief Tag indicating whether an NDArray owns its buffer or borrows memory from elsewhere.
+ */
+enum class NDArrayStorage : std::uint8_t { Owned, Borrowed };
 
 /**
  * @brief Represents a multidimensional array (NDArray) of a fixed number of dimensions N and
@@ -18,6 +89,10 @@
  * @tparam N The number of dimensions of the NDArray.
  */
 template <class T, std::size_t N> class NDArray {
+  static_assert(N >= 1, "NDArray rank must be >= 1");
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "NDArray element type must be float or double");
+
 public:
   /**
    * @brief Inner class providing base functionality for element access in NDArray.
@@ -135,14 +210,61 @@ public:
    *
    * @param dims Initializer list specifying the dimensions of the NDArray.
    */
-  NDArray(std::initializer_list<std::size_t> dims) : m_dims(dims) {
+  NDArray(std::initializer_list<std::size_t> dims)
+      : m_data(nullptr), m_offset(0), m_storage(NDArrayStorage::Owned), m_mutable(true) {
     assert(dims.size() == N);
-    size_t size = 1;
-
-    for (auto dim : dims) {
-      size *= dim;
+    std::size_t i = 0;
+    std::size_t size = 1;
+    for (auto d : dims) {
+      m_shape[i++] = d;
+      size *= d;
     }
-    m_data.resize(size);
+    m_strides = computeContiguousStrides(m_shape);
+    m_vec.resize(size);
+    m_data = m_vec.data();
+  }
+
+  NDArray(const NDArray &other)
+      : m_vec(other.m_vec), m_shape(other.m_shape), m_strides(other.m_strides),
+        m_offset(other.m_offset), m_storage(other.m_storage), m_mutable(other.m_mutable) {
+    m_data = m_vec.data();
+  }
+
+  NDArray(NDArray &&other) noexcept
+      : m_vec(std::move(other.m_vec)), m_shape(other.m_shape), m_strides(other.m_strides),
+        m_offset(other.m_offset), m_storage(other.m_storage), m_mutable(other.m_mutable) {
+    // m_data must be re-seated against this->m_vec since the move stole its buffer.
+    m_data = m_vec.data();
+    other.m_data = nullptr;
+  }
+
+  NDArray &operator=(const NDArray &other) {
+    if (this == &other) {
+      return *this;
+    }
+    m_vec = other.m_vec;
+    m_shape = other.m_shape;
+    m_strides = other.m_strides;
+    m_offset = other.m_offset;
+    m_storage = other.m_storage;
+    m_mutable = other.m_mutable;
+    m_data = m_vec.data();
+    return *this;
+  }
+
+  NDArray &operator=(NDArray &&other) noexcept {
+    if (this == &other) {
+      return *this;
+    }
+    m_vec = std::move(other.m_vec);
+    m_shape = other.m_shape;
+    m_strides = other.m_strides;
+    m_offset = other.m_offset;
+    m_storage = other.m_storage;
+    m_mutable = other.m_mutable;
+    m_data = m_vec.data();
+    other.m_data = nullptr;
+    return *this;
   }
 
   /**
@@ -152,7 +274,7 @@ public:
    * @return An Accessor to the specified index in the first dimension.
    */
   inline Accessor operator[](std::size_t index) noexcept {
-    assert(index < m_dims[0]);
+    assert(index < m_shape[0]);
     return Accessor(*this, index, 0);
   }
 
@@ -163,7 +285,7 @@ public:
    * @return A ConstAccessor to the specified index in the first dimension.
    */
   inline const ConstAccessor operator[](std::size_t index) const noexcept {
-    assert(index < m_dims[0]);
+    assert(index < m_shape[0]);
     return ConstAccessor(*this, index, 0);
   }
 
@@ -189,21 +311,31 @@ public:
    * @param index Index of the dimension.
    * @return Size of the specified dimension as a size_t.
    */
-  inline const size_t dim(std::size_t index) const noexcept { return m_dims[index]; }
+  inline const size_t dim(std::size_t index) const noexcept { return m_shape[index]; }
 
   /**
    * @brief Provides read-only access to the internal data array.
    *
    * @return Constant pointer to the data array.
    */
-  inline const T *data() const noexcept { return m_data.data(); }
+  inline const T *data() const noexcept { return m_data; }
 
   /**
    * @brief Provides read-write access to the internal data array.
    *
    * @return Pointer to the data array.
    */
-  inline T *data() noexcept { return m_data.data(); }
+  inline T *data() noexcept { return m_data; }
+
+  /**
+   * @brief Tests whether @c data() is aligned to @p A bytes.
+   *
+   * @tparam A Alignment to test in bytes.
+   * @return True when @c data() is a null pointer or an @p A -byte boundary.
+   */
+  template <std::size_t A> bool isAligned() const noexcept {
+    return (reinterpret_cast<std::uintptr_t>(m_data) % A) == 0;
+  }
 
   /**
    * @brief Returns a formatted string representing the contents of the NDArray.
@@ -216,47 +348,35 @@ public:
   std::string debugDump() const noexcept {
     std::stringstream ss;
     ss << "NDarray<" << typeid(T).name() << ", " << N << ">(";
-    for (auto dim : m_dims) {
-      ss << dim << ", ";
+    for (auto d : m_shape) {
+      ss << d << ", ";
     }
     ss << ")\n";
     ss << "data: [";
-    for (auto value : m_data) {
+    for (auto value : m_vec) {
       ss << value << ", ";
     }
     ss << "]\n";
-    ss << "size: " << m_data.size() << "\n";
+    ss << "size: " << m_vec.size() << "\n";
     return ss.str();
   }
 
 private:
-  template <std::size_t Align = alignof(T)> class AlignedAllocator : public std::allocator<T> {
-  public:
-    using size_type = size_t;
-    using pointer = T *;
-    using const_pointer = const T *;
-
-    template <typename U> struct rebind {
-      using other = typename NDArray<U, N>::template AlignedAllocator<Align>;
-    };
-
-    AlignedAllocator() noexcept {}
-
-    template <typename U>
-    AlignedAllocator(const typename NDArray<U, N>::template AlignedAllocator<Align> &) noexcept {}
-
-    pointer allocate(size_type n, const_pointer hint = 0) {
-      size_type bytes = n * sizeof(T);
-      size_type aligned_bytes = (bytes + Align - 1) / Align * Align;
-      if (auto p = static_cast<pointer>(aligned_alloc(Align, aligned_bytes)))
-        return p;
-      throw std::bad_alloc();
+  static std::array<std::ptrdiff_t, N>
+  computeContiguousStrides(const std::array<std::size_t, N> &shape) {
+    std::array<std::ptrdiff_t, N> s{};
+    s[N - 1] = 1;
+    for (std::size_t k = N - 1; k > 0; --k) {
+      s[k - 1] = s[k] * static_cast<std::ptrdiff_t>(shape[k]);
     }
+    return s;
+  }
 
-    void deallocate(pointer p, size_type n) noexcept { free(p); }
-  };
-
-private:
-  std::vector<T, AlignedAllocator<32>> m_data; ///< Internal storage of the NDArray elements.
-  std::vector<size_t> m_dims;                  ///< Vector storing the dimensions of the NDArray.
+  T *m_data;
+  std::vector<T, clustering::detail::AlignedAllocator<T, 32>> m_vec;
+  std::array<std::size_t, N> m_shape;
+  std::array<std::ptrdiff_t, N> m_strides;
+  std::ptrdiff_t m_offset;
+  NDArrayStorage m_storage;
+  bool m_mutable;
 };
