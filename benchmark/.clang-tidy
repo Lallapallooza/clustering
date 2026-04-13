@@ -1,0 +1,8 @@
+---
+# The Google Benchmark `for (auto _ : state)` idiom binds `_` solely to keep the
+# state alive across iterations; the analyzer reads the unused binding as a dead
+# store. Scoped disable here so the rest of the project keeps the check active.
+InheritParentConfig: true
+
+Checks: >
+  -clang-analyzer-deadcode.DeadStores
