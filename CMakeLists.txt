@@ -34,6 +34,7 @@ target_link_libraries(clustering_header_lib INTERFACE bshoshany_thread_pool)
 
 add_executable(clustering_demo app/main.cpp)
 target_link_libraries(clustering_demo PRIVATE clustering_header_lib)
+clustering_enable_tidy(clustering_demo)
 
 if(CLUSTERING_USE_AVX2)
     if(NOT CLUSTERING_COMPILER_SUPPORTS_AVX2)
@@ -69,4 +70,5 @@ if(CLUSTERING_BUILD_BENCHMARK)
         benchmark::benchmark
         clustering_header_lib
     )
+    clustering_enable_tidy(kdtree_benchmark)
 endif()
