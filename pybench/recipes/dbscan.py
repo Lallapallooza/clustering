@@ -6,7 +6,9 @@ from _clustering import dbscan as cpp_dbscan
 from pybench.recipe import DatasetSpec, Recipe
 
 
-def _ours(data: np.ndarray, *, eps: float, min_samples: int, n_jobs: int = -1) -> np.ndarray:
+def _ours(
+    data: np.ndarray, *, eps: float, min_samples: int, n_jobs: int = -1
+) -> np.ndarray:
     return cpp_dbscan(data, eps=eps, min_pts=min_samples, n_jobs=n_jobs)
 
 

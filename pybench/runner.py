@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import itertools
 import json
 import multiprocessing
@@ -33,7 +32,11 @@ def make_data(n_samples: int, spec: DatasetSpec) -> np.ndarray:
 
 def make_sklearn_reference(algo_name: str) -> Callable:
     """Auto-construct a sklearn reference callable by algorithm name."""
-    class_name = algo_name.upper() if algo_name.upper() in ("DBSCAN", "OPTICS") else algo_name.capitalize()
+    class_name = (
+        algo_name.upper()
+        if algo_name.upper() in ("DBSCAN", "OPTICS")
+        else algo_name.capitalize()
+    )
     cls = getattr(sklearn.cluster, class_name, None)
     if cls is None:
         cls = getattr(sklearn.cluster, algo_name.upper(), None)
@@ -68,13 +71,16 @@ def expand_param_grid(recipe: Recipe) -> list[dict[str, Any]]:
 def _measure_peak_rss_worker(fn, data, params, pipe):
     """Worker: run fn in a forked process, report peak RSS via pipe."""
     import resource
+
     fn(data, **params)
     peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     pipe.send(peak_kb)
     pipe.close()
 
 
-def _measure_peak_rss_mb(fn: Callable, data: np.ndarray, params: dict[str, Any]) -> float:
+def _measure_peak_rss_mb(
+    fn: Callable, data: np.ndarray, params: dict[str, Any]
+) -> float:
     """Fork a child process, run fn, return its peak RSS in MB.
 
     Forked child inherits the Python baseline but ru_maxrss is reset to
@@ -96,8 +102,12 @@ def _measure_peak_rss_mb(fn: Callable, data: np.ndarray, params: dict[str, Any])
     return round(peak_kb / 1024, 2)
 
 
-def run_one(recipe: Recipe, size: int, dims: int | None = None,
-            params: dict[str, Any] | None = None) -> RunResult:
+def run_one(
+    recipe: Recipe,
+    size: int,
+    dims: int | None = None,
+    params: dict[str, Any] | None = None,
+) -> RunResult:
     """Run both implementations n_runs times, return median timing + ARI."""
     from dataclasses import replace
 

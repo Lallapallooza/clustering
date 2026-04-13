@@ -1,8 +1,9 @@
-#include <iostream>
-#include <fstream>
-#include <sstream>
 #include <chrono>
+#include <fstream>
+#include <iostream>
+#include <sstream>
 #include <vector>
+
 #include "clustering/dbscan.h"
 
 NDArray<float, 2> readCSV(const std::string &filename, size_t num_points, size_t dimensions) {
@@ -12,13 +13,13 @@ NDArray<float, 2> readCSV(const std::string &filename, size_t num_points, size_t
   }
 
   NDArray<float, 2> data({num_points, dimensions});
-  std::string       line;
-  size_t            pointIndex = 0;
+  std::string line;
+  size_t pointIndex = 0;
 
   while (std::getline(file, line) && pointIndex < num_points) {
     std::stringstream lineStream(line);
-    std::string       cell;
-    size_t            dimIndex = 0;
+    std::string cell;
+    size_t dimIndex = 0;
 
     while (std::getline(lineStream, cell, ',') && dimIndex < dimensions) {
       data[pointIndex][dimIndex] = std::stof(cell);
@@ -32,22 +33,23 @@ NDArray<float, 2> readCSV(const std::string &filename, size_t num_points, size_t
 
 int main(int argc, char *argv[]) {
   if (argc < 8) {
-    std::cerr << "Usage: " << argv[0] << " <CSV file> "
-                                         "<numPoints> "
-                                         "<dimensions> "
-                                         "<eps> "
-                                         "<minPts> "
-                                         "<njobs> "
-                                         "<output file>\n";
+    std::cerr << "Usage: " << argv[0]
+              << " <CSV file> "
+                 "<numPoints> "
+                 "<dimensions> "
+                 "<eps> "
+                 "<minPts> "
+                 "<njobs> "
+                 "<output file>\n";
     return 1;
   }
 
-  std::string csvFile    = argv[1];
-  size_t      numPoints  = std::stoul(argv[2]);
-  size_t      dimensions = std::stoul(argv[3]);
-  float       eps        = std::stof(argv[4]);
-  size_t      minPts     = std::stoul(argv[5]);
-  size_t      n_jobs     = std::stoul(argv[6]);
+  std::string csvFile = argv[1];
+  size_t numPoints = std::stoul(argv[2]);
+  size_t dimensions = std::stoul(argv[3]);
+  float eps = std::stof(argv[4]);
+  size_t minPts = std::stoul(argv[5]);
+  size_t n_jobs = std::stoul(argv[6]);
   std::string outputFile = argv[7];
 
   std::cout << "CSV File                : " << csvFile << std::endl;
@@ -76,8 +78,8 @@ int main(int argc, char *argv[]) {
   std::cout << "Elapsed = "
             << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count()
             << "us or "
-            << std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count()
-            << "ms" << std::endl;
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count() << "ms"
+            << std::endl;
 
   const auto &labels = dbscan.labels();
   std::cout << "labels size: " << labels.size() << std::endl;
@@ -89,7 +91,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  for (auto &i: labels) {
+  for (auto &i : labels) {
     out << i << std::endl;
   }
 

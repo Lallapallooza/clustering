@@ -1,0 +1,27 @@
+---
+# Only lint our own headers (not CPM-fetched deps).
+HeaderFilterRegex: 'include/clustering/[^/]+\.h$'
+
+Checks: >
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  readability-*,
+  portability-*,
+  misc-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -bugprone-unchecked-optional-access,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -readability-identifier-naming,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-named-parameter,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
+  -misc-include-cleaner
+
+WarningsAsErrors: ''
+
+FormatStyle: file
