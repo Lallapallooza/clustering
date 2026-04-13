@@ -9,18 +9,17 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(nanobind CONFIG REQUIRED)
 
-include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/CPM.cmake)
-
-CPMAddPackage(
-    NAME tsl
-    GITHUB_REPOSITORY Tessil/hopscotch-map
-    GIT_TAG v2.3.1
-)
+include(CheckCXXCompilerFlag)
+CHECK_CXX_COMPILER_FLAG("-mavx2" CLUSTERING_COMPILER_SUPPORTS_AVX2)
 
 nanobind_add_module(_clustering src/_bindings.cpp)
 
 target_include_directories(_clustering PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
-target_link_libraries(_clustering PRIVATE tsl::hopscotch_map)
 target_compile_features(_clustering PRIVATE cxx_std_20)
+
+if (CLUSTERING_COMPILER_SUPPORTS_AVX2)
+    target_compile_options(_clustering PRIVATE -mavx2)
+    target_compile_definitions(_clustering PRIVATE CLUSTERING_USE_AVX2)
+endif()
 
 install(TARGETS _clustering LIBRARY DESTINATION .)

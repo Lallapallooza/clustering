@@ -13,7 +13,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CLUSTERING_BUILD_BENCHMARK ON CACHE BOOL "Build benchmark")
-set(CLUSTERING_USE_AVX2 OFF CACHE BOOL "Use AVX2")
+CHECK_CXX_COMPILER_FLAG("-mavx2" CLUSTERING_COMPILER_SUPPORTS_AVX2)
+set(CLUSTERING_USE_AVX2 ${CLUSTERING_COMPILER_SUPPORTS_AVX2} CACHE BOOL "Use AVX2")
 set(CLUSTERING_BUILD_WITH_SANITIZER OFF CACHE BOOL "Build with sanitizer")
 
 add_library(clustering_header_lib INTERFACE)
@@ -23,12 +24,10 @@ add_executable(clustering_demo app/main.cpp)
 target_link_libraries(clustering_demo PRIVATE clustering_header_lib)
 
 if (CLUSTERING_USE_AVX2)
-    CHECK_CXX_COMPILER_FLAG("-mavx2" COMPILER_SUPPORTS_AVX2)
-    if(COMPILER_SUPPORTS_AVX2)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
-    else()
+    if(NOT CLUSTERING_COMPILER_SUPPORTS_AVX2)
         message(FATAL_ERROR "AVX2 not supported but requested")
     endif()
+    target_compile_options(clustering_header_lib INTERFACE -mavx2)
     target_compile_definitions(clustering_header_lib INTERFACE CLUSTERING_USE_AVX2)
 endif()
 
@@ -50,12 +49,6 @@ if (CLUSTERING_BUILD_BENCHMARK)
     target_link_libraries(kdtree_benchmark benchmark::benchmark clustering_header_lib)
 endif()
 
-CPMAddPackage(
-    NAME tsl
-    GITHUB_REPOSITORY Tessil/hopscotch-map
-    GIT_TAG v2.3.1
-)
-target_link_libraries(clustering_header_lib INTERFACE tsl::hopscotch_map)
 
 
 
