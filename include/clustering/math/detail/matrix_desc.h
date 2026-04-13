@@ -39,12 +39,13 @@ namespace matrix_desc_impl {
  * @brief Largest power of two in {64, 32, 16, 8, 4, 1} dividing @p addr.
  *
  * Returned value is the alignment granularity a microkernel can assume when issuing SIMD
- * loads through @c ptr. A null pointer reports 64 (the maximum considered) since there is
- * no misaligned access to worry about.
+ * loads through @c ptr. A null pointer reports 1 ("no alignment guarantee"): microkernels
+ * that branch on @c alignment >= 32 must either short-circuit on an empty @c MatrixDesc
+ * (@c rows*cols == 0) or treat the null case as scalar-path, never as aligned.
  */
 inline std::size_t largestPow2Alignment(std::uintptr_t addr) noexcept {
   if (addr == 0) {
-    return 64;
+    return 1;
   }
   for (std::size_t a :
        {std::size_t{64}, std::size_t{32}, std::size_t{16}, std::size_t{8}, std::size_t{4}}) {
