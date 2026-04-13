@@ -4,8 +4,10 @@
 #include <nanobind/ndarray.h>
 
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <utility>
 
 #include "clustering/ndarray.h"
@@ -87,7 +89,10 @@ borrowFromNumpyStridedReadOnly(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu
  * copy occurs: the numpy view points at the moved-into NDArray's buffer.
  *
  * Only @c Layout::Contig is supported because numpy's default constructor expects row-major
- * contiguous storage; pass a contiguous source or call @c .contiguous() first.
+ * contiguous storage; pass a contiguous source or call @c .contiguous() first. The NDArray
+ * must be @c Owned: the capsule deleter destroys the heap @c NDArray but cannot free the
+ * buffer underlying a @c Borrowed view, so passing a borrow would leave the numpy array
+ * pointing at storage whose lifetime the capsule cannot extend.
  *
  * @tparam T Element type, @c float or @c double.
  * @param arr Owned contiguous NDArray to surrender to Python.
@@ -95,11 +100,15 @@ borrowFromNumpyStridedReadOnly(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu
  */
 template <class T>
 inline nb::ndarray<nb::numpy, T, nb::ndim<2>> wrapAsNumpy(NDArray<T, 2, Layout::Contig> arr) {
-  auto *heap = new NDArray<T, 2, Layout::Contig>(std::move(arr));
+  assert(arr.isOwned() &&
+         "wrapAsNumpy requires an Owned NDArray; the capsule cannot extend a Borrowed buffer's "
+         "lifetime");
+  auto heap = std::make_unique<NDArray<T, 2, Layout::Contig>>(std::move(arr));
   nb::capsule owner(
-      heap, [](void *p) noexcept { delete static_cast<NDArray<T, 2, Layout::Contig> *>(p); });
-  std::size_t shape[2] = {heap->dim(0), heap->dim(1)};
-  return nb::ndarray<nb::numpy, T, nb::ndim<2>>(heap->data(), 2, shape, owner);
+      heap.get(), [](void *p) noexcept { delete static_cast<NDArray<T, 2, Layout::Contig> *>(p); });
+  auto *raw = heap.release();
+  std::size_t shape[2] = {raw->dim(0), raw->dim(1)};
+  return nb::ndarray<nb::numpy, T, nb::ndim<2>>(raw->data(), 2, shape, owner);
 }
 
 } // namespace clustering::python

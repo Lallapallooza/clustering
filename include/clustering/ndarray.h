@@ -256,7 +256,8 @@ public:
    */
   template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
   NDArray(std::initializer_list<std::size_t> dims)
-      : m_data(nullptr), m_offset(0), m_storage(NDArrayStorage::Owned), m_mutable(true) {
+      : m_data(nullptr), m_base(nullptr), m_offset(0), m_storage(NDArrayStorage::Owned),
+        m_mutable(true) {
     assert(dims.size() == N);
     std::size_t i = 0;
     std::size_t size = 1;
@@ -267,6 +268,7 @@ public:
     m_strides = computeContiguousStrides(m_shape);
     m_vec.resize(size);
     m_data = m_vec.data();
+    m_base = m_data;
   }
 
   /**
@@ -280,8 +282,8 @@ public:
    */
   template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
   explicit NDArray(std::array<std::size_t, N> shape)
-      : m_data(nullptr), m_shape(shape), m_offset(0), m_storage(NDArrayStorage::Owned),
-        m_mutable(true) {
+      : m_data(nullptr), m_base(nullptr), m_shape(shape), m_offset(0),
+        m_storage(NDArrayStorage::Owned), m_mutable(true) {
     std::size_t size = 1;
     for (std::size_t k = 0; k < N; ++k) {
       size *= m_shape[k];
@@ -289,6 +291,7 @@ public:
     m_strides = computeContiguousStrides(m_shape);
     m_vec.resize(size);
     m_data = m_vec.data();
+    m_base = m_data;
   }
 
   // Storage-aware special members: Owned arrays re-seat m_data against this->m_vec (the move
@@ -298,13 +301,16 @@ public:
       : m_vec(other.m_vec), m_shape(other.m_shape), m_strides(other.m_strides),
         m_offset(other.m_offset), m_storage(other.m_storage), m_mutable(other.m_mutable) {
     m_data = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_data;
+    m_base = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_base;
   }
 
   NDArray(NDArray &&other) noexcept
       : m_vec(std::move(other.m_vec)), m_shape(other.m_shape), m_strides(other.m_strides),
         m_offset(other.m_offset), m_storage(other.m_storage), m_mutable(other.m_mutable) {
     m_data = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_data;
+    m_base = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_base;
     other.m_data = nullptr;
+    other.m_base = nullptr;
   }
 
   NDArray &operator=(const NDArray &other) {
@@ -318,6 +324,7 @@ public:
     m_storage = other.m_storage;
     m_mutable = other.m_mutable;
     m_data = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_data;
+    m_base = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_base;
     return *this;
   }
 
@@ -332,15 +339,17 @@ public:
     m_storage = other.m_storage;
     m_mutable = other.m_mutable;
     m_data = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_data;
+    m_base = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_base;
     other.m_data = nullptr;
+    other.m_base = nullptr;
     return *this;
   }
 
 private:
-  NDArray(clustering::detail::BorrowedTag, T *data, std::array<std::size_t, N> shape,
-          std::array<std::ptrdiff_t, N> strides, std::ptrdiff_t offset, bool is_mutable) noexcept
-      : m_data(data), m_vec(), m_shape(shape), m_strides(strides), m_offset(offset),
-        m_storage(NDArrayStorage::Borrowed), m_mutable(is_mutable) {
+  NDArray(clustering::detail::BorrowedTag, T *data, T *base, std::array<std::size_t, N> shape,
+          std::array<std::ptrdiff_t, N> strides, std::ptrdiff_t offset, bool isMutable) noexcept
+      : m_data(data), m_base(base), m_vec(), m_shape(shape), m_strides(strides), m_offset(offset),
+        m_storage(NDArrayStorage::Borrowed), m_mutable(isMutable) {
     if constexpr (L == Layout::Contig) {
       assert(offset == 0 && strides == computeContiguousStrides(shape) &&
              "Contig NDArray requires contiguous strides and zero offset");
@@ -448,6 +457,14 @@ public:
   [[nodiscard]] inline bool isMutable() const noexcept { return m_mutable; }
 
   /**
+   * @brief Reports whether the array owns its underlying buffer.
+   *
+   * Owned arrays hold their storage in @c m_vec; Borrowed arrays reference an external buffer
+   * whose lifetime is the caller's responsibility.
+   */
+  [[nodiscard]] inline bool isOwned() const noexcept { return m_storage == NDArrayStorage::Owned; }
+
+  /**
    * @brief Provides read-only access to the internal data array.
    *
    * @return Constant pointer to the data array.
@@ -457,9 +474,24 @@ public:
   /**
    * @brief Provides read-write access to the internal data array.
    *
+   * Asserts in debug that the array is mutable: a raw pointer grabbed from a read-only borrow
+   * would otherwise corrupt the source buffer without tripping any other write-path guard.
+   *
    * @return Pointer to the data array.
    */
-  inline T *data() noexcept { return m_data; }
+  inline T *data() noexcept {
+    assert(m_mutable && "write to read-only borrow");
+    return m_data;
+  }
+
+  /**
+   * @brief Returns the original (non-advanced) base pointer for storage-identity comparisons.
+   *
+   * All view verbs propagate the source's base pointer unchanged; only a fresh owned allocation
+   * (or the @c clone / non-contiguous @c reshape paths) installs a new base. @c sameStorage
+   * uses this to decide whether two arrays share the underlying buffer.
+   */
+  [[nodiscard]] inline T *baseData() const noexcept { return m_base; }
 
   /**
    * @brief Tests whether @c data() is aligned to @p A bytes.
@@ -503,8 +535,8 @@ public:
    */
   template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
   static NDArray borrow(T *ptr, std::array<std::size_t, N> shape) noexcept {
-    return NDArray(clustering::detail::BorrowedTag{}, ptr, shape, computeContiguousStrides(shape),
-                   0, true);
+    return NDArray(clustering::detail::BorrowedTag{}, ptr, ptr, shape,
+                   computeContiguousStrides(shape), 0, true);
   }
 
   /**
@@ -515,7 +547,8 @@ public:
    */
   template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
   static NDArray borrow(const T *ptr, std::array<std::size_t, N> shape) noexcept {
-    return NDArray(clustering::detail::BorrowedTag{}, const_cast<T *>(ptr), shape,
+    auto *mutPtr = const_cast<T *>(ptr);
+    return NDArray(clustering::detail::BorrowedTag{}, mutPtr, mutPtr, shape,
                    computeContiguousStrides(shape), 0, false);
   }
 
@@ -528,14 +561,14 @@ public:
   template <Layout L2 = L, std::enable_if_t<L2 == Layout::MaybeStrided, int> = 0>
   static NDArray borrow(T *ptr, std::array<std::size_t, N> shape,
                         std::array<std::ptrdiff_t, N> strides) noexcept {
-    return NDArray(clustering::detail::BorrowedTag{}, ptr, shape, strides, 0, true);
+    return NDArray(clustering::detail::BorrowedTag{}, ptr, ptr, shape, strides, 0, true);
   }
 
   template <Layout L2 = L, std::enable_if_t<L2 == Layout::MaybeStrided, int> = 0>
   static NDArray borrow(const T *ptr, std::array<std::size_t, N> shape,
                         std::array<std::ptrdiff_t, N> strides) noexcept {
-    return NDArray(clustering::detail::BorrowedTag{}, const_cast<T *>(ptr), shape, strides, 0,
-                   false);
+    auto *mutPtr = const_cast<T *>(ptr);
+    return NDArray(clustering::detail::BorrowedTag{}, mutPtr, mutPtr, shape, strides, 0, false);
   }
 
   /**
@@ -574,7 +607,8 @@ public:
              "borrowBytes requires byte strides divisible by sizeof(T)");
       element_strides[k] = stridesInBytes[k] / static_cast<std::ptrdiff_t>(sizeof(T));
     }
-    return NDArray(clustering::detail::BorrowedTag{}, ptr, shape, element_strides, 0, isMutable);
+    return NDArray(clustering::detail::BorrowedTag{}, ptr, ptr, shape, element_strides, 0,
+                   isMutable);
   }
 
   /**
@@ -603,7 +637,7 @@ public:
   template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
   NDArray<T, 2, Layout::MaybeStrided> t() noexcept {
     return NDArray<T, 2, Layout::MaybeStrided>(
-        clustering::detail::BorrowedTag{}, m_data,
+        clustering::detail::BorrowedTag{}, m_data, m_base,
         std::array<std::size_t, 2>{m_shape[1], m_shape[0]},
         std::array<std::ptrdiff_t, 2>{m_strides[1], m_strides[0]}, m_offset, m_mutable);
   }
@@ -611,7 +645,7 @@ public:
   template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
   NDArray<T, 2, Layout::MaybeStrided> t() const noexcept {
     return NDArray<T, 2, Layout::MaybeStrided>(
-        clustering::detail::BorrowedTag{}, const_cast<T *>(m_data),
+        clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), const_cast<T *>(m_base),
         std::array<std::size_t, 2>{m_shape[1], m_shape[0]},
         std::array<std::ptrdiff_t, 2>{m_strides[1], m_strides[0]}, m_offset, false);
   }
@@ -632,8 +666,8 @@ public:
       new_strides[k] = m_strides[k + 1];
     }
     return NDArray<T, N - 1, L>(clustering::detail::BorrowedTag{},
-                                m_data + static_cast<std::ptrdiff_t>(i) * m_strides[0], new_shape,
-                                new_strides, 0, m_mutable);
+                                m_data + m_offset + static_cast<std::ptrdiff_t>(i) * m_strides[0],
+                                m_base, new_shape, new_strides, 0, m_mutable);
   }
 
   template <std::size_t M = N, std::enable_if_t<(M > 1), int> = 0>
@@ -646,9 +680,9 @@ public:
       new_strides[k] = m_strides[k + 1];
     }
     return NDArray<T, N - 1, L>(clustering::detail::BorrowedTag{},
-                                const_cast<T *>(m_data) +
+                                const_cast<T *>(m_data) + m_offset +
                                     static_cast<std::ptrdiff_t>(i) * m_strides[0],
-                                new_shape, new_strides, 0, false);
+                                const_cast<T *>(m_base), new_shape, new_strides, 0, false);
   }
 
   /**
@@ -661,7 +695,8 @@ public:
   NDArray<T, 1, Layout::MaybeStrided> col(std::size_t j) noexcept {
     assert(j < m_shape[1]);
     return NDArray<T, 1, Layout::MaybeStrided>(
-        clustering::detail::BorrowedTag{}, m_data + static_cast<std::ptrdiff_t>(j) * m_strides[1],
+        clustering::detail::BorrowedTag{},
+        m_data + m_offset + static_cast<std::ptrdiff_t>(j) * m_strides[1], m_base,
         std::array<std::size_t, 1>{m_shape[0]}, std::array<std::ptrdiff_t, 1>{m_strides[0]}, 0,
         m_mutable);
   }
@@ -671,9 +706,9 @@ public:
     assert(j < m_shape[1]);
     return NDArray<T, 1, Layout::MaybeStrided>(
         clustering::detail::BorrowedTag{},
-        const_cast<T *>(m_data) + static_cast<std::ptrdiff_t>(j) * m_strides[1],
-        std::array<std::size_t, 1>{m_shape[0]}, std::array<std::ptrdiff_t, 1>{m_strides[0]}, 0,
-        false);
+        const_cast<T *>(m_data) + m_offset + static_cast<std::ptrdiff_t>(j) * m_strides[1],
+        const_cast<T *>(m_base), std::array<std::size_t, 1>{m_shape[0]},
+        std::array<std::ptrdiff_t, 1>{m_strides[0]}, 0, false);
   }
 
   /**
@@ -687,10 +722,10 @@ public:
     assert(axis < N && begin <= end && end <= m_shape[axis]);
     std::array<std::size_t, N> new_shape = m_shape;
     new_shape[axis] = end - begin;
-    return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{},
-                                               m_data + static_cast<std::ptrdiff_t>(begin) *
-                                                            m_strides[axis],
-                                               new_shape, m_strides, 0, m_mutable);
+    return NDArray<T, N, Layout::MaybeStrided>(
+        clustering::detail::BorrowedTag{},
+        m_data + m_offset + static_cast<std::ptrdiff_t>(begin) * m_strides[axis], m_base, new_shape,
+        m_strides, 0, m_mutable);
   }
 
   NDArray<T, N, Layout::MaybeStrided> slice(std::size_t axis, std::size_t begin,
@@ -700,8 +735,8 @@ public:
     new_shape[axis] = end - begin;
     return NDArray<T, N, Layout::MaybeStrided>(
         clustering::detail::BorrowedTag{},
-        const_cast<T *>(m_data) + static_cast<std::ptrdiff_t>(begin) * m_strides[axis], new_shape,
-        m_strides, 0, false);
+        const_cast<T *>(m_data) + m_offset + static_cast<std::ptrdiff_t>(begin) * m_strides[axis],
+        const_cast<T *>(m_base), new_shape, m_strides, 0, false);
   }
 
   /**
@@ -710,11 +745,10 @@ public:
    * Step must be positive (no reversed views in v1). @c end defaults to the axis size via the
    * sentinel @c Range::all().
    */
-  NDArray<T, N, Layout::MaybeStrided>
-  slice(const std::array<clustering::Range, N> &ranges) noexcept {
+  NDArray<T, N, Layout::MaybeStrided> slice(const std::array<Range, N> &ranges) noexcept {
     std::array<std::size_t, N> new_shape{};
     std::array<std::ptrdiff_t, N> new_strides{};
-    std::ptrdiff_t base = 0;
+    std::ptrdiff_t advance = 0;
     for (std::size_t k = 0; k < N; ++k) {
       std::size_t end = std::min(ranges[k].end, m_shape[k]);
       std::size_t begin = ranges[k].begin;
@@ -724,31 +758,31 @@ public:
                                : (end - begin + static_cast<std::size_t>(step) - 1) /
                                      static_cast<std::size_t>(step);
       new_strides[k] = m_strides[k] * step;
-      base += static_cast<std::ptrdiff_t>(begin) * m_strides[k];
-    }
-    return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{}, m_data + base,
-                                               new_shape, new_strides, 0, m_mutable);
-  }
-
-  NDArray<T, N, Layout::MaybeStrided>
-  slice(const std::array<clustering::Range, N> &ranges) const noexcept {
-    std::array<std::size_t, N> new_shape{};
-    std::array<std::ptrdiff_t, N> new_strides{};
-    std::ptrdiff_t base = 0;
-    for (std::size_t k = 0; k < N; ++k) {
-      std::size_t end = std::min(ranges[k].end, m_shape[k]);
-      std::size_t begin = ranges[k].begin;
-      std::ptrdiff_t step = ranges[k].step;
-      assert(begin <= end && step > 0);
-      new_shape[k] = step == 1 ? (end - begin)
-                               : (end - begin + static_cast<std::size_t>(step) - 1) /
-                                     static_cast<std::size_t>(step);
-      new_strides[k] = m_strides[k] * step;
-      base += static_cast<std::ptrdiff_t>(begin) * m_strides[k];
+      advance += static_cast<std::ptrdiff_t>(begin) * m_strides[k];
     }
     return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{},
-                                               const_cast<T *>(m_data) + base, new_shape,
-                                               new_strides, 0, false);
+                                               m_data + m_offset + advance, m_base, new_shape,
+                                               new_strides, 0, m_mutable);
+  }
+
+  NDArray<T, N, Layout::MaybeStrided> slice(const std::array<Range, N> &ranges) const noexcept {
+    std::array<std::size_t, N> new_shape{};
+    std::array<std::ptrdiff_t, N> new_strides{};
+    std::ptrdiff_t advance = 0;
+    for (std::size_t k = 0; k < N; ++k) {
+      std::size_t end = std::min(ranges[k].end, m_shape[k]);
+      std::size_t begin = ranges[k].begin;
+      std::ptrdiff_t step = ranges[k].step;
+      assert(begin <= end && step > 0);
+      new_shape[k] = step == 1 ? (end - begin)
+                               : (end - begin + static_cast<std::size_t>(step) - 1) /
+                                     static_cast<std::size_t>(step);
+      new_strides[k] = m_strides[k] * step;
+      advance += static_cast<std::ptrdiff_t>(begin) * m_strides[k];
+    }
+    return NDArray<T, N, Layout::MaybeStrided>(
+        clustering::detail::BorrowedTag{}, const_cast<T *>(m_data) + m_offset + advance,
+        const_cast<T *>(m_base), new_shape, new_strides, 0, false);
   }
 
   /**
@@ -764,8 +798,8 @@ public:
       new_shape[k] = m_shape[perm[k]];
       new_strides[k] = m_strides[perm[k]];
     }
-    return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{}, m_data, new_shape,
-                                               new_strides, m_offset, m_mutable);
+    return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{}, m_data, m_base,
+                                               new_shape, new_strides, m_offset, m_mutable);
   }
 
   NDArray<T, N, Layout::MaybeStrided>
@@ -778,8 +812,8 @@ public:
       new_strides[k] = m_strides[perm[k]];
     }
     return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{},
-                                               const_cast<T *>(m_data), new_shape, new_strides,
-                                               m_offset, false);
+                                               const_cast<T *>(m_data), const_cast<T *>(m_base),
+                                               new_shape, new_strides, m_offset, false);
   }
 
   /**
@@ -797,7 +831,7 @@ public:
     assert(isContiguous() && "view<M> requires a contiguous source");
     assert(productOfShape(shape) == numel() && "view<M> must preserve element count");
     return NDArray<T, M, Layout::Contig>(
-        clustering::detail::BorrowedTag{}, m_data, shape,
+        clustering::detail::BorrowedTag{}, m_data, m_base, shape,
         NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, m_mutable);
   }
 
@@ -806,7 +840,7 @@ public:
     assert(isContiguous() && "view<M> requires a contiguous source");
     assert(productOfShape(shape) == numel() && "view<M> must preserve element count");
     return NDArray<T, M, Layout::Contig>(
-        clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), shape,
+        clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), const_cast<T *>(m_base), shape,
         NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, false);
   }
 
@@ -824,7 +858,7 @@ public:
     assert(productOfShape(shape) == numel() && "reshape<M> must preserve element count");
     if (isContiguous()) {
       return NDArray<T, M, Layout::Contig>(
-          clustering::detail::BorrowedTag{}, m_data, shape,
+          clustering::detail::BorrowedTag{}, m_data, m_base, shape,
           NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, m_mutable);
     }
     NDArray<T, M, Layout::Contig> result(shape);
@@ -837,8 +871,8 @@ public:
     assert(productOfShape(shape) == numel() && "reshape<M> must preserve element count");
     if (isContiguous()) {
       return NDArray<T, M, Layout::Contig>(
-          clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), shape,
-          NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, false);
+          clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), const_cast<T *>(m_base),
+          shape, NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, false);
     }
     NDArray<T, M, Layout::Contig> result(shape);
     copyToContiguous(result.data());
@@ -855,7 +889,7 @@ public:
   NDArray<T, N, Layout::Contig> contiguous() {
     if (isContiguous()) {
       return NDArray<T, N, Layout::Contig>(
-          clustering::detail::BorrowedTag{}, m_data, m_shape,
+          clustering::detail::BorrowedTag{}, m_data, m_base, m_shape,
           NDArray<T, N, Layout::Contig>::computeContiguousStrides(m_shape), 0, m_mutable);
     }
     NDArray<T, N, Layout::Contig> result(m_shape);
@@ -866,8 +900,8 @@ public:
   NDArray<T, N, Layout::Contig> contiguous() const {
     if (isContiguous()) {
       return NDArray<T, N, Layout::Contig>(
-          clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), m_shape,
-          NDArray<T, N, Layout::Contig>::computeContiguousStrides(m_shape), 0, false);
+          clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), const_cast<T *>(m_base),
+          m_shape, NDArray<T, N, Layout::Contig>::computeContiguousStrides(m_shape), 0, false);
     }
     NDArray<T, N, Layout::Contig> result(m_shape);
     copyToContiguous(result.data());
@@ -891,11 +925,13 @@ public:
    * @brief Returns a formatted string representing the contents of the NDArray.
    *
    * This method is primarily used for debugging purposes, providing a visual representation
-   * of the array's structure and contents.
+   * of the array's structure and contents. Walks the array through @c m_data, @c m_offset, and
+   * @c m_strides so Borrowed views report their actual viewable contents rather than the empty
+   * @c m_vec.
    *
    * @return A string containing the formatted representation of the NDArray.
    */
-  std::string debugDump() const noexcept {
+  std::string debugDump() const {
     std::stringstream ss;
     ss << "NDarray<" << typeid(T).name() << ", " << N << ">(";
     for (auto d : m_shape) {
@@ -903,13 +939,34 @@ public:
     }
     ss << ")\n";
     ss << "data: [";
-    for (auto value : m_vec) {
-      ss << value << ", ";
+    const std::size_t total = numel();
+    if (total > 0) {
+      std::array<std::size_t, N> idx{};
+      for (std::size_t flat = 0; flat < total; ++flat) {
+        std::ptrdiff_t off = m_offset;
+        for (std::size_t k = 0; k < N; ++k) {
+          off += static_cast<std::ptrdiff_t>(idx[k]) * m_strides[k];
+        }
+        ss << m_data[off] << ", ";
+        for (std::size_t k = N; k-- > 0;) {
+          if (++idx[k] < m_shape[k]) {
+            break;
+          }
+          idx[k] = 0;
+        }
+      }
     }
     ss << "]\n";
-    ss << "size: " << m_vec.size() << "\n";
+    ss << "size: " << total << "\n";
     return ss.str();
   }
+
+  // Equality between NDArrays has three plausible semantics (element-wise, storage-identity,
+  // deep-value); none is obviously correct, so the operator is deleted to force callers to pick
+  // an explicit intent (@c math::arrayEqual, @c sameStorage, or an explicit shape-and-element
+  // comparison).
+  friend bool operator==(const NDArray &, const NDArray &) = delete;
+  friend bool operator!=(const NDArray &, const NDArray &) = delete;
 
 private:
   static std::array<std::ptrdiff_t, N>
@@ -969,6 +1026,7 @@ private:
   }
 
   T *m_data;
+  T *m_base;
   std::vector<T, clustering::detail::AlignedAllocator<T, 32>> m_vec;
   std::array<std::size_t, N> m_shape;
   std::array<std::ptrdiff_t, N> m_strides;
@@ -978,13 +1036,14 @@ private:
 };
 
 /**
- * @brief Returns true when @p a and @p b share the same underlying buffer base pointer.
+ * @brief Returns true when @p a and @p b share the same underlying allocation.
  *
- * True for borrowed views that preserve the parent data pointer (e.g. @c t(), @c permute());
- * false for views constructed by advancing the pointer (e.g. @c slice(), @c row(), @c col()).
- * Ranks and layouts may differ between the two arguments.
+ * Every view verb propagates the parent's base pointer; fresh Owned allocations (including
+ * @c clone and the non-contiguous @c reshape / @c contiguous fallbacks) install a new base.
+ * Two siblings produced from the same source therefore both test true against each other and
+ * against their source, regardless of which pointer-advancing verb produced them.
  */
 template <class T, std::size_t NA, Layout LA, std::size_t NB, Layout LB>
 bool sameStorage(const NDArray<T, NA, LA> &a, const NDArray<T, NB, LB> &b) noexcept {
-  return a.data() == b.data();
+  return a.baseData() == b.baseData();
 }

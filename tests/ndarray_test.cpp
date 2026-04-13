@@ -248,8 +248,7 @@ TEST(Slice, RangeArrayWithAllSentinel) {
       arr[i][j] = static_cast<float>(i * 10 + j);
     }
   }
-  auto view =
-      arr.slice(std::array<clustering::Range, 2>{clustering::Range{1, 4}, clustering::all()});
+  auto view = arr.slice(std::array<Range, 2>{Range{1, 4}, all()});
   EXPECT_EQ(view.dim(0), 3u);
   EXPECT_EQ(view.dim(1), 4u);
   for (std::size_t i = 0; i < 3; ++i) {
@@ -264,7 +263,7 @@ TEST(Slice, RangeArrayWithStep) {
   for (std::size_t i = 0; i < 10; ++i) {
     arr[i] = static_cast<float>(i);
   }
-  auto view = arr.slice(std::array<clustering::Range, 1>{clustering::Range{0, 10, 3}});
+  auto view = arr.slice(std::array<Range, 1>{Range{0, 10, 3}});
   EXPECT_EQ(view.dim(0), 4u);
   EXPECT_EQ(view.strideAt(0), 3);
   EXPECT_FLOAT_EQ(view(0), 0.0f);
@@ -674,4 +673,132 @@ TEST(BorrowDeathTest, WriteViaFlatIndexOnConstBorrowAborts) {
   const float *cptr = raw;
   auto view = NDArray<float, 1>::borrow(cptr, std::array<std::size_t, 1>{4});
   EXPECT_DEBUG_DEATH({ view.flatIndex(0) = 1.0f; }, "write to read-only borrow");
+}
+
+TEST(BorrowDeathTest, WriteViaDataPointerOnConstBorrowAborts) {
+  alignas(32) float raw[4] = {0, 0, 0, 0};
+  const float *cptr = raw;
+  auto view = NDArray<float, 1>::borrow(cptr, std::array<std::size_t, 1>{4});
+  EXPECT_DEBUG_DEATH({ (void)view.data(); }, "write to read-only borrow");
+}
+
+TEST(DebugDump, BorrowedViewReportsViewableContents) {
+  alignas(32) float raw[6] = {10, 20, 30, 40, 50, 60};
+  auto view = NDArray<float, 2>::borrow(raw, std::array<std::size_t, 2>{2, 3});
+  std::string dump = view.debugDump();
+  // Every source element must appear in the dump; the old m_vec-only walk produced "data: []".
+  EXPECT_NE(dump.find("10"), std::string::npos);
+  EXPECT_NE(dump.find("60"), std::string::npos);
+  EXPECT_NE(dump.find("size: 6"), std::string::npos);
+}
+
+TEST(DebugDump, TransposeReadsThroughStrides) {
+  NDArray<float, 2> arr({2, 3});
+  for (std::size_t i = 0; i < 2; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      arr[i][j] = static_cast<float>(i * 3 + j + 1);
+    }
+  }
+  auto tv = arr.t();
+  std::string dump = tv.debugDump();
+  EXPECT_NE(dump.find("size: 6"), std::string::npos);
+  // Row-major walk of the 3x2 transposed view: a(0,0), a(1,0), a(0,1), a(1,1), a(0,2), a(1,2).
+  EXPECT_NE(dump.find("1, 4, 2, 5, 3, 6"), std::string::npos);
+}
+
+// operator==/operator!= are deleted: silent element-wise, storage-identity, or deep-value
+// semantics are all plausible and surprising. The compile-time check enforces that a future
+// drive-by addition cannot restore one of those semantics unnoticed.
+template <class A>
+concept has_equality_compare = requires(const A &a, const A &b) {
+  { a == b } -> std::same_as<bool>;
+};
+template <class A>
+concept has_inequality_compare = requires(const A &a, const A &b) {
+  { a != b } -> std::same_as<bool>;
+};
+
+static_assert(!has_equality_compare<NDArray<float, 2>>, "NDArray::operator== must remain deleted");
+static_assert(!has_inequality_compare<NDArray<float, 2>>,
+              "NDArray::operator!= must remain deleted");
+static_assert(!has_equality_compare<NDArray<double, 3, Layout::MaybeStrided>>,
+              "NDArray::operator== must remain deleted for MaybeStrided too");
+
+TEST(ViewOffset, TransposeThenRowStillReadsSource) {
+  // Composing view verbs must preserve correctness end-to-end: row() on a transposed source
+  // must read the same elements the caller would have reached via tv(i, j) directly.
+  NDArray<float, 2> arr({3, 4});
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      arr[i][j] = static_cast<float>(i * 10 + j);
+    }
+  }
+  auto tv = arr.t();
+  auto r = tv.row(2);
+  EXPECT_EQ(r.dim(0), 3u);
+  for (std::size_t i = 0; i < 3; ++i) {
+    EXPECT_FLOAT_EQ(r(i), static_cast<float>(i * 10 + 2));
+  }
+}
+
+TEST(ViewOffset, TransposeThenSliceStillReadsSource) {
+  NDArray<float, 2> arr({3, 4});
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      arr[i][j] = static_cast<float>(i * 10 + j);
+    }
+  }
+  auto tv = arr.t();
+  auto s = tv.slice(0, 1, 3);
+  EXPECT_EQ(s.dim(0), 2u);
+  EXPECT_EQ(s.dim(1), 3u);
+  for (std::size_t i = 0; i < 2; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      EXPECT_FLOAT_EQ(s(i, j), tv(i + 1, j));
+    }
+  }
+}
+
+TEST(ViewOffset, TransposeThenColStillReadsSource) {
+  NDArray<float, 2> arr({3, 4});
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      arr[i][j] = static_cast<float>(i * 10 + j);
+    }
+  }
+  auto tv = arr.t();
+  auto c = tv.col(1);
+  EXPECT_EQ(c.dim(0), 4u);
+  for (std::size_t j = 0; j < 4; ++j) {
+    EXPECT_FLOAT_EQ(c(j), tv(j, 1));
+  }
+}
+
+TEST(SameStorage, RowAndColShareBase) {
+  NDArray<float, 2> arr({4, 5});
+  auto r0 = arr.row(0);
+  auto r1 = arr.row(1);
+  auto c2 = arr.col(2);
+  EXPECT_TRUE(sameStorage(arr, r0));
+  EXPECT_TRUE(sameStorage(arr, r1));
+  EXPECT_TRUE(sameStorage(arr, c2));
+  EXPECT_TRUE(sameStorage(r0, r1));
+  EXPECT_TRUE(sameStorage(r0, c2));
+}
+
+TEST(SameStorage, SliceShareBase) {
+  NDArray<float, 2> arr({6, 4});
+  auto s0 = arr.slice(0, 1, 5);
+  auto s1 = arr.slice(0, 3, 6);
+  EXPECT_TRUE(sameStorage(arr, s0));
+  EXPECT_TRUE(sameStorage(arr, s1));
+  EXPECT_TRUE(sameStorage(s0, s1));
+}
+
+TEST(SameStorage, CloneBreaksBase) {
+  NDArray<float, 2> arr({3, 3});
+  auto copy = arr.clone();
+  auto r = arr.row(0);
+  EXPECT_FALSE(sameStorage(arr, copy));
+  EXPECT_FALSE(sameStorage(copy, r));
 }

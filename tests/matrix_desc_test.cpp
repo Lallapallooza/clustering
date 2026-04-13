@@ -153,7 +153,7 @@ TEST(MatrixDesc, AlignmentGranularityReflectsPointer) {
   // An interior-column slice on a row-major source advances the base pointer by
   // sizeof(float) * begin_col. For begin_col == 1 on a 32-aligned base, that is a 4-byte
   // offset: the descriptor must report 4-byte alignment, not 32.
-  auto sliced = a.slice({clustering::Range{0, 4, 1}, clustering::Range{1, 4, 1}});
+  auto sliced = a.slice({Range{0, 4, 1}, Range{1, 4, 1}});
   auto dslice = clustering::detail::describeMatrix(sliced);
   const auto addr = reinterpret_cast<std::uintptr_t>(dslice.ptr);
   EXPECT_EQ(addr % dslice.alignment, 0u);

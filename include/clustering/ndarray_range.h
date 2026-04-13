@@ -3,8 +3,6 @@
 #include <cstddef>
 #include <limits>
 
-namespace clustering {
-
 /**
  * @brief Half-open index range with optional positive step for slicing an NDArray axis.
  *
@@ -21,5 +19,3 @@ struct Range {
  * @brief Sentinel value meaning "take every element of this axis".
  */
 constexpr Range all() { return {}; }
-
-} // namespace clustering
