@@ -1,7 +1,7 @@
 cpmaddpackage(
     NAME bshoshany_thread_pool
     GITHUB_REPOSITORY bshoshany/thread-pool
-    GIT_TAG v3.5.0
+    GIT_TAG v5.1.0
     DOWNLOAD_ONLY YES
 )
 

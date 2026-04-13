@@ -56,14 +56,14 @@ public:
     // Phase 1: Parallel core-point identification
     std::vector<uint8_t> is_core(m_points_dim0, 0);
     m_thread_pool
-        .parallelize_loop(0, m_points_dim0,
-                          [this, &is_core](size_t start, size_t end) {
-                            for (size_t i = start; i < end; ++i) {
-                              if (isCorePoint(i)) {
-                                is_core[i] = 1;
-                              }
-                            }
-                          })
+        .submit_blocks(size_t{0}, m_points_dim0,
+                       [this, &is_core](size_t start, size_t end) {
+                         for (size_t i = start; i < end; ++i) {
+                           if (isCorePoint(i)) {
+                             is_core[i] = 1;
+                           }
+                         }
+                       })
         .wait();
 
     // Phase 2: Sequential cluster expansion from core points only
@@ -107,10 +107,10 @@ private:
   size_t m_clusterId = 0;                ///< Current cluster ID being assigned.
   std::vector<std::atomic_int> m_labels; ///< Labels assigned to each point in the dataset.
   std::vector<std::atomic<uint32_t>>
-      m_seen_wave;               ///< Per-point epoch marker for BFS-frontier dedup.
-  uint32_t m_current_wave = 0;   ///< Monotonic counter; bumped before each frontier wave.
-  QueryModel m_query_model;      ///< Query model  built from m_points for efficient querying.
-  BS::thread_pool m_thread_pool; ///< ThreadPool for parallel execution.
+      m_seen_wave;                     ///< Per-point epoch marker for BFS-frontier dedup.
+  uint32_t m_current_wave = 0;         ///< Monotonic counter; bumped before each frontier wave.
+  QueryModel m_query_model;            ///< Query model  built from m_points for efficient querying.
+  BS::light_thread_pool m_thread_pool; ///< ThreadPool for parallel execution.
 
   /**
    * @brief Checks if a point at a given index is a core point.
@@ -147,8 +147,8 @@ private:
 
       const uint32_t wave = ++m_current_wave;
 
-      auto multi_fut = m_thread_pool.parallelize_loop(
-          0, seeds_vec.size(),
+      auto multi_fut = m_thread_pool.submit_blocks(
+          size_t{0}, seeds_vec.size(),
           [this, &seeds_vec, &seeds_vec_cpy, &mutex, &is_core, wave](size_t start, size_t end) {
             std::vector<size_t> local_seeds_vec_cpy;
 
