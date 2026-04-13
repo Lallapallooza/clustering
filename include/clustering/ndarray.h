@@ -10,6 +10,7 @@
 #include <new>
 #include <sstream>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace clustering {
@@ -78,17 +79,31 @@ bool operator!=(const AlignedAllocator<T, Align> &, const AlignedAllocator<U, Al
 enum class NDArrayStorage : std::uint8_t { Owned, Borrowed };
 
 /**
+ * @brief Compile-time layout tag for NDArray.
+ *
+ * @c Contig guarantees row-major contiguous storage with zero offset. Instances of this layout
+ * expose the chain-of-accessors @c operator[] and use the baseline flat-index formula in the
+ * hot path. @c MaybeStrided makes no contiguity guarantee; only the variadic @c operator() is
+ * available for element access, and it consults @c m_strides and @c m_offset.
+ *
+ * The split is a type-level precondition: calling @c a[i] on a @c MaybeStrided array is a
+ * compile error, not a runtime check.
+ */
+enum class Layout : std::uint8_t { Contig, MaybeStrided };
+
+/**
  * @brief Represents a multidimensional array (NDArray) of a fixed number of dimensions N and
  * element type T.
  *
  * NDArray is a template class that provides a high-level representation of a multi-dimensional
- * array. It offers various functionalities like element access, dimension information, and debug
- * utilities. The array's dimensions are defined at compile time for type safety and efficiency.
+ * array. It offers element access, dimension information, and debug utilities. The array's
+ * dimensions are defined at compile time for type safety and efficiency.
  *
  * @tparam T The type of elements stored in the NDArray.
  * @tparam N The number of dimensions of the NDArray.
+ * @tparam L Layout tag; @c Layout::Contig (default) enables the @c operator[] chain.
  */
-template <class T, std::size_t N> class NDArray {
+template <class T, std::size_t N, Layout L = Layout::Contig> class NDArray {
   static_assert(N >= 1, "NDArray rank must be >= 1");
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
                 "NDArray element type must be float or double");
@@ -96,6 +111,9 @@ template <class T, std::size_t N> class NDArray {
 public:
   /**
    * @brief Inner class providing base functionality for element access in NDArray.
+   *
+   * Accessors are produced only by the contiguous instantiation of NDArray; the pointer type is
+   * fixed to @c Layout::Contig so constructing one from a strided array is ill-formed.
    */
   class BaseAccessor {
   public:
@@ -106,9 +124,9 @@ public:
     const T *data() const { return this->m_ndarray->data() + this->m_index; }
 
   protected:
-    NDArray<T, N> *m_ndarray; ///< Pointer to the NDArray.
-    std::size_t m_index;      ///< Index in the flat representation of the array.
-    std::size_t m_dim;        ///< Current dimension of the accessor.
+    NDArray<T, N, Layout::Contig> *m_ndarray; ///< Pointer to the NDArray.
+    std::size_t m_index;                      ///< Index in the flat representation of the array.
+    std::size_t m_dim;                        ///< Current dimension of the accessor.
 
     /**
      * @brief Constructs a BaseAccessor for a given NDArray, index, and dimension.
@@ -117,7 +135,7 @@ public:
      * @param index Index in the flat representation of the array.
      * @param dim Current dimension of the accessor.
      */
-    BaseAccessor(NDArray<T, N> *ndarray, std::size_t index, std::size_t dim)
+    BaseAccessor(NDArray<T, N, Layout::Contig> *ndarray, std::size_t index, std::size_t dim)
         : m_ndarray(ndarray), m_index(index), m_dim(dim) {}
   };
 
@@ -133,8 +151,8 @@ public:
      * @param index Index for the desired element.
      * @param dim Current dimension for the accessor.
      */
-    ConstAccessor(const NDArray<T, N> &ndarray, std::size_t index, std::size_t dim)
-        : BaseAccessor(const_cast<NDArray<T, N> *>(&ndarray), index, dim) {}
+    ConstAccessor(const NDArray<T, N, Layout::Contig> &ndarray, std::size_t index, std::size_t dim)
+        : BaseAccessor(const_cast<NDArray<T, N, Layout::Contig> *>(&ndarray), index, dim) {}
 
     ConstAccessor(const ConstAccessor &other) = default;
 
@@ -146,6 +164,8 @@ public:
      */
     inline ConstAccessor operator[](std::size_t index) const noexcept {
       assert(this->m_dim < N && index < this->m_ndarray->dim(this->m_dim + 1));
+      // Contig invariant lets the chain collapse to m_index * shape[dim+1] + index at every step,
+      // matching the baseline hot-loop asm clang can vectorise into an 8x-unrolled aligned load.
       size_t new_index = this->m_index * this->m_ndarray->dim(this->m_dim + 1) + index;
       return ConstAccessor(*this->m_ndarray, new_index, this->m_dim + 1);
     }
@@ -177,7 +197,7 @@ public:
      * @param index Index for the desired element.
      * @param dim Current dimension for the accessor.
      */
-    Accessor(NDArray<T, N> &ndarray, std::size_t index, std::size_t dim)
+    Accessor(NDArray<T, N, Layout::Contig> &ndarray, std::size_t index, std::size_t dim)
         : ConstAccessor(ndarray, index, dim) {}
 
     /**
@@ -206,10 +226,14 @@ public:
 
 public:
   /**
-   * @brief Constructs an NDArray with specified dimensions.
+   * @brief Constructs a contiguous owned NDArray with specified dimensions.
+   *
+   * Only available for @c Layout::Contig; the MaybeStrided instantiation has no default
+   * constructor and is produced exclusively by strided-view factory methods.
    *
    * @param dims Initializer list specifying the dimensions of the NDArray.
    */
+  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
   NDArray(std::initializer_list<std::size_t> dims)
       : m_data(nullptr), m_offset(0), m_storage(NDArrayStorage::Owned), m_mutable(true) {
     assert(dims.size() == N);
@@ -270,9 +294,13 @@ public:
   /**
    * @brief Provides access to the elements of the NDArray.
    *
+   * Only defined for @c Layout::Contig. A @c MaybeStrided array has no @c operator[]; use the
+   * variadic @c operator()(i, j, ...) to read through strides.
+   *
    * @param index Index in the first dimension.
    * @return An Accessor to the specified index in the first dimension.
    */
+  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
   inline Accessor operator[](std::size_t index) noexcept {
     assert(index < m_shape[0]);
     return Accessor(*this, index, 0);
@@ -284,9 +312,27 @@ public:
    * @param index Index in the first dimension.
    * @return A ConstAccessor to the specified index in the first dimension.
    */
+  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
   inline const ConstAccessor operator[](std::size_t index) const noexcept {
     assert(index < m_shape[0]);
     return ConstAccessor(*this, index, 0);
+  }
+
+  /**
+   * @brief Direct multi-index element access via strides. Available for all layouts.
+   *
+   * @tparam Ix Integral index pack, must have exactly N elements.
+   * @param ix Indices, one per dimension.
+   * @return Reference to the element at @c m_offset + sum_k ix_k * m_strides[k].
+   */
+  template <class... Ix> inline T &operator()(Ix... ix) noexcept {
+    static_assert(sizeof...(Ix) == N, "operator() requires exactly N indices");
+    return m_data[computeElementOffset(std::index_sequence_for<Ix...>{}, ix...)];
+  }
+
+  template <class... Ix> inline const T &operator()(Ix... ix) const noexcept {
+    static_assert(sizeof...(Ix) == N, "operator() requires exactly N indices");
+    return m_data[computeElementOffset(std::index_sequence_for<Ix...>{}, ix...)];
   }
 
   /**
@@ -312,6 +358,25 @@ public:
    * @return Size of the specified dimension as a size_t.
    */
   inline const size_t dim(std::size_t index) const noexcept { return m_shape[index]; }
+
+  /**
+   * @brief Returns the stride (in elements) for dimension @p index.
+   */
+  inline std::ptrdiff_t strideAt(std::size_t index) const noexcept { return m_strides[index]; }
+
+  /**
+   * @brief Reports whether the array's runtime layout is row-major contiguous with zero offset.
+   *
+   * For @c Layout::Contig arrays this is always true (the type encodes the guarantee). For
+   * @c Layout::MaybeStrided arrays the answer is computed from @c m_strides and @c m_offset.
+   */
+  [[nodiscard]] inline bool isContiguous() const noexcept {
+    if constexpr (L == Layout::Contig) {
+      return true;
+    } else {
+      return m_offset == 0 && m_strides == computeContiguousStrides(m_shape);
+    }
+  }
 
   /**
    * @brief Provides read-only access to the internal data array.
@@ -370,6 +435,13 @@ private:
       s[k - 1] = s[k] * static_cast<std::ptrdiff_t>(shape[k]);
     }
     return s;
+  }
+
+  template <std::size_t... Ks, class... Ix>
+  inline std::size_t computeElementOffset(std::index_sequence<Ks...>, Ix... ix) const noexcept {
+    std::ptrdiff_t off = m_offset;
+    ((off += static_cast<std::ptrdiff_t>(ix) * m_strides[Ks]), ...);
+    return static_cast<std::size_t>(off);
   }
 
   T *m_data;
