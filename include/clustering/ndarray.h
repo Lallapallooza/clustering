@@ -1,41 +1,39 @@
 #pragma once
 
-#include <cstdint>
-#include <vector>
-#include <sstream>
 #include <cassert>
+#include <cstdint>
 #include <initializer_list>
+#include <sstream>
+#include <vector>
 
 /**
- * @brief Represents a multidimensional array (NDArray) of a fixed number of dimensions N and element type T.
+ * @brief Represents a multidimensional array (NDArray) of a fixed number of dimensions N and
+ * element type T.
  *
- * NDArray is a template class that provides a high-level representation of a multi-dimensional array.
- * It offers various functionalities like element access, dimension information, and debug utilities.
- * The array's dimensions are defined at compile time for type safety and efficiency.
+ * NDArray is a template class that provides a high-level representation of a multi-dimensional
+ * array. It offers various functionalities like element access, dimension information, and debug
+ * utilities. The array's dimensions are defined at compile time for type safety and efficiency.
  *
  * @tparam T The type of elements stored in the NDArray.
  * @tparam N The number of dimensions of the NDArray.
  */
-template<class T, std::size_t N>
-class NDArray {
- public:
+template <class T, std::size_t N> class NDArray {
+public:
   /**
    * @brief Inner class providing base functionality for element access in NDArray.
    */
   class BaseAccessor {
-   public:
+  public:
     /**
      * @brief Returns a pointer to the element data.
      * @return Constant pointer to the data.
      */
-    const T *data() const {
-      return this->m_ndarray->data() + this->m_index;
-    }
+    const T *data() const { return this->m_ndarray->data() + this->m_index; }
 
-   protected:
+  protected:
     NDArray<T, N> *m_ndarray; ///< Pointer to the NDArray.
-    std::size_t   m_index;    ///< Index in the flat representation of the array.
-    std::size_t   m_dim;      ///< Current dimension of the accessor.
+    std::size_t m_index;      ///< Index in the flat representation of the array.
+    std::size_t m_dim;        ///< Current dimension of the accessor.
 
     /**
      * @brief Constructs a BaseAccessor for a given NDArray, index, and dimension.
@@ -45,14 +43,14 @@ class NDArray {
      * @param dim Current dimension of the accessor.
      */
     BaseAccessor(NDArray<T, N> *ndarray, std::size_t index, std::size_t dim)
-      : m_ndarray(ndarray), m_index(index), m_dim(dim) {}
+        : m_ndarray(ndarray), m_index(index), m_dim(dim) {}
   };
 
   /**
    * @brief Provides read-only access to NDArray elements.
    */
   class ConstAccessor : public BaseAccessor {
-   public:
+  public:
     /**
      * @brief Constructs a ConstAccessor for a constant NDArray.
      *
@@ -61,7 +59,7 @@ class NDArray {
      * @param dim Current dimension for the accessor.
      */
     ConstAccessor(const NDArray<T, N> &ndarray, std::size_t index, std::size_t dim)
-      : BaseAccessor(const_cast<NDArray<T, N> *>(&ndarray), index, dim) {}
+        : BaseAccessor(const_cast<NDArray<T, N> *>(&ndarray), index, dim) {}
 
     ConstAccessor(const ConstAccessor &other) = default;
 
@@ -82,25 +80,21 @@ class NDArray {
      *
      * @return The element of type T at the accessor's position.
      */
-    inline operator T() const noexcept {
-      return this->m_ndarray->flatIndex(this->m_index);
-    }
+    inline operator T() const noexcept { return this->m_ndarray->flatIndex(this->m_index); }
 
     /**
      * @brief Returns the flat index in the NDArray corresponding to the accessor.
      *
      * @return The flat index as a size_t.
      */
-    [[nodiscard]] inline size_t index() const noexcept {
-      return this->m_index;
-    }
+    [[nodiscard]] inline size_t index() const noexcept { return this->m_index; }
   };
 
   /**
    * @brief Provides read-write access to NDArray elements.
    */
   class Accessor : public ConstAccessor {
-   public:
+  public:
     /**
      * @brief Constructs an Accessor for an NDArray.
      *
@@ -109,7 +103,7 @@ class NDArray {
      * @param dim Current dimension for the accessor.
      */
     Accessor(NDArray<T, N> &ndarray, std::size_t index, std::size_t dim)
-      : ConstAccessor(ndarray, index, dim) {}
+        : ConstAccessor(ndarray, index, dim) {}
 
     /**
      * @brief Provides access to the next dimension of the NDArray.
@@ -135,18 +129,17 @@ class NDArray {
     }
   };
 
- public:
+public:
   /**
    * @brief Constructs an NDArray with specified dimensions.
    *
    * @param dims Initializer list specifying the dimensions of the NDArray.
    */
-  NDArray(std::initializer_list<std::size_t> dims)
-    : m_dims(dims) {
+  NDArray(std::initializer_list<std::size_t> dims) : m_dims(dims) {
     assert(dims.size() == N);
     size_t size = 1;
 
-    for (auto dim: dims) {
+    for (auto dim : dims) {
       size *= dim;
     }
     m_data.resize(size);
@@ -180,9 +173,7 @@ class NDArray {
    * @param index Index in the flat representation of the NDArray.
    * @return Reference to the element at the specified index.
    */
-  inline T &flatIndex(std::size_t index) noexcept {
-    return m_data[index];
-  }
+  inline T &flatIndex(std::size_t index) noexcept { return m_data[index]; }
 
   /**
    * @brief Provides read-only access to the flat underlying array at a specific index.
@@ -190,9 +181,7 @@ class NDArray {
    * @param index Index in the flat representation of the NDArray.
    * @return Constant reference to the element at the specified index.
    */
-  inline const T &flatIndex(std::size_t index) const noexcept {
-    return m_data[index];
-  }
+  inline const T &flatIndex(std::size_t index) const noexcept { return m_data[index]; }
 
   /**
    * @brief Returns the size of a specific dimension of the NDArray.
@@ -200,27 +189,21 @@ class NDArray {
    * @param index Index of the dimension.
    * @return Size of the specified dimension as a size_t.
    */
-  inline const size_t dim(std::size_t index) const noexcept {
-    return m_dims[index];
-  }
+  inline const size_t dim(std::size_t index) const noexcept { return m_dims[index]; }
 
   /**
    * @brief Provides read-only access to the internal data array.
    *
    * @return Constant pointer to the data array.
    */
-  inline const T *data() const noexcept {
-    return m_data.data();
-  }
+  inline const T *data() const noexcept { return m_data.data(); }
 
   /**
    * @brief Provides read-write access to the internal data array.
    *
    * @return Pointer to the data array.
    */
-  inline T *data() noexcept {
-    return m_data.data();
-  }
+  inline T *data() noexcept { return m_data.data(); }
 
   /**
    * @brief Returns a formatted string representing the contents of the NDArray.
@@ -233,35 +216,34 @@ class NDArray {
   std::string debugDump() const noexcept {
     std::stringstream ss;
     ss << "NDarray<" << typeid(T).name() << ", " << N << ">(";
-    for (auto dim: m_dims) {
+    for (auto dim : m_dims) {
       ss << dim << ", ";
     }
     ss << ")\n";
     ss << "data: [";
-    for (auto value: m_data) {
+    for (auto value : m_data) {
       ss << value << ", ";
     }
     ss << "]\n";
     ss << "size: " << m_data.size() << "\n";
     return ss.str();
   }
- private:
-  template <std::size_t Align = alignof(T)>
-  class AlignedAllocator : public std::allocator<T> {
-   public:
-    using size_type = size_t;
-    using pointer = T*;
-    using const_pointer = const T*;
 
-    template <typename U>
-    struct rebind {
+private:
+  template <std::size_t Align = alignof(T)> class AlignedAllocator : public std::allocator<T> {
+  public:
+    using size_type = size_t;
+    using pointer = T *;
+    using const_pointer = const T *;
+
+    template <typename U> struct rebind {
       using other = typename NDArray<U, N>::template AlignedAllocator<Align>;
     };
 
     AlignedAllocator() noexcept {}
 
     template <typename U>
-    AlignedAllocator(const typename NDArray<U, N>::template AlignedAllocator<Align>&) noexcept {}
+    AlignedAllocator(const typename NDArray<U, N>::template AlignedAllocator<Align> &) noexcept {}
 
     pointer allocate(size_type n, const_pointer hint = 0) {
       size_type bytes = n * sizeof(T);
@@ -271,11 +253,10 @@ class NDArray {
       throw std::bad_alloc();
     }
 
-    void deallocate(pointer p, size_type n) noexcept {
-      free(p);
-    }
+    void deallocate(pointer p, size_type n) noexcept { free(p); }
   };
- private:
-  std::vector<T, AlignedAllocator<32>>      m_data;  ///< Internal storage of the NDArray elements.
-  std::vector<size_t> m_dims;  ///< Vector storing the dimensions of the NDArray.
+
+private:
+  std::vector<T, AlignedAllocator<32>> m_data; ///< Internal storage of the NDArray elements.
+  std::vector<size_t> m_dims;                  ///< Vector storing the dimensions of the NDArray.
 };

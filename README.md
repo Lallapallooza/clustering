@@ -1,9 +1,9 @@
 # ⚡ C++ Clustering Library
 
-This library offers a highly efficient implementation of the DBSCAN 
-(Density-Based Spatial Clustering of Applications with Noise) clustering algorithm (more algorithms will be added later) in C++. 
-Designed for high-performance applications, 
-it efficiently handles large datasets, 
+This library offers a highly efficient implementation of the DBSCAN
+(Density-Based Spatial Clustering of Applications with Noise) clustering algorithm (more algorithms will be added later) in C++.
+Designed for high-performance applications,
+it efficiently handles large datasets,
 making it ideal for machine learning, data mining, and complex data analysis tasks.
 
 ## Features
@@ -50,21 +50,21 @@ The API is simple and intuitive. Here's how to cluster a set of points:
 int main() {
   NDArray<float, 2> points({numPoints, dimensions});
   fillPoints(points); // Fill points with data
-  
+
   DBSCAN<float> dbscan(points, eps, minPts, n_jobs);
   dbscan.run();
-  
+
   std::cout << "Labels size: " << dbscan.labels().size() << std::endl;
   std::cout << "Number of clusters: " << dbscan.nClusters() << std::endl;
-  
+
   return 0;
 }
 ```
 
 ## Performance
-The graphics below show the performance compared to the scikit-learn implementation using the KD-Tree. 
-In summary, the CPU time results are generally several times better, 
-but this can vary based on data configuration and number of jobs. 
+The graphics below show the performance compared to the scikit-learn implementation using the KD-Tree.
+In summary, the CPU time results are generally several times better,
+but this can vary based on data configuration and number of jobs.
 For memory efficiency, this library significantly outperforms scikit-learn.
 
 To run your own benchmark:
@@ -80,6 +80,38 @@ CPU Performance with 24 Job
 ![CPU2](resources/results_24job.png)
 PCA-based Cluster Visualization
 ![PCA](resources/result.png)
+
+## Development
+
+Local build:
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+./build/clustering_demo
+./build/kdtree_benchmark
+```
+
+Useful flags:
+
+- `-DCLUSTERING_BUILD_BENCHMARK=OFF` skip the Google Benchmark target.
+- `-DCLUSTERING_USE_AVX2=OFF` disable AVX2 (auto-detected by default).
+- `-DCLUSTERING_BUILD_WITH_SANITIZER=ON` build with ThreadSanitizer.
+- `-DCLUSTERING_ENABLE_CLANG_TIDY=OFF` skip clang-tidy (on by default when this is the top-level project).
+
+### Pre-commit
+
+Formatting and linting hooks run via [pre-commit](https://pre-commit.com/). The dev tools are declared in `pyproject.toml` under the `dev` group and installed through `uv`:
+
+```bash
+uv sync --group dev
+uv run pre-commit install              # install the git hook (once)
+uv run pre-commit run --all-files      # run every hook on the whole repo
+```
+
+After `install`, hooks run automatically on `git commit`. The configured hooks are `clang-format` for C++, `gersemi` for CMake, `ruff` for Python, and the standard whitespace/YAML checks.
+
+clang-tidy is **not** a pre-commit hook (too slow, needs a compile database). It runs as part of the build whenever `CLUSTERING_ENABLE_CLANG_TIDY` is on, and in the `tidy` CI job.
 
 ## TODO
 - [ ] Add more benchmarks for comprehensive performance analysis.

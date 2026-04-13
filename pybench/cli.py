@@ -17,8 +17,16 @@ def _list_recipes(recipes: dict) -> None:
         sizes = ", ".join(str(s) for s in recipe.default_sizes)
         dims = ", ".join(str(d) for d in recipe.default_dims)
         params = ", ".join(f"{k}={v}" for k, v in recipe.default_params.items())
-        grid = ", ".join(f"{k}={v}" for k, v in recipe.param_grid.items()) if recipe.param_grid else "-"
-        combos = len(expand_param_grid(recipe)) * len(recipe.default_sizes) * len(recipe.default_dims)
+        grid = (
+            ", ".join(f"{k}={v}" for k, v in recipe.param_grid.items())
+            if recipe.param_grid
+            else "-"
+        )
+        combos = (
+            len(expand_param_grid(recipe))
+            * len(recipe.default_sizes)
+            * len(recipe.default_dims)
+        )
         print(f"{name}")
         print(f"  tags       : {tags}")
         print(f"  params     : {params}")
@@ -35,13 +43,24 @@ def main() -> None:
         prog="benchmark",
         description="Benchmark C++ clustering against sklearn.",
     )
-    parser.add_argument("--algo", nargs="*", help="Algorithm(s) to benchmark (default: all)")
+    parser.add_argument(
+        "--algo", nargs="*", help="Algorithm(s) to benchmark (default: all)"
+    )
     parser.add_argument("--sizes", nargs="+", type=int, help="Dataset sizes to use")
     parser.add_argument("--dims", nargs="+", type=int, help="Dimensionalities to use")
-    parser.add_argument("--list", action="store_true", help="List discovered recipes and exit")
-    parser.add_argument("--out", type=str, default="benchmark_results", help="Output directory")
-    parser.add_argument("--n-runs", type=int, default=None, dest="n_runs",
-                        help="Override n_runs for all recipes")
+    parser.add_argument(
+        "--list", action="store_true", help="List discovered recipes and exit"
+    )
+    parser.add_argument(
+        "--out", type=str, default="benchmark_results", help="Output directory"
+    )
+    parser.add_argument(
+        "--n-runs",
+        type=int,
+        default=None,
+        dest="n_runs",
+        help="Override n_runs for all recipes",
+    )
 
     args = parser.parse_args()
 
@@ -70,10 +89,15 @@ def main() -> None:
     for name, recipe in sorted(recipes.items()):
         if args.n_runs is not None:
             from dataclasses import replace
+
             recipe = replace(recipe, n_runs=args.n_runs)
 
-        effective_sizes = args.sizes if args.sizes is not None else list(recipe.default_sizes)
-        effective_dims = args.dims if args.dims is not None else list(recipe.default_dims)
+        effective_sizes = (
+            args.sizes if args.sizes is not None else list(recipe.default_sizes)
+        )
+        effective_dims = (
+            args.dims if args.dims is not None else list(recipe.default_dims)
+        )
         param_combos = expand_param_grid(recipe)
 
         for dim in effective_dims:
@@ -83,7 +107,8 @@ def main() -> None:
                     grid_info = " ".join(f"{k}={params[k]}" for k in recipe.param_grid)
                     print(
                         f"[{name}] {dim}D size={size:>7} {grid_info} ...",
-                        end=" ", flush=True,
+                        end=" ",
+                        flush=True,
                     )
                     result = run_one(recipe, size, dims=dim, params=params)
                     status = "PASS" if result.ari >= recipe.ari_threshold else "FAIL"
@@ -100,6 +125,7 @@ def main() -> None:
     print(f"\nResults saved to {json_path}")
 
     from pybench.plot import plot_results
+
     plot_results(all_results, out_dir)
     print(f"Plots saved to {out_dir}/")
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,10 +30,11 @@ def plot_results(results: list[RunResult], out_dir: Path) -> None:
         _plot_ari(algo, dims, group, out_dir)
 
 
-def _plot_size_scaling(algo: str, dims: int, results: list[RunResult], out_dir: Path) -> None:
+def _plot_size_scaling(
+    algo: str, dims: int, results: list[RunResult], out_dir: Path
+) -> None:
     """Performance vs dataset size, one line per thread count."""
     n_jobs_values = sorted(set(_get_n_jobs(r) for r in results))
-    sizes = sorted(set(r.size for r in results))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -53,7 +55,13 @@ def _plot_size_scaling(algo: str, dims: int, results: list[RunResult], out_dir: 
         if r.size not in sklearn_by_size:
             sklearn_by_size[r.size] = r.theirs_median_ms
     sk_sizes = sorted(sklearn_by_size.keys())
-    ax1.plot(sk_sizes, [sklearn_by_size[s] for s in sk_sizes], "s--", color="gray", label="sklearn")
+    ax1.plot(
+        sk_sizes,
+        [sklearn_by_size[s] for s in sk_sizes],
+        "s--",
+        color="gray",
+        label="sklearn",
+    )
 
     ax1.set_xlabel("Dataset size")
     ax1.set_ylabel("Median time (ms)")
@@ -75,7 +83,8 @@ def _plot_size_scaling(algo: str, dims: int, results: list[RunResult], out_dir: 
         ax2.plot(
             [r.size for r in subset],
             [r.speedup for r in subset],
-            "o-", label=label,
+            "o-",
+            label=label,
         )
     ax2.axhline(1.0, color="gray", linestyle="--", linewidth=1)
     ax2.set_xlabel("Dataset size")
@@ -90,7 +99,9 @@ def _plot_size_scaling(algo: str, dims: int, results: list[RunResult], out_dir: 
     plt.close(fig)
 
 
-def _plot_thread_scaling(algo: str, dims: int, results: list[RunResult], out_dir: Path) -> None:
+def _plot_thread_scaling(
+    algo: str, dims: int, results: list[RunResult], out_dir: Path
+) -> None:
     """Performance vs thread count, one line per dataset size."""
     sizes = sorted(set(r.size for r in results))
     n_jobs_values = sorted(set(_get_n_jobs(r) for r in results))
@@ -110,7 +121,9 @@ def _plot_thread_scaling(algo: str, dims: int, results: list[RunResult], out_dir
         xs = [_get_n_jobs(r) for r in subset]
         x_labels = [str(x) if x > 0 else "all" for x in xs]
 
-        ax1.plot(range(len(xs)), [r.ours_median_ms for r in subset], "o-", label=f"n={size}")
+        ax1.plot(
+            range(len(xs)), [r.ours_median_ms for r in subset], "o-", label=f"n={size}"
+        )
         ax1.set_xticks(range(len(xs)))
         ax1.set_xticklabels(x_labels)
 
@@ -139,7 +152,6 @@ def _plot_thread_scaling(algo: str, dims: int, results: list[RunResult], out_dir
 
 def _plot_memory(algo: str, dims: int, results: list[RunResult], out_dir: Path) -> None:
     """Peak memory vs dataset size, C++ vs sklearn."""
-    sizes = sorted(set(r.size for r in results))
     n_jobs_values = sorted(set(_get_n_jobs(r) for r in results))
 
     # Memory doesn't vary much with n_jobs for the same algo, pick n_jobs=1 for ours
@@ -152,10 +164,20 @@ def _plot_memory(algo: str, dims: int, results: list[RunResult], out_dir: Path) 
         [r for r in results if _get_n_jobs(r) == nj],
         key=lambda r: r.size,
     )
-    ax.plot([r.size for r in subset], [r.ours_peak_mb for r in subset],
-            "o-", label="C++ (ours)", color="steelblue")
-    ax.plot([r.size for r in subset], [r.theirs_peak_mb for r in subset],
-            "s-", label="sklearn", color="coral")
+    ax.plot(
+        [r.size for r in subset],
+        [r.ours_peak_mb for r in subset],
+        "o-",
+        label="C++ (ours)",
+        color="steelblue",
+    )
+    ax.plot(
+        [r.size for r in subset],
+        [r.theirs_peak_mb for r in subset],
+        "s-",
+        label="sklearn",
+        color="coral",
+    )
 
     ax.set_xlabel("Dataset size")
     ax.set_ylabel("Peak memory (MB)")
@@ -184,7 +206,12 @@ def _plot_ari(algo: str, dims: int, results: list[RunResult], out_dir: Path) -> 
 
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.bar(x, aris, color=colors)
-        ax.axhline(ari_threshold, color="gray", linestyle="--", label=f"threshold={ari_threshold}")
+        ax.axhline(
+            ari_threshold,
+            color="gray",
+            linestyle="--",
+            label=f"threshold={ari_threshold}",
+        )
         ax.set_xticks(x)
         ax.set_xticklabels([str(s) for s in sizes])
         ax.set_ylim(0, 1.05)
@@ -201,13 +228,20 @@ def _plot_ari(algo: str, dims: int, results: list[RunResult], out_dir: Path) -> 
         for i, nj in enumerate(n_jobs_values):
             aris = []
             for s in sizes:
-                r = next((r for r in results if r.size == s and _get_n_jobs(r) == nj), None)
+                r = next(
+                    (r for r in results if r.size == s and _get_n_jobs(r) == nj), None
+                )
                 aris.append(r.ari if r else 0)
             label = f"n_jobs={nj}" if nj > 0 else "n_jobs=all"
             colors = ["green" if a >= ari_threshold else "red" for a in aris]
             ax.bar(x + i * width - 0.4 + width / 2, aris, width, label=label, alpha=0.8)
 
-        ax.axhline(ari_threshold, color="gray", linestyle="--", label=f"threshold={ari_threshold}")
+        ax.axhline(
+            ari_threshold,
+            color="gray",
+            linestyle="--",
+            label=f"threshold={ari_threshold}",
+        )
         ax.set_xticks(x)
         ax.set_xticklabels([str(s) for s in sizes])
         ax.set_ylim(0, 1.05)

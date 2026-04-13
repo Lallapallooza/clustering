@@ -15,6 +15,12 @@ dependencies = [
 [project.scripts]
 benchmark = "pybench.cli:main"
 
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0",
+    "ruff>=0.15",
+]
+
 [tool.scikit-build]
 cmake.source-dir = "python"
 cmake.build-type = "Release"

@@ -1,12 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <numeric>
-#include <algorithm>
 #include <stack>
 
-#include "clustering/ndarray.h"
 #include "clustering/memory/linear_alloc.h"
+#include "clustering/ndarray.h"
 
 #ifdef CLUSTERING_USE_AVX2
 #include <immintrin.h>
@@ -25,28 +25,28 @@
  * This struct is separate from the KDTree class to facilitate usage in different allocators.
  */
 struct KDTreeNode {
-  std::size_t m_index;  ///< For internal: point index. For leaf: offset into m_indices.
-  std::size_t m_dim;    ///< For internal: split dimension. For leaf: count of points.
-  KDTreeNode  *m_left;  ///< Pointer to the left child (nullptr for leaf nodes)
-  KDTreeNode  *m_right; ///< Pointer to the right child (nullptr for leaf nodes)
+  std::size_t m_index; ///< For internal: point index. For leaf: offset into m_indices.
+  std::size_t m_dim;   ///< For internal: split dimension. For leaf: count of points.
+  KDTreeNode *m_left;  ///< Pointer to the left child (nullptr for leaf nodes)
+  KDTreeNode *m_right; ///< Pointer to the right child (nullptr for leaf nodes)
 };
 
-enum class KDTreeDistanceType {
-  kEucledian
-};
+enum class KDTreeDistanceType { kEucledian };
 
 /**
  * @brief Implements a KDTree data structure.
  *
  * KDTree is a space-partitioning data structure for organizing points in a K-dimensional space.
  * It is efficient in range-search and nearest neighbor search. This implementation contains
- * a vector of points and an allocator for KDTree nodes, with the root node representing the tree's starting point.
+ * a vector of points and an allocator for KDTree nodes, with the root node representing the tree's
+ * starting point.
  *
  * @tparam T Data type of the points.
  * @tparam LeafSize Maximum number of points in a leaf node before splitting (default 16).
  * @tparam AllocT Allocator type for KDTree nodes, defaults to LinearAllocator<KDTreeNode>.
  *
- * @warning The KDTree does not manage the lifecycle of the points array. Ensure the array remains valid during KDTree's lifetime.
+ * @warning The KDTree does not manage the lifecycle of the points array. Ensure the array remains
+ * valid during KDTree's lifetime.
  *
  * @par Usage Example
  * \code{.cpp}
@@ -58,14 +58,13 @@ enum class KDTreeDistanceType {
  * }
  * \endcode
  */
-template<class T, KDTreeDistanceType distanceType = KDTreeDistanceType::kEucledian,
-         std::size_t LeafSize = 16,
-         class AllocT=LinearAllocator<KDTreeNode>>
+template <class T, KDTreeDistanceType distanceType = KDTreeDistanceType::kEucledian,
+          std::size_t LeafSize = 16, class AllocT = LinearAllocator<KDTreeNode>>
 class KDTree {
- public:
+public:
   using value_type = T; ///< value_type is the type of the points in the KDTree
 
- public:
+public:
   /**
    * @brief Constructs a KDTree using a given set of points.
    *
@@ -75,10 +74,11 @@ class KDTree {
    *
    * @param points NDArray of points to build the KDTree.
    *
-   * @note The points array must remain valid for the lifetime of the KDTree, as the tree does not manage the array's lifecycle.
+   * @note The points array must remain valid for the lifetime of the KDTree, as the tree does not
+   * manage the array's lifecycle.
    */
   KDTree(const NDArray<T, 2> &points)
-    : m_allocator(calculatePoolSize(points.dim(0))), m_points(points), m_root(nullptr) {
+      : m_allocator(calculatePoolSize(points.dim(0))), m_points(points), m_root(nullptr) {
     m_indices.resize(points.dim(0));
     std::iota(m_indices.begin(), m_indices.end(), 0);
     m_root = build(0, m_indices.size(), 0);
@@ -96,7 +96,8 @@ class KDTree {
    * @param limit Maximum number of points to return. If -1, returns all points within the radius.
    * @return Vector of indices of points within the search radius.
    */
-  std::vector<std::size_t> query(const NDArray<T, 1> &query_point, T radius, int64_t limit = -1) const {
+  std::vector<std::size_t> query(const NDArray<T, 1> &query_point, T radius,
+                                 int64_t limit = -1) const {
     std::vector<std::size_t> indices;
     T radius_sq = radius * radius;
     query(m_root, query_point, radius_sq, indices, limit);
@@ -116,7 +117,7 @@ class KDTree {
     }
   }
 
- private:
+private:
   /**
    * @brief Calculates the required memory pool size for the KDTree's allocator.
    *
@@ -128,7 +129,8 @@ class KDTree {
    * @return Number of nodes to allocate.
    */
   static size_t calculatePoolSize(size_t numPoints) {
-    if (numPoints == 0) return 0;
+    if (numPoints == 0)
+      return 0;
     // With leaf-size tuning, the number of nodes is at most numPoints
     // (much less than the original 2*numPoints-1, since leaf nodes batch
     // up to LeafSize points each).
@@ -176,17 +178,15 @@ class KDTree {
     // Leaf node: store range into m_indices, brute-force at query time
     if (end - start <= LeafSize) {
       KDTreeNode *node = m_allocator.allocate();
-      *node = {
-        /*m_index=*/start,           // offset into m_indices
-        /*m_dim=*/end - start,       // count of points
-        /*m_left=*/nullptr,
-        /*m_right=*/nullptr
-      };
+      *node = {/*m_index=*/start,     // offset into m_indices
+               /*m_dim=*/end - start, // count of points
+               /*m_left=*/nullptr,
+               /*m_right=*/nullptr};
       return node;
     }
 
     // Internal node: split on median
-    std::size_t dim    = depth % m_points.dim(1);
+    std::size_t dim = depth % m_points.dim(1);
     std::size_t median = start + (end - start - 1) / 2;
 
     std::nth_element(m_indices.begin() + start, m_indices.begin() + median, m_indices.begin() + end,
@@ -195,16 +195,13 @@ class KDTree {
                      });
 
     KDTreeNode *node = m_allocator.allocate();
-    *node = {
-      /*m_index=*/m_indices[median],
-      /*m_dim=*/dim,
-      /*m_left=*/build(start, median, depth + 1),
-      /*m_right=*/build(median + 1, end, depth + 1)
-    };
+    *node = {/*m_index=*/m_indices[median],
+             /*m_dim=*/dim,
+             /*m_left=*/build(start, median, depth + 1),
+             /*m_right=*/build(median + 1, end, depth + 1)};
 
     return node;
   }
-
 
   /**
    * @brief Searches the KDTree for points within a specified radius of a query point.
@@ -220,11 +217,8 @@ class KDTree {
    * @param indices Vector to store the indices of points found within the search radius.
    * @param limit Optional limit on the number of points to find. If -1, no limit is applied.
    */
-  void query(KDTreeNode *root,
-             const NDArray<T, 1> &query_point,
-             T radius_sq,
-             std::vector<std::size_t> &indices,
-             int64_t limit = -1) const {
+  void query(KDTreeNode *root, const NDArray<T, 1> &query_point, T radius_sq,
+             std::vector<std::size_t> &indices, int64_t limit = -1) const {
     if (!root) {
       return;
     }
@@ -252,7 +246,8 @@ class KDTree {
           if (dist_sq <= radius_sq) {
             indices.push_back(idx);
           }
-          if (limit != -1 && indices.size() == static_cast<std::size_t>(limit)) break;
+          if (limit != -1 && indices.size() == static_cast<std::size_t>(limit))
+            break;
         }
         continue;
       }
@@ -278,14 +273,13 @@ class KDTree {
     }
   }
 
-
   /**
    * @brief Calculates the distance between a query point and a point in a KDTree.
    *
    * This function serves as a wrapper to select the appropriate distance calculation
-   * method (either EucledianDistanceScalar or EucledianDistanceAVX2) based on whether AVX2 instructions
-   * are being used. If CLUSTERING_USE_AVX2 is defined, EucledianDistanceAVX2 is used; otherwise,
-   * EucledianDistanceScalar is used.
+   * method (either EucledianDistanceScalar or EucledianDistanceAVX2) based on whether AVX2
+   * instructions are being used. If CLUSTERING_USE_AVX2 is defined, EucledianDistanceAVX2 is used;
+   * otherwise, EucledianDistanceScalar is used.
    *
    * @tparam T The data type of the elements in the NDArray.
    * @param query_point A reference to an NDArray representing the query point.
@@ -294,7 +288,7 @@ class KDTree {
    */
   inline T distanceSquared(const NDArray<T, 1> &query_point, std::size_t index) const noexcept {
     if constexpr (distanceType == KDTreeDistanceType::kEucledian) {
-      #ifdef CLUSTERING_USE_AVX2
+#ifdef CLUSTERING_USE_AVX2
       // Below 8 dims an AVX2 register holds zero useful lanes; the horizontal-sum
       // epilogue is pure tax. Branch is on a value fixed at tree construction,
       // perfectly predicted.
@@ -302,14 +296,15 @@ class KDTree {
         return EucledianDistanceSquaredAVX2(query_point, index);
       }
       return EucledianDistanceSquaredScalar(query_point, index);
-      #else
+#else
       return EucledianDistanceSquaredScalar(query_point, index);
-      #endif
+#endif
     }
   }
 
   /**
-   * @brief Calculates the Euclidean distance between a query point and a point in a KDTree using scalar operations.
+   * @brief Calculates the Euclidean distance between a query point and a point in a KDTree using
+   * scalar operations.
    *
    * This method is a fallback for environments where AVX2 instructions are not available.
    * It calculates the Euclidean distance by iterating through each dimension, computing
@@ -320,9 +315,11 @@ class KDTree {
    * @param query_point A reference to an NDArray representing the query point.
    * @param index The index of the point in the KDTree to compare with the query point.
    * @return The Euclidean distance between the query point and the specified point in the KDTree.
-   * @exception noexcept This function is marked noexcept, meaning it is not expected to throw exceptions.
+   * @exception noexcept This function is marked noexcept, meaning it is not expected to throw
+   * exceptions.
    */
-  T EucledianDistanceSquaredScalar(const NDArray<T, 1> &query_point, std::size_t index) const noexcept {
+  T EucledianDistanceSquaredScalar(const NDArray<T, 1> &query_point,
+                                   std::size_t index) const noexcept {
     T sum = 0.0f;
 
     for (std::size_t dim = 0; dim < m_points.dim(1); ++dim) {
@@ -334,7 +331,8 @@ class KDTree {
 
 #ifdef CLUSTERING_USE_AVX2
   /**
-   * @brief Calculates the Euclidean distance between a query point and a point in a KDTree using AVX2 vectorized operations.
+   * @brief Calculates the Euclidean distance between a query point and a point in a KDTree using
+   * AVX2 vectorized operations.
    *
    * This method leverages AVX2 instructions to process multiple dimensions simultaneously
    * for faster computation. It is used when CLUSTERING_USE_AVX2 is defined. The method
@@ -345,9 +343,11 @@ class KDTree {
    * @param query_point A reference to an NDArray representing the query point.
    * @param index The index of the point in the KDTree to compare with the query point.
    * @return The Euclidean distance between the query point and the specified point in the KDTree.
-   * @exception noexcept This function is marked noexcept, meaning it is not expected to throw exceptions.
+   * @exception noexcept This function is marked noexcept, meaning it is not expected to throw
+   * exceptions.
    */
-  T EucledianDistanceSquaredAVX2(const NDArray<T, 1> &query_point, std::size_t index) const noexcept {
+  T EucledianDistanceSquaredAVX2(const NDArray<T, 1> &query_point,
+                                 std::size_t index) const noexcept {
     // Initialize a vector to accumulate squared differences, using AVX2 for efficient computation.
     __m256 sum_vec = _mm256_setzero_ps();
 
@@ -361,7 +361,7 @@ class KDTree {
       __m256 v2 = _mm256_load_ps(m_points[index][dim].data());
 
       // Compute and accumulate the squared differences between elements.
-      __m256 diff    = _mm256_sub_ps(v1, v2);
+      __m256 diff = _mm256_sub_ps(v1, v2);
       __m256 sq_diff = _mm256_mul_ps(diff, diff);
       sum_vec = _mm256_add_ps(sum_vec, sq_diff);
     }
@@ -384,10 +384,10 @@ class KDTree {
   }
 #endif
 
- private:
-  AllocT m_allocator;            ///< Allocator for the KDTree
+private:
+  AllocT m_allocator; ///< Allocator for the KDTree
 
-  KDTreeNode                *m_root;    ///< Root of the KDTree
-  const NDArray<T, 2>       &m_points;  ///< NDArray of points in the KDTree
-  std::vector<std::size_t>  m_indices;  ///< Shared index array for build
+  KDTreeNode *m_root;                 ///< Root of the KDTree
+  const NDArray<T, 2> &m_points;      ///< NDArray of points in the KDTree
+  std::vector<std::size_t> m_indices; ///< Shared index array for build
 };

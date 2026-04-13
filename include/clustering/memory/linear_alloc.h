@@ -2,19 +2,14 @@
 #include <cstdint>
 #include <type_traits>
 
-template<typename T>
-class LinearAllocator {
+template <typename T> class LinearAllocator {
   static_assert(std::is_trivially_destructible<T>::value, "T must be trivially destructible");
 
- public:
+public:
   LinearAllocator(size_t count)
-    : size(count * sizeof(T)),
-      memory(new char[count * sizeof(T)]),
-      next(memory) {}
+      : size(count * sizeof(T)), memory(new char[count * sizeof(T)]), next(memory) {}
 
-  ~LinearAllocator() {
-    delete[] memory;
-  }
+  ~LinearAllocator() { delete[] memory; }
 
   LinearAllocator(const LinearAllocator &) = delete;
   LinearAllocator &operator=(const LinearAllocator &) = delete;
@@ -26,22 +21,18 @@ class LinearAllocator {
 
     T *result = reinterpret_cast<T *>(next);
     next += sizeof(T);
-    return new(result) T;
+    return new (result) T;
   }
 
   void deallocate(T *ptr) {
     // Do nothing because T is trivially destructible
   }
 
-  void reset() {
-    next = memory;
-  }
+  void reset() { next = memory; }
 
-  bool isDeallocSupported() {
-    return false;
-  }
+  bool isDeallocSupported() { return false; }
 
- private:
+private:
   size_t size;
   char *memory;
   char *next;
