@@ -105,11 +105,12 @@ Formatting and linting hooks run via [pre-commit](https://pre-commit.com/). The 
 
 ```bash
 uv sync --group dev
-uv run pre-commit install              # install the git hook (once)
-uv run pre-commit run --all-files      # run every hook on the whole repo
+uv run pre-commit install                        # pre-commit hook (once)
+uv run pre-commit install --hook-type commit-msg # commit-msg hook (once)
+uv run pre-commit run --all-files                # run every hook on the repo
 ```
 
-After `install`, hooks run automatically on `git commit`. The configured hooks are `clang-format` for C++, `gersemi` for CMake, `ruff` for Python, and the standard whitespace/YAML checks.
+After `install`, hooks run automatically on `git commit`. The configured hooks are `clang-format` for C++, `gersemi` for CMake, `ruff` for Python, the standard whitespace/YAML checks, and `commitizen` which enforces [Conventional Commits](https://www.conventionalcommits.org/) on the commit message itself (e.g. `feat:`, `fix:`, `build:`, `chore:`, `docs:`).
 
 clang-tidy is **not** a pre-commit hook (too slow, needs a compile database). It runs as part of the build whenever `CLUSTERING_ENABLE_CLANG_TIDY` is on, and in the `tidy` CI job.
 
