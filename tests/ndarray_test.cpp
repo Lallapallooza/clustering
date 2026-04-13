@@ -292,3 +292,154 @@ TEST(Permute, Rank2SwapMatchesTranspose) {
     }
   }
 }
+
+TEST(View, Rank2To1SharesStorage) {
+  NDArray<float, 2> arr({100, 10});
+  for (std::size_t i = 0; i < 100; ++i) {
+    for (std::size_t j = 0; j < 10; ++j) {
+      arr[i][j] = static_cast<float>(i * 10 + j);
+    }
+  }
+  auto flat = arr.view(std::array<std::size_t, 1>{1000});
+  EXPECT_EQ(flat.dim(0), 1000u);
+  EXPECT_EQ(flat.strideAt(0), 1);
+  EXPECT_TRUE(sameStorage(arr, flat));
+  for (std::size_t i = 0; i < 100; ++i) {
+    for (std::size_t j = 0; j < 10; ++j) {
+      EXPECT_FLOAT_EQ(flat[i * 10 + j], static_cast<float>(i * 10 + j));
+    }
+  }
+}
+
+// view<M> on a Contig source returns a Contig view, never MaybeStrided.
+static_assert(
+    std::is_same_v<decltype(std::declval<NDArray<float, 2> &>().view(std::array<std::size_t, 1>{})),
+                   NDArray<float, 1, Layout::Contig>>,
+    "view<M>() must yield a Contig result");
+
+TEST(Reshape, ContigNoAlloc) {
+  NDArray<float, 2> arr({8, 12});
+  for (std::size_t i = 0; i < 8; ++i) {
+    for (std::size_t j = 0; j < 12; ++j) {
+      arr[i][j] = static_cast<float>(i * 12 + j);
+    }
+  }
+  auto view = arr.reshape(std::array<std::size_t, 3>{4, 2, 12});
+  EXPECT_EQ(view.dim(0), 4u);
+  EXPECT_EQ(view.dim(1), 2u);
+  EXPECT_EQ(view.dim(2), 12u);
+  EXPECT_TRUE(sameStorage(arr, view));
+  for (std::size_t flat = 0; flat < 96; ++flat) {
+    EXPECT_FLOAT_EQ(view.flatIndex(flat), static_cast<float>(flat));
+  }
+}
+
+TEST(Reshape, NonContigAllocates) {
+  NDArray<float, 2> arr({4, 5});
+  for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t j = 0; j < 5; ++j) {
+      arr[i][j] = static_cast<float>(i * 5 + j);
+    }
+  }
+  auto transposed = arr.t();
+  ASSERT_FALSE(transposed.isContiguous());
+  auto flat = transposed.reshape(std::array<std::size_t, 1>{20});
+  EXPECT_FALSE(sameStorage(arr, flat));
+  EXPECT_EQ(flat.dim(0), 20u);
+  // Expected dense row-major walk of the transposed (5x4) view: column-major of the source.
+  for (std::size_t j = 0; j < 5; ++j) {
+    for (std::size_t i = 0; i < 4; ++i) {
+      EXPECT_FLOAT_EQ(flat[j * 4 + i], static_cast<float>(i * 5 + j));
+    }
+  }
+}
+
+TEST(Contiguous, AlreadyContigSharesStorage) {
+  NDArray<float, 2> arr({6, 7});
+  for (std::size_t i = 0; i < 6; ++i) {
+    for (std::size_t j = 0; j < 7; ++j) {
+      arr[i][j] = static_cast<float>(i * 7 + j);
+    }
+  }
+  auto same = arr.contiguous();
+  EXPECT_TRUE(sameStorage(arr, same));
+  EXPECT_EQ(same.dim(0), arr.dim(0));
+  EXPECT_EQ(same.dim(1), arr.dim(1));
+  EXPECT_EQ(same.strideAt(0), 7);
+  EXPECT_EQ(same.strideAt(1), 1);
+}
+
+TEST(Contiguous, StridedReallocatesAndCopies) {
+  NDArray<float, 2> arr({3, 5});
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 5; ++j) {
+      arr[i][j] = static_cast<float>(i * 100 + j);
+    }
+  }
+  auto transposed = arr.t();
+  auto dense = transposed.contiguous();
+  EXPECT_FALSE(sameStorage(arr, dense));
+  EXPECT_EQ(dense.dim(0), 5u);
+  EXPECT_EQ(dense.dim(1), 3u);
+  EXPECT_TRUE(dense.isContiguous());
+  for (std::size_t i = 0; i < 5; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      EXPECT_FLOAT_EQ(dense(i, j), transposed(i, j));
+      EXPECT_FLOAT_EQ(dense(i, j), static_cast<float>(j * 100 + i));
+    }
+  }
+}
+
+TEST(Clone, AlwaysAllocates) {
+  NDArray<float, 2> arr({4, 3});
+  for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      arr[i][j] = static_cast<float>(i * 10 + j);
+    }
+  }
+  auto copy = arr.clone();
+  EXPECT_FALSE(sameStorage(arr, copy));
+  EXPECT_EQ(copy.dim(0), 4u);
+  EXPECT_EQ(copy.dim(1), 3u);
+  EXPECT_TRUE(copy.isAligned<32>());
+  for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      EXPECT_FLOAT_EQ(copy[i][j], arr[i][j]);
+    }
+  }
+  // Mutating the clone must not touch the source: confirms independent storage.
+  copy[0][0] = -1.0f;
+  EXPECT_FLOAT_EQ(static_cast<float>(arr[0][0]), 0.0f);
+}
+
+TEST(Clone, StridedSourceProducesDenseOwned) {
+  NDArray<float, 2> arr({3, 5});
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 5; ++j) {
+      arr[i][j] = static_cast<float>(i * 5 + j);
+    }
+  }
+  auto transposed = arr.t();
+  auto copy = transposed.clone();
+  EXPECT_FALSE(sameStorage(arr, copy));
+  EXPECT_TRUE(copy.isContiguous());
+  EXPECT_EQ(copy.dim(0), 5u);
+  EXPECT_EQ(copy.dim(1), 3u);
+  for (std::size_t i = 0; i < 5; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      EXPECT_FLOAT_EQ(copy(i, j), transposed(i, j));
+    }
+  }
+}
+
+// view<M> on a non-contiguous MaybeStrided source must assert in debug. Transpose yields a
+// MaybeStrided view whose strides no longer match the contiguous layout, so .view<1>({20})
+// violates the precondition and must trap.
+TEST(ViewDeathTest, NonContigSourceAborts) {
+  NDArray<float, 2> arr({4, 5});
+  auto transposed = arr.t();
+  ASSERT_FALSE(transposed.isContiguous());
+  EXPECT_DEBUG_DEATH(
+      { (void)transposed.view(std::array<std::size_t, 1>{20}); },
+      "view<M> requires a contiguous source");
+}

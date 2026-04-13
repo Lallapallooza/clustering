@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <memory>
 #include <new>
@@ -257,6 +258,28 @@ public:
     for (auto d : dims) {
       m_shape[i++] = d;
       size *= d;
+    }
+    m_strides = computeContiguousStrides(m_shape);
+    m_vec.resize(size);
+    m_data = m_vec.data();
+  }
+
+  /**
+   * @brief Constructs a contiguous owned NDArray from a runtime @c std::array of dimensions.
+   *
+   * Mirrors the initializer-list constructor but accepts a shape already materialized as a
+   * @c std::array, the form consumed by @c reshape, @c contiguous, and @c clone when they
+   * need to allocate a fresh buffer.
+   *
+   * @param shape Dimensions of the NDArray, one entry per axis.
+   */
+  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
+  explicit NDArray(std::array<std::size_t, N> shape)
+      : m_data(nullptr), m_shape(shape), m_offset(0), m_storage(NDArrayStorage::Owned),
+        m_mutable(true) {
+    std::size_t size = 1;
+    for (std::size_t k = 0; k < N; ++k) {
+      size *= m_shape[k];
     }
     m_strides = computeContiguousStrides(m_shape);
     m_vec.resize(size);
@@ -619,6 +642,111 @@ public:
   }
 
   /**
+   * @brief Returns a borrowed contiguous rank-@p M view over the same buffer with shape @p shape.
+   *
+   * Strict no-alloc primitive: the source must be runtime-contiguous (debug-asserted). Callers
+   * that want the copy-on-nonconfig fallback should use @c reshape instead. The element count of
+   * @p shape must equal the source's element count.
+   *
+   * @tparam M Target rank. May differ from @c N.
+   * @param shape Dimensions of the returned view, one entry per axis.
+   */
+  template <std::size_t M>
+  NDArray<T, M, Layout::Contig> view(std::array<std::size_t, M> shape) noexcept {
+    assert(isContiguous() && "view<M> requires a contiguous source");
+    assert(productOfShape(shape) == numel() && "view<M> must preserve element count");
+    return NDArray<T, M, Layout::Contig>(
+        clustering::detail::BorrowedTag{}, m_data, shape,
+        NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, m_mutable);
+  }
+
+  template <std::size_t M>
+  NDArray<T, M, Layout::Contig> view(std::array<std::size_t, M> shape) const noexcept {
+    assert(isContiguous() && "view<M> requires a contiguous source");
+    assert(productOfShape(shape) == numel() && "view<M> must preserve element count");
+    return NDArray<T, M, Layout::Contig>(
+        clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), shape,
+        NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, false);
+  }
+
+  /**
+   * @brief Returns a contiguous rank-@p M array with shape @p shape, copying only when needed.
+   *
+   * Aliases the existing buffer when the source is runtime-contiguous; allocates an owned
+   * dense copy otherwise. Callers that require no-hidden-allocation guarantees should use
+   * @c view instead, which asserts on non-contiguous input without the allocation fallback.
+   *
+   * @tparam M Target rank. May differ from @c N.
+   * @param shape Dimensions of the result, one entry per axis.
+   */
+  template <std::size_t M> NDArray<T, M, Layout::Contig> reshape(std::array<std::size_t, M> shape) {
+    assert(productOfShape(shape) == numel() && "reshape<M> must preserve element count");
+    if (isContiguous()) {
+      return NDArray<T, M, Layout::Contig>(
+          clustering::detail::BorrowedTag{}, m_data, shape,
+          NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, m_mutable);
+    }
+    NDArray<T, M, Layout::Contig> result(shape);
+    copyToContiguous(result.data());
+    return result;
+  }
+
+  template <std::size_t M>
+  NDArray<T, M, Layout::Contig> reshape(std::array<std::size_t, M> shape) const {
+    assert(productOfShape(shape) == numel() && "reshape<M> must preserve element count");
+    if (isContiguous()) {
+      return NDArray<T, M, Layout::Contig>(
+          clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), shape,
+          NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, false);
+    }
+    NDArray<T, M, Layout::Contig> result(shape);
+    copyToContiguous(result.data());
+    return result;
+  }
+
+  /**
+   * @brief Returns a contiguous rank-@c N array with the same shape, copying only when needed.
+   *
+   * Already-contiguous sources are aliased into a borrowed view sharing storage; strided sources
+   * allocate a dense owned copy. The return type drops the @c MaybeStrided tag so downstream hot
+   * paths can resume the @c operator[] chain.
+   */
+  NDArray<T, N, Layout::Contig> contiguous() {
+    if (isContiguous()) {
+      return NDArray<T, N, Layout::Contig>(
+          clustering::detail::BorrowedTag{}, m_data, m_shape,
+          NDArray<T, N, Layout::Contig>::computeContiguousStrides(m_shape), 0, m_mutable);
+    }
+    NDArray<T, N, Layout::Contig> result(m_shape);
+    copyToContiguous(result.data());
+    return result;
+  }
+
+  NDArray<T, N, Layout::Contig> contiguous() const {
+    if (isContiguous()) {
+      return NDArray<T, N, Layout::Contig>(
+          clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), m_shape,
+          NDArray<T, N, Layout::Contig>::computeContiguousStrides(m_shape), 0, false);
+    }
+    NDArray<T, N, Layout::Contig> result(m_shape);
+    copyToContiguous(result.data());
+    return result;
+  }
+
+  /**
+   * @brief Returns a freshly-allocated owned contiguous array with deep-copied contents.
+   *
+   * Always allocates; unlike @c contiguous, never aliases the source buffer. Equivalent to
+   * NumPy's @c ndarray.copy: the caller receives an independent owner with matching values and
+   * row-major layout.
+   */
+  NDArray<T, N, Layout::Contig> clone() const {
+    NDArray<T, N, Layout::Contig> result(m_shape);
+    copyToContiguous(result.data());
+    return result;
+  }
+
+  /**
    * @brief Returns a formatted string representing the contents of the NDArray.
    *
    * This method is primarily used for debugging purposes, providing a visual representation
@@ -651,6 +779,45 @@ private:
       s[k - 1] = s[k] * static_cast<std::ptrdiff_t>(shape[k]);
     }
     return s;
+  }
+
+  template <std::size_t M>
+  static std::size_t productOfShape(const std::array<std::size_t, M> &shape) noexcept {
+    std::size_t size = 1;
+    for (std::size_t k = 0; k < M; ++k) {
+      size *= shape[k];
+    }
+    return size;
+  }
+
+  std::size_t numel() const noexcept { return productOfShape(m_shape); }
+
+  // Walk this array in row-major order and write elements densely to @p dst. Fast-path
+  // @c memcpy when already contiguous, else advance a multi-index cursor and index through
+  // @c m_offset + sum_k idx[k] * m_strides[k]. Shared by @c reshape, @c contiguous, @c clone.
+  void copyToContiguous(T *dst) const noexcept {
+    const std::size_t total = numel();
+    if (total == 0) {
+      return;
+    }
+    if (isContiguous()) {
+      std::memcpy(dst, m_data + m_offset, total * sizeof(T));
+      return;
+    }
+    std::array<std::size_t, N> idx{};
+    for (std::size_t flat = 0; flat < total; ++flat) {
+      std::ptrdiff_t off = m_offset;
+      for (std::size_t k = 0; k < N; ++k) {
+        off += static_cast<std::ptrdiff_t>(idx[k]) * m_strides[k];
+      }
+      dst[flat] = m_data[off];
+      for (std::size_t k = N; k-- > 0;) {
+        if (++idx[k] < m_shape[k]) {
+          break;
+        }
+        idx[k] = 0;
+      }
+    }
   }
 
   template <std::size_t... Ks, class... Ix>
