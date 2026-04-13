@@ -10,9 +10,11 @@ option(
 )
 
 if(CLUSTERING_ENABLE_CLANG_TIDY)
-    find_program(CLANG_TIDY_EXE NAMES clang-tidy)
+    find_program(
+        CLANG_TIDY_EXE
+        NAMES clang-tidy clang-tidy-21 clang-tidy-20 clang-tidy-19 clang-tidy-18
+    )
     if(CLANG_TIDY_EXE)
-        set(CMAKE_CXX_CLANG_TIDY "${CLANG_TIDY_EXE}" CACHE STRING "" FORCE)
         message(STATUS "clang-tidy enabled: ${CLANG_TIDY_EXE}")
     else()
         message(
@@ -21,6 +23,15 @@ if(CLUSTERING_ENABLE_CLANG_TIDY)
         )
     endif()
 endif()
+
+function(clustering_enable_tidy target)
+    if(CLUSTERING_ENABLE_CLANG_TIDY AND CLANG_TIDY_EXE)
+        set_target_properties(
+            ${target}
+            PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_EXE}"
+        )
+    endif()
+endfunction()
 
 if(CLUSTERING_IS_TOP_LEVEL)
     find_program(CLANG_FORMAT_EXE NAMES clang-format)
