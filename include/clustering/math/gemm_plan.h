@@ -111,17 +111,13 @@ public:
     if (A.dim(0) == 0 || m_nDim == 0) {
       return;
     }
-    constexpr std::size_t kMcVal = detail::kMc<T>;
-    constexpr std::size_t kKcVal = detail::kKc<T>;
 
-    // workerIndex() reports 0 outside a pool task body, so on the serial path this reliably
-    // selects arena slice 0.
-    const std::size_t worker = Pool::workerIndex();
-    T *apSlice = m_scratch.data() + (worker * kMcVal * kKcVal);
-
+    // Pass the full scratch base — gemmRunPrepacked slices per-worker inside its Mc dispatch via
+    // Pool::workerIndex(). On the serial path workerIndex() returns 0, so slice 0 is used.
     auto Ad = ::clustering::detail::describeMatrix(A);
     auto Cd = ::clustering::detail::describeMatrixMut(C);
-    detail::gemmRunPrepacked<T>(Ad, m_Bp.data(), m_kDim, m_nDim, Cd, alpha, beta, apSlice, m_pool);
+    detail::gemmRunPrepacked<T>(Ad, m_Bp.data(), m_kDim, m_nDim, Cd, alpha, beta, m_scratch.data(),
+                                m_pool);
   }
 
   /// @brief Inner dimension captured at construction (@c B.rows).

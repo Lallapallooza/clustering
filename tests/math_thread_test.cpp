@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include <BS_thread_pool.hpp>
-#include <array>
 #include <atomic>
 #include <cstddef>
 
@@ -16,25 +15,20 @@ constexpr std::size_t kSubmitLoopRange = 4096;
 
 } // namespace
 
-TEST(MathThreadPool, WorkerIndexInPoolTaskIsStableAndCoversAllWorkers) {
+TEST(MathThreadPool, WorkerIndexInPoolTaskIsAlwaysInRange) {
+  // BS::light_thread_pool's work-stealing scheduler does not guarantee every worker
+  // receives at least one chunk -- a fast worker can drain the queue before a slower
+  // peer wakes up. The durable invariant is that whichever worker runs a task body
+  // reports an id strictly less than the configured worker count; per-invocation
+  // equality with BS::this_thread::get_index() is pinned by the next test.
   BS::light_thread_pool pool(kFixtureWorkers);
 
-  std::array<std::atomic<bool>, kFixtureWorkers> seen{};
-  for (auto &flag : seen) {
-    flag.store(false, std::memory_order_relaxed);
-  }
-
   pool.submit_loop(std::size_t{0}, kSubmitLoopRange,
-                   [&seen](std::size_t /*i*/) {
+                   [](std::size_t /*i*/) {
                      const std::size_t id = Pool::workerIndex();
                      ASSERT_LT(id, kFixtureWorkers);
-                     seen[id].store(true, std::memory_order_relaxed);
                    })
       .wait();
-
-  for (std::size_t i = 0; i < kFixtureWorkers; ++i) {
-    EXPECT_TRUE(seen[i].load(std::memory_order_relaxed)) << "worker " << i << " never observed";
-  }
 }
 
 TEST(MathThreadPool, WorkerIndexMatchesBSGetIndex) {
