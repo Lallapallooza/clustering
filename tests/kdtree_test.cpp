@@ -16,7 +16,7 @@ TEST(KDTree, RadiusQueryFindsNearbyPoints) {
   points[3][0] = 10.0f;
   points[3][1] = 0.0f;
 
-  KDTree<float> tree(points);
+  const KDTree<float> tree(points);
 
   NDArray<float, 1> query({2});
   query[0] = 0.0f;
@@ -33,7 +33,7 @@ TEST(KDTree, RadiusQueryReturnsEmptyWhenNoneInRange) {
   points[1][0] = 10.0f;
   points[1][1] = 10.0f;
 
-  KDTree<float> tree(points);
+  const KDTree<float> tree(points);
 
   NDArray<float, 1> query({2});
   query[0] = 100.0f;
@@ -50,7 +50,7 @@ TEST(KDTree, LimitCapsTheReturnedCount) {
     points[i][1] = 0.0f;
   }
 
-  KDTree<float> tree(points);
+  const KDTree<float> tree(points);
 
   NDArray<float, 1> query({2});
   query[0] = 0.0f;

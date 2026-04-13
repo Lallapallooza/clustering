@@ -1,6 +1,6 @@
 ---
 # Only lint our own headers (not CPM-fetched deps).
-HeaderFilterRegex: 'include/clustering/[^/]+\.h$'
+HeaderFilterRegex: 'include/clustering/.*\.h$'
 
 Checks: >
   bugprone-*,
@@ -15,14 +15,17 @@ Checks: >
   -modernize-use-trailing-return-type,
   -modernize-use-nodiscard,
   -readability-identifier-naming,
+  -readability-identifier-length,
   -readability-magic-numbers,
   -readability-function-cognitive-complexity,
   -readability-named-parameter,
   -readability-uppercase-literal-suffix,
+  -portability-avoid-pragma-once,
+  -portability-simd-intrinsics,
   -misc-non-private-member-variables-in-classes,
   -misc-no-recursion,
   -misc-include-cleaner
 
-WarningsAsErrors: ''
+WarningsAsErrors: '*'
 
 FormatStyle: file

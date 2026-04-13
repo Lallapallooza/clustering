@@ -12,7 +12,7 @@ TEST(DBSCAN, FindsTwoWellSeparatedClusters) {
     points[i][1] = 0.0f;
   }
   for (std::size_t i = 5; i < 10; ++i) {
-    points[i][0] = 10.0f + static_cast<float>(i - 5) * 0.1f;
+    points[i][0] = 10.0f + (static_cast<float>(i - 5) * 0.1f);
     points[i][1] = 0.0f;
   }
 

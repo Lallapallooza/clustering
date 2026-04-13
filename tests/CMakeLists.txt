@@ -8,7 +8,7 @@ add_executable(
 )
 target_link_libraries(
     clustering_tests
-    PRIVATE clustering_header_lib GTest::gtest_main
+    PRIVATE clustering_header_lib clustering_warnings GTest::gtest_main
 )
 clustering_enable_tidy(clustering_tests)
 

@@ -5,7 +5,6 @@
 #include "clustering/math/equality.h"
 #include "clustering/ndarray.h"
 
-using clustering::Layout;
 using clustering::NDArray;
 
 TEST(MathArrayEqual, ShapeMismatchReturnsFalse) {
@@ -29,8 +28,8 @@ TEST(MathArrayEqual, ElementMismatchReturnsFalse) {
   NDArray<float, 2> b({2, 3});
   for (std::size_t i = 0; i < 2; ++i) {
     for (std::size_t j = 0; j < 3; ++j) {
-      a[i][j] = static_cast<float>(i * 3 + j);
-      b[i][j] = static_cast<float>(i * 3 + j);
+      a[i][j] = static_cast<float>((i * 3) + j);
+      b[i][j] = static_cast<float>((i * 3) + j);
     }
   }
   b[1][2] = 99.0F;
@@ -42,7 +41,7 @@ TEST(MathArrayEqual, ExactMatchReturnsTrue) {
   NDArray<double, 2> b({4, 5});
   for (std::size_t i = 0; i < 4; ++i) {
     for (std::size_t j = 0; j < 5; ++j) {
-      const double v = static_cast<double>(i) * 0.25 - static_cast<double>(j);
+      const double v = (static_cast<double>(i) * 0.25) - static_cast<double>(j);
       a[i][j] = v;
       b[i][j] = v;
     }
@@ -51,8 +50,8 @@ TEST(MathArrayEqual, ExactMatchReturnsTrue) {
 }
 
 TEST(MathArrayEqual, EmptyArraysReturnTrue) {
-  NDArray<float, 2> a({0, 5});
-  NDArray<float, 2> b({0, 5});
+  const NDArray<float, 2> a({0, 5});
+  const NDArray<float, 2> b({0, 5});
   EXPECT_TRUE(clustering::math::arrayEqual(a, b));
 }
 
@@ -60,7 +59,7 @@ TEST(MathArrayEqual, StridedVsContiguousSameValues) {
   NDArray<float, 2> a({3, 2});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 2; ++j) {
-      a[i][j] = static_cast<float>(i * 2 + j);
+      a[i][j] = static_cast<float>((i * 2) + j);
     }
   }
   auto roundTrip = a.t().t();

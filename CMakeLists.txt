@@ -33,8 +33,22 @@ target_include_directories(
 )
 target_link_libraries(clustering_header_lib INTERFACE bshoshany_thread_pool)
 
+# Top-level-only: enforce -Wall -Wextra -Werror on our executables.
+# Consumers that pull us in as a subdirectory do not inherit these flags.
+add_library(clustering_warnings INTERFACE)
+if(CLUSTERING_IS_TOP_LEVEL)
+    target_compile_options(
+        clustering_warnings
+        INTERFACE
+            $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall;-Wextra;-Werror>
+    )
+endif()
+
 add_executable(clustering_demo app/main.cpp)
-target_link_libraries(clustering_demo PRIVATE clustering_header_lib)
+target_link_libraries(
+    clustering_demo
+    PRIVATE clustering_header_lib clustering_warnings
+)
 clustering_enable_tidy(clustering_demo)
 
 if(CLUSTERING_USE_AVX2)
@@ -62,6 +76,7 @@ if(CLUSTERING_BUILD_BENCHMARK)
         NAME benchmark
         GITHUB_REPOSITORY google/benchmark
         VERSION 1.9.4
+        SYSTEM YES
         OPTIONS "BENCHMARK_ENABLE_GTEST_TESTS OFF;BENCHMARK_ENABLE_TESTING OFF"
     )
     add_executable(kdtree_benchmark benchmark/kdtree_benchmark.cpp)
@@ -70,6 +85,7 @@ if(CLUSTERING_BUILD_BENCHMARK)
         kdtree_benchmark
         benchmark::benchmark
         clustering_header_lib
+        clustering_warnings
     )
     clustering_enable_tidy(kdtree_benchmark)
 endif()

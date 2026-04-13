@@ -7,8 +7,7 @@
 
 #include "clustering/ndarray.h"
 
-namespace clustering {
-namespace detail {
+namespace clustering::detail {
 
 /**
  * @brief POD descriptor for a rank-2 matrix view consumed by microkernel inner loops.
@@ -47,7 +46,7 @@ inline std::size_t largestPow2Alignment(std::uintptr_t addr) noexcept {
   if (addr == 0) {
     return 1;
   }
-  for (std::size_t a :
+  for (const std::size_t a :
        {std::size_t{64}, std::size_t{32}, std::size_t{16}, std::size_t{8}, std::size_t{4}}) {
     if ((addr % a) == 0) {
       return a;
@@ -104,5 +103,4 @@ template <class T, Layout L> inline MatrixDesc<T> describeMatrixMut(NDArray<T, 2
   return d;
 }
 
-} // namespace detail
-} // namespace clustering
+} // namespace clustering::detail

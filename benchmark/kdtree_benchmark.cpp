@@ -12,8 +12,10 @@ using clustering::KDTreeNode;
 using clustering::NDArray;
 using clustering::NewAllocator;
 
+namespace {
+
 template <class T, float Min = -1.0f, float Max = 1.0f>
-static NDArray<T, 2> generateRandomPoints(size_t num_points, size_t dims) {
+NDArray<T, 2> generateRandomPoints(size_t num_points, size_t dims) {
   std::random_device rd;
   std::mt19937 gen(rd());
   std::uniform_real_distribution<double> dis(Min, Max);
@@ -29,7 +31,7 @@ static NDArray<T, 2> generateRandomPoints(size_t num_points, size_t dims) {
 }
 
 template <class T, float Min = -1.0f, float Max = 1.0f>
-static NDArray<T, 1> generateRandomQueryPoint(size_t dimensions) {
+NDArray<T, 1> generateRandomQueryPoint(size_t dimensions) {
   std::random_device rd;
   std::mt19937 gen(rd());
   std::uniform_real_distribution<double> dis(Min, Max);
@@ -43,15 +45,16 @@ static NDArray<T, 1> generateRandomQueryPoint(size_t dimensions) {
 }
 
 template <class KDTreeT, float Min = -1.0f, float Max = 1.0f>
-static void BM_KDTreeConstruction(benchmark::State &state) {
-  size_t num_points = state.range(0);
-  size_t dimensions = state.range(1);
+void BM_KDTreeConstruction(benchmark::State &state) {
+  const size_t num_points = state.range(0);
+  const size_t dimensions = state.range(1);
 
   for (auto _ : state) {
     state.PauseTiming();
     auto points =
         generateRandomPoints<typename KDTreeT::value_type, Min, Max>(num_points, dimensions);
-    char *buffer = new char[sizeof(KDTreeT)];
+    // Placement new writes through this pointer; tidy can't see it.
+    char *const buffer = new char[sizeof(KDTreeT)]; // NOLINT(misc-const-correctness)
 
     state.ResumeTiming();
     auto *tree = new (buffer) KDTreeT(points);
@@ -64,9 +67,9 @@ static void BM_KDTreeConstruction(benchmark::State &state) {
 }
 
 template <class KDTreeT, float Min = -1.0f, float Max = 1.0f>
-static void BM_KDTreeQuery(benchmark::State &state) {
-  size_t num_points = state.range(0);
-  size_t dimensions = state.range(1);
+void BM_KDTreeQuery(benchmark::State &state) {
+  const size_t num_points = state.range(0);
+  const size_t dimensions = state.range(1);
 
   auto points =
       generateRandomPoints<typename KDTreeT::value_type, Min, Max>(num_points, dimensions);
@@ -82,6 +85,8 @@ static void BM_KDTreeQuery(benchmark::State &state) {
   }
 }
 
+} // namespace
+
 BENCHMARK(BM_KDTreeConstruction<KDTree<float>>)
     ->Ranges({{2, 1 << 8}, {2, 1 << 5}})
     ->RangeMultiplier(2);
@@ -96,4 +101,5 @@ BENCHMARK(
     ->Ranges({{2, 1 << 8}, {2, 1 << 5}})
     ->RangeMultiplier(2);
 
+// NOLINTNEXTLINE(misc-const-correctness,modernize-avoid-c-arrays)
 BENCHMARK_MAIN();
