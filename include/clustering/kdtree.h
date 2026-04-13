@@ -295,7 +295,13 @@ class KDTree {
   inline T distanceSquared(const NDArray<T, 1> &query_point, std::size_t index) const noexcept {
     if constexpr (distanceType == KDTreeDistanceType::kEucledian) {
       #ifdef CLUSTERING_USE_AVX2
-      return EucledianDistanceSquaredAVX2(query_point, index);
+      // Below 8 dims an AVX2 register holds zero useful lanes; the horizontal-sum
+      // epilogue is pure tax. Branch is on a value fixed at tree construction,
+      // perfectly predicted.
+      if (m_points.dim(1) >= 8) {
+        return EucledianDistanceSquaredAVX2(query_point, index);
+      }
+      return EucledianDistanceSquaredScalar(query_point, index);
       #else
       return EucledianDistanceSquaredScalar(query_point, index);
       #endif

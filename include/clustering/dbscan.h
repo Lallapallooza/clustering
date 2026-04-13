@@ -1,9 +1,10 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <vector>
 #include <algorithm>
 
-#include "tsl/hopscotch_set.h"
 #include "thread_pool.h"
 
 #include "clustering/kdtree.h"
@@ -46,6 +47,8 @@ class DBSCAN {
       m_minPts(minPts),
       m_clusterId(0),
       m_labels(m_points_dim0),
+      m_seen_wave(m_points_dim0),
+      m_current_wave(0),
       m_query_model(m_points),
       m_thread_pool(n_jobs) {
     std::fill(m_labels.begin(), m_labels.end(), UNCLASSIFIED);
@@ -112,6 +115,8 @@ class DBSCAN {
   const size_t                 m_minPts;      ///< Minimum number of points to form a core point.
   size_t                       m_clusterId;   ///< Current cluster ID being assigned.
   std::vector<std::atomic_int> m_labels;      ///< Labels assigned to each point in the dataset.
+  std::vector<std::atomic<uint32_t>> m_seen_wave;   ///< Per-point epoch marker for BFS-frontier dedup.
+  uint32_t                     m_current_wave; ///< Monotonic counter; bumped before each frontier wave.
   QueryModel                   m_query_model;  ///< Query model  built from m_points for efficient querying.
   BS::thread_pool              m_thread_pool; ///< ThreadPool for parallel execution.
 
@@ -148,10 +153,11 @@ class DBSCAN {
       std::vector<size_t> seeds_vec_cpy;
       seeds_vec_cpy.reserve(seeds_vec.size());
 
+      const uint32_t wave = ++m_current_wave;
+
       auto multi_fut = m_thread_pool.parallelize_loop(0, seeds_vec.size(),
-        [this, &seeds_vec, &seeds_vec_cpy, &mutex, &is_core](size_t start, size_t end) {
+        [this, &seeds_vec, &seeds_vec_cpy, &mutex, &is_core, wave](size_t start, size_t end) {
           std::vector<size_t> local_seeds_vec_cpy;
-          tsl::hopscotch_pg_set<size_t> local_uniq;
 
           for (size_t i = start; i < end; ++i) {
             size_t point = seeds_vec[i];
@@ -172,7 +178,14 @@ class DBSCAN {
             auto          neighbors = m_query_model.query(query, m_eps);
 
             for (size_t neighbor_id: neighbors) {
-              if (m_labels[neighbor_id] == UNCLASSIFIED && local_uniq.insert(neighbor_id).second) {
+              if (m_labels[neighbor_id] != UNCLASSIFIED) {
+                continue;
+              }
+              // Epoch bitmap dedup. Plain relaxed load/store: avoids the locked
+              // xchg that contends across threads. Two threads can race and both
+              // push -- the next wave's labels-check absorbs the duplicate.
+              if (m_seen_wave[neighbor_id].load(std::memory_order_relaxed) != wave) {
+                m_seen_wave[neighbor_id].store(wave, std::memory_order_relaxed);
                 local_seeds_vec_cpy.push_back(neighbor_id);
               }
             }
