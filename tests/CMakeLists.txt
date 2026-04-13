@@ -4,6 +4,7 @@ add_executable(
     dbscan_test.cpp
     ndarray_test.cpp
     matrix_desc_test.cpp
+    math_equality_test.cpp
 )
 target_link_libraries(
     clustering_tests
