@@ -8,6 +8,7 @@ add_executable(
     math_thread_test.cpp
     gemm_scalar_test.cpp
     gemm_avx2_f32_test.cpp
+    gemm_plan_test.cpp
 )
 target_link_libraries(
     clustering_tests
