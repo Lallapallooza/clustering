@@ -42,7 +42,12 @@ struct ReferenceGemm {
     if (C.dim(0) == 0 || C.dim(1) == 0) {
       return;
     }
-    std::vector<T, ::clustering::detail::AlignedAllocator<T, 32>> apArena(kMc<T> * kKc<T>, T{0});
+    // One Ap slice per worker -- gemmRunReference slices this pool at Pool::workerIndex() * kMc*kKc
+    // from inside its parallel Mc dispatch. On the serial path workerIndex() is 0, so slice 0 is
+    // used naturally.
+    const std::size_t workerCount = pool.workerCount();
+    std::vector<T, ::clustering::detail::AlignedAllocator<T, 32>> apArena(
+        workerCount * kMc<T> * kKc<T>, T{0});
     std::vector<T, ::clustering::detail::AlignedAllocator<T, 32>> bpArena(kKc<T> * kNc<T>, T{0});
     auto Ad = ::clustering::detail::describeMatrix(A);
     auto Bd = ::clustering::detail::describeMatrix(B);

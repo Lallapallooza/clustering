@@ -42,13 +42,14 @@ namespace clustering::math::detail {
  * @param alpha Scalar multiplier on @c A*B.
  * @param beta  Scalar multiplier on the prior @c C.
  * @param apArena Caller-owned scratch of capacity @c kMc<T>*kKc<T> elements (per worker slice).
- * @param pool   Parallelism injection; accepted but unused on the serial path.
+ * @param pool   Parallelism injection. When @c pool.shouldParallelize is @c true, the Mc-tile
+ *               loop fans out via @c submit_blocks; each task indexes its own arena slice via
+ *               @c Pool::workerIndex(). Otherwise the function runs serial on slice 0.
  */
 template <class T>
 void gemmRunPrepacked(::clustering::detail::MatrixDescC<T> Ad, const T *prepackedBp,
                       std::size_t kDim, std::size_t nDim, ::clustering::detail::MatrixDesc<T> Cd,
-                      T alpha, T beta, T *apArena,
-                      [[maybe_unused]] ::clustering::math::Pool pool) noexcept {
+                      T alpha, T beta, T *apArena, ::clustering::math::Pool pool) noexcept {
   constexpr std::size_t kMr = kKernelMr<T>;
   constexpr std::size_t kNr = kKernelNr<T>;
   constexpr std::size_t kMcVal = kMc<T>;
@@ -107,14 +108,18 @@ void gemmRunPrepacked(::clustering::detail::MatrixDescC<T> Ad, const T *prepacke
 
       const T *bpArena = prepackedBp + jcBase + pcOffInJc;
 
-      for (std::size_t ic = 0; ic < M; ic += kMcVal) {
+      // Same Mc-tile parallel dispatch shape as gemmRunReference -- each task gets its own
+      // apArena slice. The serial path falls through to slice 0 because Pool::workerIndex()
+      // returns 0 outside a pool task body.
+      auto runOneMcBlock = [&](std::size_t mcIdx, T *apSlice) noexcept {
+        const std::size_t ic = mcIdx * kMcVal;
         const std::size_t mc = (ic + kMcVal <= M) ? kMcVal : (M - ic);
-        packA<T>(Ad, ic, mc, pc, kc, apArena);
+        packA<T>(Ad, ic, mc, pc, kc, apSlice);
 
         for (std::size_t ir = 0; ir < mc; ir += kMr) {
           const std::size_t mTail = (ir + kMr <= mc) ? kMr : (mc - ir);
           const std::size_t panelA = ir / kMr;
-          const T *apPanel = apArena + (panelA * kMr * kc);
+          const T *apPanel = apSlice + (panelA * kMr * kc);
 
           for (std::size_t jr = 0; jr < nc; jr += kNr) {
             const std::size_t nTail = (jr + kNr <= nc) ? kNr : (nc - jr);
@@ -147,6 +152,24 @@ void gemmRunPrepacked(::clustering::detail::MatrixDescC<T> Ad, const T *prepacke
               }
             }
           }
+        }
+      };
+
+      const std::size_t mcBlockCount = (M + kMcVal - 1) / kMcVal;
+      if (pool.shouldParallelize(mcBlockCount, 1, 2)) {
+        pool.pool
+            ->submit_blocks(std::size_t{0}, mcBlockCount,
+                            [&](std::size_t blockStart, std::size_t blockEnd) {
+                              T *apSlice = apArena + (::clustering::math::Pool::workerIndex() *
+                                                      kMcVal * kKcVal);
+                              for (std::size_t mcIdx = blockStart; mcIdx < blockEnd; ++mcIdx) {
+                                runOneMcBlock(mcIdx, apSlice);
+                              }
+                            })
+            .wait();
+      } else {
+        for (std::size_t mcIdx = 0; mcIdx < mcBlockCount; ++mcIdx) {
+          runOneMcBlock(mcIdx, apArena);
         }
       }
 

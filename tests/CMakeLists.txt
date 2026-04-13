@@ -12,6 +12,7 @@ add_executable(
     gemm_public_test.cpp
     gemm_mutability_death_test.cpp
     gemm_backend_dispatch_test.cpp
+    gemm_threading_test.cpp
 )
 target_link_libraries(
     clustering_tests
