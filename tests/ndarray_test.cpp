@@ -443,3 +443,235 @@ TEST(ViewDeathTest, NonContigSourceAborts) {
       { (void)transposed.view(std::array<std::size_t, 1>{20}); },
       "view<M> requires a contiguous source");
 }
+
+TEST(Borrow, ContigMutablePointerBuildsWritableView) {
+  alignas(32) float raw[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+  auto view = NDArray<float, 2>::borrow(raw, std::array<std::size_t, 2>{3, 4});
+  EXPECT_EQ(view.dim(0), 3u);
+  EXPECT_EQ(view.dim(1), 4u);
+  EXPECT_EQ(view.strideAt(0), 4);
+  EXPECT_EQ(view.strideAt(1), 1);
+  EXPECT_EQ(view.data(), raw);
+  EXPECT_TRUE(view.isContiguous());
+  EXPECT_FLOAT_EQ(view(2, 3), 11.0f);
+  view(0, 0) = -7.0f;
+  EXPECT_FLOAT_EQ(raw[0], -7.0f);
+}
+
+TEST(Borrow, ContigConstPointerProducesReadOnlyView) {
+  alignas(32) float raw[6] = {1, 2, 3, 4, 5, 6};
+  const float *cptr = raw;
+  const auto view = NDArray<float, 2>::borrow(cptr, std::array<std::size_t, 2>{2, 3});
+  EXPECT_EQ(view.dim(0), 2u);
+  EXPECT_EQ(view.dim(1), 3u);
+  // Bind through std::as_const to force the const operator() overload; non-const operator()
+  // asserts on read-only borrows (that behavior is covered by the DeathTests below).
+  EXPECT_FLOAT_EQ(std::as_const(view)(1, 2), 6.0f);
+  EXPECT_EQ(view.data(), raw);
+}
+
+TEST(BorrowDeathTest, WriteViaOperatorCallOnConstBorrowAborts) {
+  alignas(32) float raw[4] = {0, 0, 0, 0};
+  const float *cptr = raw;
+  auto view = NDArray<float, 1>::borrow(cptr, std::array<std::size_t, 1>{4});
+  EXPECT_DEBUG_DEATH({ view(0) = 1.0f; }, "write to read-only borrow");
+}
+
+TEST(BorrowDeathTest, WriteViaAccessorOnConstBorrowAborts) {
+  alignas(32) float raw[4] = {0, 0, 0, 0};
+  const float *cptr = raw;
+  auto view = NDArray<float, 1>::borrow(cptr, std::array<std::size_t, 1>{4});
+  EXPECT_DEBUG_DEATH({ view[0] = 1.0f; }, "write to read-only borrow");
+}
+
+TEST(Borrow, StridedMutableBuildsStridedView) {
+  alignas(32) float raw[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  // Interpret raw as a 2x2 matrix whose row stride is 4 and column stride is 2 (every other).
+  auto view = NDArray<float, 2, Layout::MaybeStrided>::borrow(raw, std::array<std::size_t, 2>{2, 2},
+                                                              std::array<std::ptrdiff_t, 2>{4, 2});
+  EXPECT_EQ(view.dim(0), 2u);
+  EXPECT_EQ(view.dim(1), 2u);
+  EXPECT_EQ(view.strideAt(0), 4);
+  EXPECT_EQ(view.strideAt(1), 2);
+  EXPECT_FLOAT_EQ(view(0, 0), 0.0f);
+  EXPECT_FLOAT_EQ(view(0, 1), 2.0f);
+  EXPECT_FLOAT_EQ(view(1, 0), 4.0f);
+  EXPECT_FLOAT_EQ(view(1, 1), 6.0f);
+  view(1, 1) = -9.0f;
+  EXPECT_FLOAT_EQ(raw[6], -9.0f);
+}
+
+TEST(BorrowDeathTest, StridedConstBorrowTrapsOnWrite) {
+  alignas(32) float raw[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  const float *cptr = raw;
+  auto view = NDArray<float, 2, Layout::MaybeStrided>::borrow(
+      cptr, std::array<std::size_t, 2>{2, 2}, std::array<std::ptrdiff_t, 2>{4, 2});
+  EXPECT_DEBUG_DEATH({ view(0, 0) = 1.0f; }, "write to read-only borrow");
+}
+
+TEST(Borrow, OneDFromMutablePointer) {
+  alignas(32) float raw[5] = {10, 20, 30, 40, 50};
+  auto view = NDArray<float, 1>::borrow1D(raw, 5);
+  EXPECT_EQ(view.dim(0), 5u);
+  EXPECT_FLOAT_EQ(view[3], 40.0f);
+  view[0] = -1.0f;
+  EXPECT_FLOAT_EQ(raw[0], -1.0f);
+}
+
+TEST(Borrow, OneDFromConstPointerReadOnly) {
+  alignas(32) float raw[3] = {1.5f, 2.5f, 3.5f};
+  const float *cptr = raw;
+  const auto view = NDArray<float, 1>::borrow1D(cptr, 3);
+  EXPECT_EQ(view.dim(0), 3u);
+  EXPECT_FLOAT_EQ(std::as_const(view)(1), 2.5f);
+}
+
+TEST(Borrow, BytesDividesByElementSize) {
+  alignas(32) float raw[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+  // Treat raw as 3x4 with byte-stride (16 bytes row, 4 bytes column) for float -> element 4, 1.
+  auto view = NDArray<float, 2, Layout::MaybeStrided>::borrowBytes(
+      raw, std::array<std::size_t, 2>{3, 4}, std::array<std::ptrdiff_t, 2>{16, 4},
+      /*isMutable=*/true);
+  EXPECT_EQ(view.strideAt(0), 4);
+  EXPECT_EQ(view.strideAt(1), 1);
+  EXPECT_FLOAT_EQ(view(2, 3), 11.0f);
+  view(0, 0) = 99.0f;
+  EXPECT_FLOAT_EQ(raw[0], 99.0f);
+}
+
+TEST(Borrow, BytesHonorsImmutableFlag) {
+  alignas(32) float raw[4] = {0, 0, 0, 0};
+  auto view = NDArray<float, 1, Layout::MaybeStrided>::borrowBytes(
+      raw, std::array<std::size_t, 1>{4}, std::array<std::ptrdiff_t, 1>{4},
+      /*isMutable=*/false);
+  EXPECT_DEBUG_DEATH({ view(0) = 1.0f; }, "write to read-only borrow");
+}
+
+TEST(BorrowBytesDeathTest, NonDivisibleByteStrideAborts) {
+  alignas(32) float raw[4] = {0, 0, 0, 0};
+  // 6 is not divisible by sizeof(float) == 4 -> must trap.
+  auto make_bad = [&]() {
+    using Arr = NDArray<float, 1, Layout::MaybeStrided>;
+    (void)Arr::borrowBytes(raw, std::array<std::size_t, 1>{2}, std::array<std::ptrdiff_t, 1>{6},
+                           /*isMutable=*/true);
+  };
+  EXPECT_DEBUG_DEATH(make_bad(), "byte strides divisible by sizeof");
+}
+
+TEST(Borrow, FromSpanMutable) {
+  alignas(32) float raw[4] = {1, 2, 3, 4};
+  std::span<float> s(raw, 4);
+  auto view = NDArray<float, 1>::fromSpan(s);
+  EXPECT_EQ(view.dim(0), 4u);
+  EXPECT_FLOAT_EQ(view[2], 3.0f);
+  view[2] = -8.0f;
+  EXPECT_FLOAT_EQ(raw[2], -8.0f);
+}
+
+TEST(Borrow, FromSpanConstReadOnly) {
+  alignas(32) float raw[4] = {1, 2, 3, 4};
+  std::span<const float> s(raw, 4);
+  const auto view = NDArray<float, 1>::fromSpan(s);
+  EXPECT_EQ(view.dim(0), 4u);
+  EXPECT_FLOAT_EQ(std::as_const(view)(3), 4.0f);
+}
+
+TEST(AlignedData, OwnedArrayIs32Aligned) {
+  NDArray<float, 2> arr({8, 16});
+  auto *ptr = arr.alignedData<32>();
+  EXPECT_EQ(ptr, arr.data());
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(ptr) % 32, 0u);
+}
+
+TEST(AlignedData, ConstOverload) {
+  NDArray<float, 2> arr({4, 8});
+  arr[0][0] = 42.0f;
+  const auto &cref = arr;
+  const auto *ptr = cref.alignedData<32>();
+  EXPECT_EQ(ptr, arr.data());
+  EXPECT_FLOAT_EQ(ptr[0], 42.0f);
+}
+
+TEST(AlignedDataDeathTest, UnalignedBorrowAborts) {
+  alignas(32) float raw[32] = {};
+  // Offset by one float (4 bytes) to force a non-32-byte-aligned pointer.
+  float *misaligned = raw + 1;
+  auto view = NDArray<float, 1>::borrow(misaligned, std::array<std::size_t, 1>{16});
+  EXPECT_DEBUG_DEATH(
+      { (void)view.alignedData<32>(); }, "alignedData<A>\\(\\) requires A-byte aligned data");
+}
+
+// The signatures on the borrow factories are constrained to their natural layout.
+// Type-level checks: contiguous borrow is only on Contig, strided borrow is only on
+// MaybeStrided, and the 1D convenience factories gate on N==1.
+template <class A>
+concept has_contig_borrow_shape = requires {
+  { A::borrow(static_cast<typename A::value_type *>(nullptr), std::array<std::size_t, 1>{}) };
+};
+
+static_assert(std::is_same_v<decltype(NDArray<float, 1>::borrow(static_cast<float *>(nullptr),
+                                                                std::array<std::size_t, 1>{1})),
+                             NDArray<float, 1, Layout::Contig>>,
+              "borrow(T*, shape) on Contig must yield Contig");
+
+static_assert(std::is_same_v<decltype(NDArray<float, 2, Layout::MaybeStrided>::borrow(
+                                 static_cast<float *>(nullptr), std::array<std::size_t, 2>{1, 1},
+                                 std::array<std::ptrdiff_t, 2>{1, 1})),
+                             NDArray<float, 2, Layout::MaybeStrided>>,
+              "strided borrow must yield MaybeStrided");
+
+static_assert(std::is_same_v<decltype(NDArray<float, 1>::borrow1D(static_cast<float *>(nullptr),
+                                                                  std::size_t{4})),
+                             NDArray<float, 1, Layout::Contig>>,
+              "borrow1D must yield Contig rank-1");
+
+TEST(Borrow, MovePreservesBorrowedPointer) {
+  alignas(32) float raw[4] = {1, 2, 3, 4};
+  auto view = NDArray<float, 1>::borrow(raw, std::array<std::size_t, 1>{4});
+  ASSERT_EQ(view.data(), raw);
+  auto moved = std::move(view);
+  EXPECT_EQ(moved.data(), raw);
+  EXPECT_EQ(moved.dim(0), 4u);
+  EXPECT_FLOAT_EQ(moved(2), 3.0f);
+}
+
+TEST(Borrow, CopyPreservesBorrowedPointer) {
+  alignas(32) float raw[4] = {1, 2, 3, 4};
+  auto view = NDArray<float, 1>::borrow(raw, std::array<std::size_t, 1>{4});
+  ASSERT_EQ(view.data(), raw);
+  auto copied = view;
+  EXPECT_EQ(copied.data(), raw);
+  EXPECT_EQ(view.data(), raw);
+  EXPECT_EQ(copied.dim(0), 4u);
+  EXPECT_FLOAT_EQ(copied(1), 2.0f);
+}
+
+TEST(Borrow, MoveAssignPreservesBorrowedPointer) {
+  alignas(32) float raw[4] = {5, 6, 7, 8};
+  auto view = NDArray<float, 1>::borrow(raw, std::array<std::size_t, 1>{4});
+  ASSERT_EQ(view.data(), raw);
+  NDArray<float, 1> sink({1});
+  sink = std::move(view);
+  EXPECT_EQ(sink.data(), raw);
+  EXPECT_EQ(sink.dim(0), 4u);
+  EXPECT_FLOAT_EQ(sink(3), 8.0f);
+}
+
+TEST(Borrow, CopyAssignPreservesBorrowedPointer) {
+  alignas(32) float raw[4] = {5, 6, 7, 8};
+  auto view = NDArray<float, 1>::borrow(raw, std::array<std::size_t, 1>{4});
+  ASSERT_EQ(view.data(), raw);
+  NDArray<float, 1> sink({1});
+  sink = view;
+  EXPECT_EQ(sink.data(), raw);
+  EXPECT_EQ(view.data(), raw);
+  EXPECT_EQ(sink.dim(0), 4u);
+  EXPECT_FLOAT_EQ(sink(0), 5.0f);
+}
+
+TEST(BorrowDeathTest, WriteViaFlatIndexOnConstBorrowAborts) {
+  alignas(32) float raw[4] = {0, 0, 0, 0};
+  const float *cptr = raw;
+  auto view = NDArray<float, 1>::borrow(cptr, std::array<std::size_t, 1>{4});
+  EXPECT_DEBUG_DEATH({ view.flatIndex(0) = 1.0f; }, "write to read-only borrow");
+}

@@ -10,6 +10,7 @@
 #include <initializer_list>
 #include <memory>
 #include <new>
+#include <span>
 #include <sstream>
 #include <type_traits>
 #include <utility>
@@ -231,10 +232,14 @@ public:
     /**
      * @brief Assigns a value to the element at the accessor's position.
      *
+     * Asserts the underlying array is mutable: writing through an accessor produced from a
+     * read-only borrow is undefined in release and trapped in debug.
+     *
      * @param value The value to be assigned.
      * @return Reference to the accessor after assignment.
      */
     inline Accessor &operator=(T value) noexcept {
+      assert(this->m_ndarray->m_mutable && "write to read-only borrow");
       this->m_ndarray->flatIndex(this->m_index) = value;
       return *this;
     }
@@ -286,17 +291,19 @@ public:
     m_data = m_vec.data();
   }
 
+  // Storage-aware special members: Owned arrays re-seat m_data against this->m_vec (the move
+  // stole or the copy just populated it), while Borrowed arrays carry an empty m_vec and must
+  // preserve the external pointer from the source.
   NDArray(const NDArray &other)
       : m_vec(other.m_vec), m_shape(other.m_shape), m_strides(other.m_strides),
         m_offset(other.m_offset), m_storage(other.m_storage), m_mutable(other.m_mutable) {
-    m_data = m_vec.data();
+    m_data = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_data;
   }
 
   NDArray(NDArray &&other) noexcept
       : m_vec(std::move(other.m_vec)), m_shape(other.m_shape), m_strides(other.m_strides),
         m_offset(other.m_offset), m_storage(other.m_storage), m_mutable(other.m_mutable) {
-    // m_data must be re-seated against this->m_vec since the move stole its buffer.
-    m_data = m_vec.data();
+    m_data = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_data;
     other.m_data = nullptr;
   }
 
@@ -310,7 +317,7 @@ public:
     m_offset = other.m_offset;
     m_storage = other.m_storage;
     m_mutable = other.m_mutable;
-    m_data = m_vec.data();
+    m_data = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_data;
     return *this;
   }
 
@@ -324,7 +331,7 @@ public:
     m_offset = other.m_offset;
     m_storage = other.m_storage;
     m_mutable = other.m_mutable;
-    m_data = m_vec.data();
+    m_data = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_data;
     other.m_data = nullptr;
     return *this;
   }
@@ -377,6 +384,7 @@ public:
    */
   template <class... Ix> inline T &operator()(Ix... ix) noexcept {
     static_assert(sizeof...(Ix) == N, "operator() requires exactly N indices");
+    assert(m_mutable && "write to read-only borrow");
     return m_data[computeElementOffset(std::index_sequence_for<Ix...>{}, ix...)];
   }
 
@@ -391,7 +399,10 @@ public:
    * @param index Index in the flat representation of the NDArray.
    * @return Reference to the element at the specified index.
    */
-  inline T &flatIndex(std::size_t index) noexcept { return m_data[index]; }
+  inline T &flatIndex(std::size_t index) noexcept {
+    assert(m_mutable && "write to read-only borrow");
+    return m_data[index];
+  }
 
   /**
    * @brief Provides read-only access to the flat underlying array at a specific index.
@@ -450,6 +461,128 @@ public:
    */
   template <std::size_t A> bool isAligned() const noexcept {
     return (reinterpret_cast<std::uintptr_t>(m_data) % A) == 0;
+  }
+
+  /**
+   * @brief Returns @c data() with an alignment hint of @p A bytes applied.
+   *
+   * Calls @c __builtin_assume_aligned so downstream SIMD intrinsics (e.g. @c _mm256_load_ps)
+   * can assume an @p A -byte aligned pointer and emit aligned-load instructions under @c -O2.
+   * The debug @c assert guards against feeding an unaligned borrow into this path.
+   *
+   * @tparam A Required alignment in bytes.
+   * @return Aligned pointer into the buffer. Writes through the mutable overload on a read-only
+   *         borrow are undefined; the caller is responsible for honoring the const contract.
+   */
+  template <std::size_t A> inline T *alignedData() noexcept {
+    assert(isAligned<A>() && "alignedData<A>() requires A-byte aligned data");
+    return static_cast<T *>(__builtin_assume_aligned(m_data, A));
+  }
+
+  template <std::size_t A> inline const T *alignedData() const noexcept {
+    assert(isAligned<A>() && "alignedData<A>() requires A-byte aligned data");
+    return static_cast<const T *>(__builtin_assume_aligned(m_data, A));
+  }
+
+  /**
+   * @brief Borrows a contiguous buffer as an NDArray without taking ownership.
+   *
+   * Available only when @c L == Layout::Contig. The returned array shares the caller's buffer,
+   * carries contiguous strides, and is writable through @c operator() and @c Accessor.
+   *
+   * @param ptr Non-owning pointer to the first element. Must stay alive for the view's lifetime.
+   * @param shape Dimensions, one entry per axis.
+   */
+  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
+  static NDArray borrow(T *ptr, std::array<std::size_t, N> shape) noexcept {
+    return NDArray(clustering::detail::BorrowedTag{}, ptr, shape, computeContiguousStrides(shape),
+                   0, true);
+  }
+
+  /**
+   * @brief Borrows a read-only contiguous buffer as an NDArray.
+   *
+   * Stores the caller's @c const T* as @c T* via @c const_cast and flips @c m_mutable off so any
+   * write through @c operator() or @c Accessor asserts in debug.
+   */
+  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
+  static NDArray borrow(const T *ptr, std::array<std::size_t, N> shape) noexcept {
+    return NDArray(clustering::detail::BorrowedTag{}, const_cast<T *>(ptr), shape,
+                   computeContiguousStrides(shape), 0, false);
+  }
+
+  /**
+   * @brief Borrows a strided buffer as an NDArray without taking ownership.
+   *
+   * Available only when @c L == Layout::MaybeStrided. Strides are in elements, not bytes; see
+   * @c borrowBytes for the byte-stride entry point used at the Python binding boundary.
+   */
+  template <Layout L2 = L, std::enable_if_t<L2 == Layout::MaybeStrided, int> = 0>
+  static NDArray borrow(T *ptr, std::array<std::size_t, N> shape,
+                        std::array<std::ptrdiff_t, N> strides) noexcept {
+    return NDArray(clustering::detail::BorrowedTag{}, ptr, shape, strides, 0, true);
+  }
+
+  template <Layout L2 = L, std::enable_if_t<L2 == Layout::MaybeStrided, int> = 0>
+  static NDArray borrow(const T *ptr, std::array<std::size_t, N> shape,
+                        std::array<std::ptrdiff_t, N> strides) noexcept {
+    return NDArray(clustering::detail::BorrowedTag{}, const_cast<T *>(ptr), shape, strides, 0,
+                   false);
+  }
+
+  /**
+   * @brief Rank-1 convenience borrow; avoids the @c std::array<size_t, 1>{n} boilerplate.
+   */
+  template <std::size_t M = N, std::enable_if_t<M == 1 && L == Layout::Contig, int> = 0>
+  static NDArray borrow1D(T *ptr, std::size_t n) noexcept {
+    return borrow(ptr, std::array<std::size_t, 1>{n});
+  }
+
+  template <std::size_t M = N, std::enable_if_t<M == 1 && L == Layout::Contig, int> = 0>
+  static NDArray borrow1D(const T *ptr, std::size_t n) noexcept {
+    return borrow(ptr, std::array<std::size_t, 1>{n});
+  }
+
+  /**
+   * @brief Borrow a buffer whose strides are expressed in bytes (NumPy's convention).
+   *
+   * Byte strides are divided by @c sizeof(T) to recover element strides; non-divisible entries
+   * are undefined and asserted in debug. The result always carries @c Layout::MaybeStrided so
+   * arbitrary byte strides can be represented without a runtime contiguity check gating the
+   * @c Contig type-level invariant.
+   *
+   * @param ptr Non-owning pointer to the first element.
+   * @param shape Dimensions, one entry per axis.
+   * @param stridesInBytes Byte offset between successive elements along each axis.
+   * @param isMutable Whether writes through the view are permitted.
+   */
+  template <Layout L2 = L, std::enable_if_t<L2 == Layout::MaybeStrided, int> = 0>
+  static NDArray borrowBytes(T *ptr, std::array<std::size_t, N> shape,
+                             std::array<std::ptrdiff_t, N> stridesInBytes,
+                             bool isMutable) noexcept {
+    std::array<std::ptrdiff_t, N> element_strides{};
+    for (std::size_t k = 0; k < N; ++k) {
+      assert(stridesInBytes[k] % static_cast<std::ptrdiff_t>(sizeof(T)) == 0 &&
+             "borrowBytes requires byte strides divisible by sizeof(T)");
+      element_strides[k] = stridesInBytes[k] / static_cast<std::ptrdiff_t>(sizeof(T));
+    }
+    return NDArray(clustering::detail::BorrowedTag{}, ptr, shape, element_strides, 0, isMutable);
+  }
+
+  /**
+   * @brief Explicit @c std::span adapter for rank-1 borrows.
+   *
+   * No implicit @c std::span conversion is provided; callers spell @c fromSpan to avoid
+   * overload-resolution ambiguity with the raw-pointer @c borrow overloads.
+   */
+  template <std::size_t M = N, std::enable_if_t<M == 1 && L == Layout::Contig, int> = 0>
+  static NDArray fromSpan(std::span<T> s) noexcept {
+    return borrow(s.data(), std::array<std::size_t, 1>{s.size()});
+  }
+
+  template <std::size_t M = N, std::enable_if_t<M == 1 && L == Layout::Contig, int> = 0>
+  static NDArray fromSpan(std::span<const T> s) noexcept {
+    return borrow(s.data(), std::array<std::size_t, 1>{s.size()});
   }
 
   /**
