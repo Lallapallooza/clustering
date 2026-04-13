@@ -7,7 +7,7 @@ namespace clustering {
 
 template <typename T> class NewAllocator {
 public:
-  NewAllocator(size_t size) {}
+  NewAllocator(std::size_t /*size*/) {}
 
   NewAllocator(const NewAllocator &) = delete;
   NewAllocator &operator=(const NewAllocator &) = delete;

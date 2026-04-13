@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <type_traits>
@@ -11,7 +12,6 @@
 using clustering::all;
 using clustering::Layout;
 using clustering::NDArray;
-using clustering::NDArrayStorage;
 using clustering::Range;
 using clustering::sameStorage;
 
@@ -50,7 +50,7 @@ TEST(NDArrayStorage, MoveTransfersPointerAndPreservesAlignment) {
   NDArray<float, 2> src({128, 16});
   src[0][0] = 42.0f;
   src[127][15] = 7.0f;
-  float *ptr = src.data();
+  const float *const ptr = src.data();
   ASSERT_NE(ptr, nullptr);
 
   NDArray<float, 2> dst = std::move(src);
@@ -98,7 +98,7 @@ TEST(OperatorCall, Rank2MatchesSubscript) {
   NDArray<float, 2> arr({5, 7});
   for (std::size_t i = 0; i < 5; ++i) {
     for (std::size_t j = 0; j < 7; ++j) {
-      arr[i][j] = static_cast<float>(i * 31 + j * 7 + 1);
+      arr[i][j] = static_cast<float>((i * 31) + (j * 7) + 1);
     }
   }
   for (std::size_t i = 0; i < 5; ++i) {
@@ -111,7 +111,7 @@ TEST(OperatorCall, Rank2MatchesSubscript) {
 TEST(OperatorCall, Rank1MatchesSubscript) {
   NDArray<float, 1> arr({11});
   for (std::size_t i = 0; i < 11; ++i) {
-    arr[i] = static_cast<float>(i * 13 + 2);
+    arr[i] = static_cast<float>((i * 13) + 2);
   }
   for (std::size_t i = 0; i < 11; ++i) {
     EXPECT_FLOAT_EQ(arr(i), static_cast<float>(arr[i]));
@@ -123,7 +123,7 @@ TEST(OperatorCall, Rank3MatchesSubscript) {
   for (std::size_t i = 0; i < 2; ++i) {
     for (std::size_t j = 0; j < 3; ++j) {
       for (std::size_t k = 0; k < 4; ++k) {
-        arr[i][j][k] = static_cast<float>(i * 100 + j * 10 + k);
+        arr[i][j][k] = static_cast<float>((i * 100) + (j * 10) + k);
       }
     }
   }
@@ -137,12 +137,12 @@ TEST(OperatorCall, Rank3MatchesSubscript) {
 }
 
 TEST(IsContiguous, ContigInstantiationIsContiguous) {
-  NDArray<float, 2> arr({16, 8});
+  const NDArray<float, 2> arr({16, 8});
   EXPECT_TRUE(arr.isContiguous());
 }
 
 TEST(IsContiguous, EmptyIsTriviallyContiguous) {
-  NDArray<float, 2> arr({0, 64});
+  const NDArray<float, 2> arr({0, 64});
   EXPECT_TRUE(arr.isContiguous());
 }
 
@@ -173,7 +173,7 @@ TEST(Transpose, ElementAccessMatchesSource) {
   NDArray<float, 2> arr({3, 4});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 4; ++j) {
-      arr[i][j] = static_cast<float>(i * 10 + j);
+      arr[i][j] = static_cast<float>((i * 10) + j);
     }
   }
   auto view = arr.t();
@@ -194,7 +194,7 @@ TEST(Row, Rank2RowIsContigRank1) {
   NDArray<float, 2> arr({4, 6});
   for (std::size_t i = 0; i < 4; ++i) {
     for (std::size_t j = 0; j < 6; ++j) {
-      arr[i][j] = static_cast<float>(i * 100 + j);
+      arr[i][j] = static_cast<float>((i * 100) + j);
     }
   }
   auto view = arr.row(2);
@@ -214,7 +214,7 @@ TEST(Col, Rank2ColumnIsStridedRank1) {
   NDArray<float, 2> arr({4, 6});
   for (std::size_t i = 0; i < 4; ++i) {
     for (std::size_t j = 0; j < 6; ++j) {
-      arr[i][j] = static_cast<float>(i * 100 + j);
+      arr[i][j] = static_cast<float>((i * 100) + j);
     }
   }
   auto view = arr.col(3);
@@ -233,7 +233,7 @@ TEST(Slice, AxisZeroReducesLeadingDim) {
   NDArray<float, 2> arr({5, 4});
   for (std::size_t i = 0; i < 5; ++i) {
     for (std::size_t j = 0; j < 4; ++j) {
-      arr[i][j] = static_cast<float>(i * 10 + j);
+      arr[i][j] = static_cast<float>((i * 10) + j);
     }
   }
   auto view = arr.slice(0, 1, 4);
@@ -252,10 +252,10 @@ TEST(Slice, RangeArrayWithAllSentinel) {
   NDArray<float, 2> arr({5, 4});
   for (std::size_t i = 0; i < 5; ++i) {
     for (std::size_t j = 0; j < 4; ++j) {
-      arr[i][j] = static_cast<float>(i * 10 + j);
+      arr[i][j] = static_cast<float>((i * 10) + j);
     }
   }
-  auto view = arr.slice(std::array<Range, 2>{Range{1, 4}, all()});
+  auto view = arr.slice(std::array<Range, 2>{Range{.begin = 1, .end = 4}, all()});
   EXPECT_EQ(view.dim(0), 3u);
   EXPECT_EQ(view.dim(1), 4u);
   for (std::size_t i = 0; i < 3; ++i) {
@@ -270,7 +270,7 @@ TEST(Slice, RangeArrayWithStep) {
   for (std::size_t i = 0; i < 10; ++i) {
     arr[i] = static_cast<float>(i);
   }
-  auto view = arr.slice(std::array<Range, 1>{Range{0, 10, 3}});
+  auto view = arr.slice(std::array<Range, 1>{Range{.begin = 0, .end = 10, .step = 3}});
   EXPECT_EQ(view.dim(0), 4u);
   EXPECT_EQ(view.strideAt(0), 3);
   EXPECT_FLOAT_EQ(view(0), 0.0f);
@@ -283,7 +283,7 @@ TEST(Permute, Rank2SwapMatchesTranspose) {
   NDArray<float, 2> arr({3, 5});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 5; ++j) {
-      arr[i][j] = static_cast<float>(i * 100 + j);
+      arr[i][j] = static_cast<float>((i * 100) + j);
     }
   }
   auto via_permute = arr.permute(std::array<std::size_t, 2>{1, 0});
@@ -303,7 +303,7 @@ TEST(View, Rank2To1SharesStorage) {
   NDArray<float, 2> arr({100, 10});
   for (std::size_t i = 0; i < 100; ++i) {
     for (std::size_t j = 0; j < 10; ++j) {
-      arr[i][j] = static_cast<float>(i * 10 + j);
+      arr[i][j] = static_cast<float>((i * 10) + j);
     }
   }
   auto flat = arr.view(std::array<std::size_t, 1>{1000});
@@ -312,7 +312,7 @@ TEST(View, Rank2To1SharesStorage) {
   EXPECT_TRUE(sameStorage(arr, flat));
   for (std::size_t i = 0; i < 100; ++i) {
     for (std::size_t j = 0; j < 10; ++j) {
-      EXPECT_FLOAT_EQ(flat[i * 10 + j], static_cast<float>(i * 10 + j));
+      EXPECT_FLOAT_EQ(flat[(i * 10) + j], static_cast<float>((i * 10) + j));
     }
   }
 }
@@ -327,7 +327,7 @@ TEST(Reshape, ContigNoAlloc) {
   NDArray<float, 2> arr({8, 12});
   for (std::size_t i = 0; i < 8; ++i) {
     for (std::size_t j = 0; j < 12; ++j) {
-      arr[i][j] = static_cast<float>(i * 12 + j);
+      arr[i][j] = static_cast<float>((i * 12) + j);
     }
   }
   auto view = arr.reshape(std::array<std::size_t, 3>{4, 2, 12});
@@ -344,7 +344,7 @@ TEST(Reshape, NonContigAllocates) {
   NDArray<float, 2> arr({4, 5});
   for (std::size_t i = 0; i < 4; ++i) {
     for (std::size_t j = 0; j < 5; ++j) {
-      arr[i][j] = static_cast<float>(i * 5 + j);
+      arr[i][j] = static_cast<float>((i * 5) + j);
     }
   }
   auto transposed = arr.t();
@@ -355,7 +355,7 @@ TEST(Reshape, NonContigAllocates) {
   // Expected dense row-major walk of the transposed (5x4) view: column-major of the source.
   for (std::size_t j = 0; j < 5; ++j) {
     for (std::size_t i = 0; i < 4; ++i) {
-      EXPECT_FLOAT_EQ(flat[j * 4 + i], static_cast<float>(i * 5 + j));
+      EXPECT_FLOAT_EQ(flat[(j * 4) + i], static_cast<float>((i * 5) + j));
     }
   }
 }
@@ -364,7 +364,7 @@ TEST(Contiguous, AlreadyContigSharesStorage) {
   NDArray<float, 2> arr({6, 7});
   for (std::size_t i = 0; i < 6; ++i) {
     for (std::size_t j = 0; j < 7; ++j) {
-      arr[i][j] = static_cast<float>(i * 7 + j);
+      arr[i][j] = static_cast<float>((i * 7) + j);
     }
   }
   auto same = arr.contiguous();
@@ -379,7 +379,7 @@ TEST(Contiguous, StridedReallocatesAndCopies) {
   NDArray<float, 2> arr({3, 5});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 5; ++j) {
-      arr[i][j] = static_cast<float>(i * 100 + j);
+      arr[i][j] = static_cast<float>((i * 100) + j);
     }
   }
   auto transposed = arr.t();
@@ -391,7 +391,7 @@ TEST(Contiguous, StridedReallocatesAndCopies) {
   for (std::size_t i = 0; i < 5; ++i) {
     for (std::size_t j = 0; j < 3; ++j) {
       EXPECT_FLOAT_EQ(dense(i, j), transposed(i, j));
-      EXPECT_FLOAT_EQ(dense(i, j), static_cast<float>(j * 100 + i));
+      EXPECT_FLOAT_EQ(dense(i, j), static_cast<float>((j * 100) + i));
     }
   }
 }
@@ -400,7 +400,7 @@ TEST(Clone, AlwaysAllocates) {
   NDArray<float, 2> arr({4, 3});
   for (std::size_t i = 0; i < 4; ++i) {
     for (std::size_t j = 0; j < 3; ++j) {
-      arr[i][j] = static_cast<float>(i * 10 + j);
+      arr[i][j] = static_cast<float>((i * 10) + j);
     }
   }
   auto copy = arr.clone();
@@ -422,7 +422,7 @@ TEST(Clone, StridedSourceProducesDenseOwned) {
   NDArray<float, 2> arr({3, 5});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 5; ++j) {
-      arr[i][j] = static_cast<float>(i * 5 + j);
+      arr[i][j] = static_cast<float>((i * 5) + j);
     }
   }
   auto transposed = arr.t();
@@ -451,13 +451,13 @@ TEST(ViewDeathTest, NonContigSourceAborts) {
 }
 
 TEST(Borrow, ContigMutablePointerBuildsWritableView) {
-  alignas(32) float raw[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
-  auto view = NDArray<float, 2>::borrow(raw, std::array<std::size_t, 2>{3, 4});
+  alignas(32) std::array<float, 12> raw = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+  auto view = NDArray<float, 2>::borrow(raw.data(), std::array<std::size_t, 2>{3, 4});
   EXPECT_EQ(view.dim(0), 3u);
   EXPECT_EQ(view.dim(1), 4u);
   EXPECT_EQ(view.strideAt(0), 4);
   EXPECT_EQ(view.strideAt(1), 1);
-  EXPECT_EQ(view.data(), raw);
+  EXPECT_EQ(view.data(), raw.data());
   EXPECT_TRUE(view.isContiguous());
   EXPECT_FLOAT_EQ(view(2, 3), 11.0f);
   view(0, 0) = -7.0f;
@@ -465,36 +465,36 @@ TEST(Borrow, ContigMutablePointerBuildsWritableView) {
 }
 
 TEST(Borrow, ContigConstPointerProducesReadOnlyView) {
-  alignas(32) float raw[6] = {1, 2, 3, 4, 5, 6};
-  const float *cptr = raw;
+  alignas(32) std::array<float, 6> raw = {1, 2, 3, 4, 5, 6};
+  const float *cptr = raw.data();
   const auto view = NDArray<float, 2>::borrow(cptr, std::array<std::size_t, 2>{2, 3});
   EXPECT_EQ(view.dim(0), 2u);
   EXPECT_EQ(view.dim(1), 3u);
   // Bind through std::as_const to force the const operator() overload; non-const operator()
   // asserts on read-only borrows (that behavior is covered by the DeathTests below).
   EXPECT_FLOAT_EQ(std::as_const(view)(1, 2), 6.0f);
-  EXPECT_EQ(view.data(), raw);
+  EXPECT_EQ(view.data(), raw.data());
 }
 
 TEST(BorrowDeathTest, WriteViaOperatorCallOnConstBorrowAborts) {
-  alignas(32) float raw[4] = {0, 0, 0, 0};
-  const float *cptr = raw;
+  alignas(32) std::array<float, 4> raw = {0, 0, 0, 0};
+  const float *cptr = raw.data();
   auto view = NDArray<float, 1>::borrow(cptr, std::array<std::size_t, 1>{4});
   EXPECT_DEBUG_DEATH({ view(0) = 1.0f; }, "write to read-only borrow");
 }
 
 TEST(BorrowDeathTest, WriteViaAccessorOnConstBorrowAborts) {
-  alignas(32) float raw[4] = {0, 0, 0, 0};
-  const float *cptr = raw;
+  alignas(32) std::array<float, 4> raw = {0, 0, 0, 0};
+  const float *cptr = raw.data();
   auto view = NDArray<float, 1>::borrow(cptr, std::array<std::size_t, 1>{4});
   EXPECT_DEBUG_DEATH({ view[0] = 1.0f; }, "write to read-only borrow");
 }
 
 TEST(Borrow, StridedMutableBuildsStridedView) {
-  alignas(32) float raw[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  alignas(32) std::array<float, 8> raw = {0, 1, 2, 3, 4, 5, 6, 7};
   // Interpret raw as a 2x2 matrix whose row stride is 4 and column stride is 2 (every other).
-  auto view = NDArray<float, 2, Layout::MaybeStrided>::borrow(raw, std::array<std::size_t, 2>{2, 2},
-                                                              std::array<std::ptrdiff_t, 2>{4, 2});
+  auto view = NDArray<float, 2, Layout::MaybeStrided>::borrow(
+      raw.data(), std::array<std::size_t, 2>{2, 2}, std::array<std::ptrdiff_t, 2>{4, 2});
   EXPECT_EQ(view.dim(0), 2u);
   EXPECT_EQ(view.dim(1), 2u);
   EXPECT_EQ(view.strideAt(0), 4);
@@ -508,16 +508,16 @@ TEST(Borrow, StridedMutableBuildsStridedView) {
 }
 
 TEST(BorrowDeathTest, StridedConstBorrowTrapsOnWrite) {
-  alignas(32) float raw[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-  const float *cptr = raw;
+  alignas(32) std::array<float, 8> raw = {0, 0, 0, 0, 0, 0, 0, 0};
+  const float *cptr = raw.data();
   auto view = NDArray<float, 2, Layout::MaybeStrided>::borrow(
       cptr, std::array<std::size_t, 2>{2, 2}, std::array<std::ptrdiff_t, 2>{4, 2});
   EXPECT_DEBUG_DEATH({ view(0, 0) = 1.0f; }, "write to read-only borrow");
 }
 
 TEST(Borrow, OneDFromMutablePointer) {
-  alignas(32) float raw[5] = {10, 20, 30, 40, 50};
-  auto view = NDArray<float, 1>::borrow1D(raw, 5);
+  alignas(32) std::array<float, 5> raw = {10, 20, 30, 40, 50};
+  auto view = NDArray<float, 1>::borrow1D(raw.data(), 5);
   EXPECT_EQ(view.dim(0), 5u);
   EXPECT_FLOAT_EQ(view[3], 40.0f);
   view[0] = -1.0f;
@@ -525,18 +525,18 @@ TEST(Borrow, OneDFromMutablePointer) {
 }
 
 TEST(Borrow, OneDFromConstPointerReadOnly) {
-  alignas(32) float raw[3] = {1.5f, 2.5f, 3.5f};
-  const float *cptr = raw;
+  alignas(32) std::array<float, 3> raw = {1.5f, 2.5f, 3.5f};
+  const float *cptr = raw.data();
   const auto view = NDArray<float, 1>::borrow1D(cptr, 3);
   EXPECT_EQ(view.dim(0), 3u);
   EXPECT_FLOAT_EQ(std::as_const(view)(1), 2.5f);
 }
 
 TEST(Borrow, BytesDividesByElementSize) {
-  alignas(32) float raw[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+  alignas(32) std::array<float, 12> raw = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
   // Treat raw as 3x4 with byte-stride (16 bytes row, 4 bytes column) for float -> element 4, 1.
   auto view = NDArray<float, 2, Layout::MaybeStrided>::borrowBytes(
-      raw, std::array<std::size_t, 2>{3, 4}, std::array<std::ptrdiff_t, 2>{16, 4},
+      raw.data(), std::array<std::size_t, 2>{3, 4}, std::array<std::ptrdiff_t, 2>{16, 4},
       /*isMutable=*/true);
   EXPECT_EQ(view.strideAt(0), 4);
   EXPECT_EQ(view.strideAt(1), 1);
@@ -546,27 +546,28 @@ TEST(Borrow, BytesDividesByElementSize) {
 }
 
 TEST(Borrow, BytesHonorsImmutableFlag) {
-  alignas(32) float raw[4] = {0, 0, 0, 0};
+  alignas(32) std::array<float, 4> raw = {0, 0, 0, 0};
   auto view = NDArray<float, 1, Layout::MaybeStrided>::borrowBytes(
-      raw, std::array<std::size_t, 1>{4}, std::array<std::ptrdiff_t, 1>{4},
+      raw.data(), std::array<std::size_t, 1>{4}, std::array<std::ptrdiff_t, 1>{4},
       /*isMutable=*/false);
   EXPECT_DEBUG_DEATH({ view(0) = 1.0f; }, "write to read-only borrow");
 }
 
 TEST(BorrowBytesDeathTest, NonDivisibleByteStrideAborts) {
-  alignas(32) float raw[4] = {0, 0, 0, 0};
+  alignas(32) std::array<float, 4> raw = {0, 0, 0, 0};
   // 6 is not divisible by sizeof(float) == 4 -> must trap.
   auto make_bad = [&]() {
     using Arr = NDArray<float, 1, Layout::MaybeStrided>;
-    (void)Arr::borrowBytes(raw, std::array<std::size_t, 1>{2}, std::array<std::ptrdiff_t, 1>{6},
+    (void)Arr::borrowBytes(raw.data(), std::array<std::size_t, 1>{2},
+                           std::array<std::ptrdiff_t, 1>{6},
                            /*isMutable=*/true);
   };
   EXPECT_DEBUG_DEATH(make_bad(), "byte strides divisible by sizeof");
 }
 
 TEST(Borrow, FromSpanMutable) {
-  alignas(32) float raw[4] = {1, 2, 3, 4};
-  std::span<float> s(raw, 4);
+  alignas(32) std::array<float, 4> raw = {1, 2, 3, 4};
+  const std::span<float> s(raw.data(), 4);
   auto view = NDArray<float, 1>::fromSpan(s);
   EXPECT_EQ(view.dim(0), 4u);
   EXPECT_FLOAT_EQ(view[2], 3.0f);
@@ -575,8 +576,8 @@ TEST(Borrow, FromSpanMutable) {
 }
 
 TEST(Borrow, FromSpanConstReadOnly) {
-  alignas(32) float raw[4] = {1, 2, 3, 4};
-  std::span<const float> s(raw, 4);
+  alignas(32) std::array<float, 4> raw = {1, 2, 3, 4};
+  const std::span<const float> s(raw.data(), 4);
   const auto view = NDArray<float, 1>::fromSpan(s);
   EXPECT_EQ(view.dim(0), 4u);
   EXPECT_FLOAT_EQ(std::as_const(view)(3), 4.0f);
@@ -599,9 +600,9 @@ TEST(AlignedData, ConstOverload) {
 }
 
 TEST(AlignedDataDeathTest, UnalignedBorrowAborts) {
-  alignas(32) float raw[32] = {};
+  alignas(32) std::array<float, 32> raw = {};
   // Offset by one float (4 bytes) to force a non-32-byte-aligned pointer.
-  float *misaligned = raw + 1;
+  float *misaligned = raw.data() + 1;
   auto view = NDArray<float, 1>::borrow(misaligned, std::array<std::size_t, 1>{16});
   EXPECT_DEBUG_DEATH(
       { (void)view.alignedData<32>(); }, "alignedData<A>\\(\\) requires A-byte aligned data");
@@ -632,67 +633,67 @@ static_assert(std::is_same_v<decltype(NDArray<float, 1>::borrow1D(static_cast<fl
               "borrow1D must yield Contig rank-1");
 
 TEST(Borrow, MovePreservesBorrowedPointer) {
-  alignas(32) float raw[4] = {1, 2, 3, 4};
-  auto view = NDArray<float, 1>::borrow(raw, std::array<std::size_t, 1>{4});
-  ASSERT_EQ(view.data(), raw);
+  alignas(32) std::array<float, 4> raw = {1, 2, 3, 4};
+  auto view = NDArray<float, 1>::borrow(raw.data(), std::array<std::size_t, 1>{4});
+  ASSERT_EQ(view.data(), raw.data());
   auto moved = std::move(view);
-  EXPECT_EQ(moved.data(), raw);
+  EXPECT_EQ(moved.data(), raw.data());
   EXPECT_EQ(moved.dim(0), 4u);
   EXPECT_FLOAT_EQ(moved(2), 3.0f);
 }
 
 TEST(Borrow, CopyPreservesBorrowedPointer) {
-  alignas(32) float raw[4] = {1, 2, 3, 4};
-  auto view = NDArray<float, 1>::borrow(raw, std::array<std::size_t, 1>{4});
-  ASSERT_EQ(view.data(), raw);
+  alignas(32) std::array<float, 4> raw = {1, 2, 3, 4};
+  auto view = NDArray<float, 1>::borrow(raw.data(), std::array<std::size_t, 1>{4});
+  ASSERT_EQ(view.data(), raw.data());
   auto copied = view;
-  EXPECT_EQ(copied.data(), raw);
-  EXPECT_EQ(view.data(), raw);
+  EXPECT_EQ(copied.data(), raw.data());
+  EXPECT_EQ(view.data(), raw.data());
   EXPECT_EQ(copied.dim(0), 4u);
   EXPECT_FLOAT_EQ(copied(1), 2.0f);
 }
 
 TEST(Borrow, MoveAssignPreservesBorrowedPointer) {
-  alignas(32) float raw[4] = {5, 6, 7, 8};
-  auto view = NDArray<float, 1>::borrow(raw, std::array<std::size_t, 1>{4});
-  ASSERT_EQ(view.data(), raw);
+  alignas(32) std::array<float, 4> raw = {5, 6, 7, 8};
+  auto view = NDArray<float, 1>::borrow(raw.data(), std::array<std::size_t, 1>{4});
+  ASSERT_EQ(view.data(), raw.data());
   NDArray<float, 1> sink({1});
   sink = std::move(view);
-  EXPECT_EQ(sink.data(), raw);
+  EXPECT_EQ(sink.data(), raw.data());
   EXPECT_EQ(sink.dim(0), 4u);
   EXPECT_FLOAT_EQ(sink(3), 8.0f);
 }
 
 TEST(Borrow, CopyAssignPreservesBorrowedPointer) {
-  alignas(32) float raw[4] = {5, 6, 7, 8};
-  auto view = NDArray<float, 1>::borrow(raw, std::array<std::size_t, 1>{4});
-  ASSERT_EQ(view.data(), raw);
+  alignas(32) std::array<float, 4> raw = {5, 6, 7, 8};
+  auto view = NDArray<float, 1>::borrow(raw.data(), std::array<std::size_t, 1>{4});
+  ASSERT_EQ(view.data(), raw.data());
   NDArray<float, 1> sink({1});
   sink = view;
-  EXPECT_EQ(sink.data(), raw);
-  EXPECT_EQ(view.data(), raw);
+  EXPECT_EQ(sink.data(), raw.data());
+  EXPECT_EQ(view.data(), raw.data());
   EXPECT_EQ(sink.dim(0), 4u);
   EXPECT_FLOAT_EQ(sink(0), 5.0f);
 }
 
 TEST(BorrowDeathTest, WriteViaFlatIndexOnConstBorrowAborts) {
-  alignas(32) float raw[4] = {0, 0, 0, 0};
-  const float *cptr = raw;
+  alignas(32) std::array<float, 4> raw = {0, 0, 0, 0};
+  const float *cptr = raw.data();
   auto view = NDArray<float, 1>::borrow(cptr, std::array<std::size_t, 1>{4});
   EXPECT_DEBUG_DEATH({ view.flatIndex(0) = 1.0f; }, "write to read-only borrow");
 }
 
 TEST(BorrowDeathTest, WriteViaDataPointerOnConstBorrowAborts) {
-  alignas(32) float raw[4] = {0, 0, 0, 0};
-  const float *cptr = raw;
+  alignas(32) std::array<float, 4> raw = {0, 0, 0, 0};
+  const float *cptr = raw.data();
   auto view = NDArray<float, 1>::borrow(cptr, std::array<std::size_t, 1>{4});
   EXPECT_DEBUG_DEATH({ (void)view.data(); }, "write to read-only borrow");
 }
 
 TEST(DebugDump, BorrowedViewReportsViewableContents) {
-  alignas(32) float raw[6] = {10, 20, 30, 40, 50, 60};
-  auto view = NDArray<float, 2>::borrow(raw, std::array<std::size_t, 2>{2, 3});
-  std::string dump = view.debugDump();
+  alignas(32) std::array<float, 6> raw = {10, 20, 30, 40, 50, 60};
+  auto view = NDArray<float, 2>::borrow(raw.data(), std::array<std::size_t, 2>{2, 3});
+  const std::string dump = view.debugDump();
   // Every source element must appear in the dump; the old m_vec-only walk produced "data: []".
   EXPECT_NE(dump.find("10"), std::string::npos);
   EXPECT_NE(dump.find("60"), std::string::npos);
@@ -703,11 +704,11 @@ TEST(DebugDump, TransposeReadsThroughStrides) {
   NDArray<float, 2> arr({2, 3});
   for (std::size_t i = 0; i < 2; ++i) {
     for (std::size_t j = 0; j < 3; ++j) {
-      arr[i][j] = static_cast<float>(i * 3 + j + 1);
+      arr[i][j] = static_cast<float>((i * 3) + j + 1);
     }
   }
   auto tv = arr.t();
-  std::string dump = tv.debugDump();
+  const std::string dump = tv.debugDump();
   EXPECT_NE(dump.find("size: 6"), std::string::npos);
   // Row-major walk of the 3x2 transposed view: a(0,0), a(1,0), a(0,1), a(1,1), a(0,2), a(1,2).
   EXPECT_NE(dump.find("1, 4, 2, 5, 3, 6"), std::string::npos);
@@ -737,14 +738,14 @@ TEST(ViewOffset, TransposeThenRowStillReadsSource) {
   NDArray<float, 2> arr({3, 4});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 4; ++j) {
-      arr[i][j] = static_cast<float>(i * 10 + j);
+      arr[i][j] = static_cast<float>((i * 10) + j);
     }
   }
   auto tv = arr.t();
   auto r = tv.row(2);
   EXPECT_EQ(r.dim(0), 3u);
   for (std::size_t i = 0; i < 3; ++i) {
-    EXPECT_FLOAT_EQ(r(i), static_cast<float>(i * 10 + 2));
+    EXPECT_FLOAT_EQ(r(i), static_cast<float>((i * 10) + 2));
   }
 }
 
@@ -752,7 +753,7 @@ TEST(ViewOffset, TransposeThenSliceStillReadsSource) {
   NDArray<float, 2> arr({3, 4});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 4; ++j) {
-      arr[i][j] = static_cast<float>(i * 10 + j);
+      arr[i][j] = static_cast<float>((i * 10) + j);
     }
   }
   auto tv = arr.t();
@@ -770,7 +771,7 @@ TEST(ViewOffset, TransposeThenColStillReadsSource) {
   NDArray<float, 2> arr({3, 4});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 4; ++j) {
-      arr[i][j] = static_cast<float>(i * 10 + j);
+      arr[i][j] = static_cast<float>((i * 10) + j);
     }
   }
   auto tv = arr.t();

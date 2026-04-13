@@ -1,14 +1,16 @@
 #pragma once
 #include <cstdint>
+#include <new>
 #include <type_traits>
+#include <utility>
 
 namespace clustering {
 
 template <typename T> class LinearAllocator {
-  static_assert(std::is_trivially_destructible<T>::value, "T must be trivially destructible");
+  static_assert(std::is_trivially_destructible_v<T>, "T must be trivially destructible");
 
 public:
-  LinearAllocator(size_t count)
+  LinearAllocator(std::size_t count)
       : size(count * sizeof(T)), memory(new char[count * sizeof(T)]), next(memory) {}
 
   ~LinearAllocator() { delete[] memory; }
@@ -17,16 +19,18 @@ public:
   LinearAllocator &operator=(const LinearAllocator &) = delete;
 
   T *allocate() {
-    if (static_cast<size_t>(next - memory) >= size) {
+    if (std::cmp_greater_equal(next - memory, size)) {
       throw std::bad_alloc();
     }
 
-    T *result = reinterpret_cast<T *>(next);
+    // Placement new modifies storage at `next` even though tidy can't see
+    // it through the pointer; suppress the false-positive const suggestion.
+    T *const result = new (next) T; // NOLINT(misc-const-correctness)
     next += sizeof(T);
-    return new (result) T;
+    return result;
   }
 
-  void deallocate(T *ptr) {
+  void deallocate(T * /*ptr*/) {
     // Do nothing because T is trivially destructible
   }
 
@@ -35,7 +39,7 @@ public:
   bool isDeallocSupported() { return false; }
 
 private:
-  size_t size;
+  std::size_t size;
   char *memory;
   char *next;
 };

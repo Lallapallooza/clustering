@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <numeric>
 #include <stack>
 
@@ -33,7 +34,7 @@ struct KDTreeNode {
   KDTreeNode *m_right; ///< Pointer to the right child (nullptr for leaf nodes)
 };
 
-enum class KDTreeDistanceType { kEucledian };
+enum class KDTreeDistanceType : std::uint8_t { kEucledian };
 
 /**
  * @brief Implements a KDTree data structure.
@@ -66,7 +67,6 @@ class KDTree {
 public:
   using value_type = T; ///< value_type is the type of the points in the KDTree
 
-public:
   /**
    * @brief Constructs a KDTree using a given set of points.
    *
@@ -80,7 +80,7 @@ public:
    * manage the array's lifecycle.
    */
   KDTree(const NDArray<T, 2> &points)
-      : m_allocator(calculatePoolSize(points.dim(0))), m_points(points), m_root(nullptr) {
+      : m_allocator(calculatePoolSize(points.dim(0))), m_points(points) {
     m_indices.resize(points.dim(0));
     std::iota(m_indices.begin(), m_indices.end(), 0);
     m_root = build(0, m_indices.size(), 0);
@@ -131,8 +131,9 @@ private:
    * @return Number of nodes to allocate.
    */
   static size_t calculatePoolSize(size_t numPoints) {
-    if (numPoints == 0)
+    if (numPoints == 0) {
       return 0;
+    }
     // With leaf-size tuning, the number of nodes is at most numPoints
     // (much less than the original 2*numPoints-1, since leaf nodes batch
     // up to LeafSize points each).
@@ -148,7 +149,7 @@ private:
    * @param node Current node to deallocate.
    */
   static void doRecDealloc(KDTreeNode *node) {
-    if (!node) {
+    if (node == nullptr) {
       return;
     }
 
@@ -180,27 +181,30 @@ private:
     // Leaf node: store range into m_indices, brute-force at query time
     if (end - start <= LeafSize) {
       KDTreeNode *node = m_allocator.allocate();
-      *node = {/*m_index=*/start,     // offset into m_indices
-               /*m_dim=*/end - start, // count of points
-               /*m_left=*/nullptr,
-               /*m_right=*/nullptr};
+      *node = {.m_index = start,     // offset into m_indices
+               .m_dim = end - start, // count of points
+               .m_left = nullptr,
+               .m_right = nullptr};
       return node;
     }
 
     // Internal node: split on median
-    std::size_t dim = depth % m_points.dim(1);
-    std::size_t median = start + (end - start - 1) / 2;
+    const std::size_t dim = depth % m_points.dim(1);
+    const std::size_t median = start + (((end - start) - 1) / 2);
 
-    std::nth_element(m_indices.begin() + start, m_indices.begin() + median, m_indices.begin() + end,
+    using diff_t = std::vector<std::size_t>::difference_type;
+    std::nth_element(m_indices.begin() + static_cast<diff_t>(start),
+                     m_indices.begin() + static_cast<diff_t>(median),
+                     m_indices.begin() + static_cast<diff_t>(end),
                      [this, dim](std::size_t lhs, std::size_t rhs) {
                        return m_points[lhs][dim] < m_points[rhs][dim];
                      });
 
     KDTreeNode *node = m_allocator.allocate();
-    *node = {/*m_index=*/m_indices[median],
-             /*m_dim=*/dim,
-             /*m_left=*/build(start, median, depth + 1),
-             /*m_right=*/build(median + 1, end, depth + 1)};
+    *node = {.m_index = m_indices[median],
+             .m_dim = dim,
+             .m_left = build(start, median, depth + 1),
+             .m_right = build(median + 1, end, depth + 1)};
 
     return node;
   }
@@ -221,7 +225,7 @@ private:
    */
   void query(KDTreeNode *root, const NDArray<T, 1> &query_point, T radius_sq,
              std::vector<std::size_t> &indices, int64_t limit = -1) const {
-    if (!root) {
+    if (root == nullptr) {
       return;
     }
 
@@ -230,26 +234,28 @@ private:
     stack.push_back(root);
 
     while (!stack.empty()) {
-      KDTreeNode *node = stack.back();
+      const KDTreeNode *node = stack.back();
       stack.pop_back();
 
-      if (!node)
+      if (node == nullptr) {
         continue;
+      }
 
-      if (limit != -1 && indices.size() == limit) {
+      if (limit != -1 && indices.size() == static_cast<std::size_t>(limit)) {
         break;
       }
 
       // Leaf node: brute-force all points in the range
-      if (!node->m_left && !node->m_right) {
+      if (node->m_left == nullptr && node->m_right == nullptr) {
         for (std::size_t i = 0; i < node->m_dim; ++i) {
-          std::size_t idx = m_indices[node->m_index + i];
+          const std::size_t idx = m_indices[node->m_index + i];
           T dist_sq = distanceSquared(query_point, idx);
           if (dist_sq <= radius_sq) {
             indices.push_back(idx);
           }
-          if (limit != -1 && indices.size() == static_cast<std::size_t>(limit))
+          if (limit != -1 && indices.size() == static_cast<std::size_t>(limit)) {
             break;
+          }
         }
         continue;
       }
@@ -262,15 +268,19 @@ private:
 
       T diff = query_point[node->m_dim] - m_points[node->m_index][node->m_dim];
       if (diff < 0) {
-        if (node->m_left)
+        if (node->m_left != nullptr) {
           stack.push_back(node->m_left);
-        if (diff * diff <= radius_sq && node->m_right)
+        }
+        if (diff * diff <= radius_sq && node->m_right != nullptr) {
           stack.push_back(node->m_right);
+        }
       } else {
-        if (node->m_right)
+        if (node->m_right != nullptr) {
           stack.push_back(node->m_right);
-        if (diff * diff <= radius_sq && node->m_left)
+        }
+        if (diff * diff <= radius_sq && node->m_left != nullptr) {
           stack.push_back(node->m_left);
+        }
       }
     }
   }
@@ -288,7 +298,7 @@ private:
    * @param index The index of the point in the KDTree to compare with the query point.
    * @return The Euclidean distance between the query point and the specified point in the KDTree.
    */
-  inline T distanceSquared(const NDArray<T, 1> &query_point, std::size_t index) const noexcept {
+  T distanceSquared(const NDArray<T, 1> &query_point, std::size_t index) const noexcept {
     if constexpr (distanceType == KDTreeDistanceType::kEucledian) {
 #ifdef CLUSTERING_USE_AVX2
       // Below 8 dims an AVX2 register holds zero useful lanes; the horizontal-sum
@@ -354,17 +364,17 @@ private:
     __m256 sum_vec = _mm256_setzero_ps();
 
     std::size_t dim;
-    std::size_t point_dim = m_points.dim(1); // Determine the total number of dimensions.
+    const std::size_t point_dim = m_points.dim(1); // Determine the total number of dimensions.
 
     // Process dimensions in groups of 8 using AVX2 instructions for vectorized computation.
     for (dim = 0; dim + 8 <= point_dim; dim += 8) {
       // Load groups of 8 elements from the query point and KDTree point.
-      __m256 v1 = _mm256_load_ps(query_point[dim].data());
-      __m256 v2 = _mm256_load_ps(m_points[index][dim].data());
+      const __m256 v1 = _mm256_load_ps(query_point[dim].data());
+      const __m256 v2 = _mm256_load_ps(m_points[index][dim].data());
 
       // Compute and accumulate the squared differences between elements.
-      __m256 diff = _mm256_sub_ps(v1, v2);
-      __m256 sq_diff = _mm256_mul_ps(diff, diff);
+      const __m256 diff = _mm256_sub_ps(v1, v2);
+      const __m256 sq_diff = _mm256_mul_ps(diff, diff);
       sum_vec = _mm256_add_ps(sum_vec, sq_diff);
     }
 
@@ -376,7 +386,7 @@ private:
     }
 
     // Efficient horizontal sum of AVX2 vector
-    __m256 permute = _mm256_permute2f128_ps(sum_vec, sum_vec, 1);
+    const __m256 permute = _mm256_permute2f128_ps(sum_vec, sum_vec, 1);
     sum_vec = _mm256_add_ps(sum_vec, permute);
     sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
     sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
@@ -386,10 +396,9 @@ private:
   }
 #endif
 
-private:
   AllocT m_allocator; ///< Allocator for the KDTree
 
-  KDTreeNode *m_root;                 ///< Root of the KDTree
+  KDTreeNode *m_root = nullptr;       ///< Root of the KDTree
   const NDArray<T, 2> &m_points;      ///< NDArray of points in the KDTree
   std::vector<std::size_t> m_indices; ///< Shared index array for build
 };

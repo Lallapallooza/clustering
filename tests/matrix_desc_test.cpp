@@ -8,7 +8,6 @@
 #include "clustering/math/detail/matrix_desc.h"
 #include "clustering/ndarray.h"
 
-using clustering::Layout;
 using clustering::NDArray;
 using clustering::Range;
 
@@ -19,8 +18,8 @@ namespace {
 // NDArray's own indexing.
 template <class T>
 T readStrided(const clustering::detail::MatrixDescC<T> &d, std::size_t r, std::size_t c) {
-  return d.ptr[static_cast<std::ptrdiff_t>(r) * d.rowStride +
-               static_cast<std::ptrdiff_t>(c) * d.colStride];
+  return d.ptr[(static_cast<std::ptrdiff_t>(r) * d.rowStride) +
+               (static_cast<std::ptrdiff_t>(c) * d.colStride)];
 }
 
 } // namespace
@@ -29,7 +28,7 @@ TEST(MatrixDesc, DescribeOwnedContiguous) {
   NDArray<float, 2> a({3, 5});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 5; ++j) {
-      a[i][j] = static_cast<float>(i * 5 + j);
+      a[i][j] = static_cast<float>((i * 5) + j);
     }
   }
 
@@ -49,7 +48,7 @@ TEST(MatrixDesc, DescribeTransposedStrided) {
   NDArray<float, 2> a({4, 6});
   for (std::size_t i = 0; i < 4; ++i) {
     for (std::size_t j = 0; j < 6; ++j) {
-      a[i][j] = static_cast<float>(i * 6 + j);
+      a[i][j] = static_cast<float>((i * 6) + j);
     }
   }
   auto tv = a.t();
@@ -67,14 +66,14 @@ TEST(MatrixDesc, ReadThroughDescriptorMatchesOriginalContiguous) {
   NDArray<float, 2> a({3, 4});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 4; ++j) {
-      a[i][j] = static_cast<float>(i * 4 + j) + 0.5f;
+      a[i][j] = static_cast<float>((i * 4) + j) + 0.5f;
     }
   }
 
   auto d = clustering::detail::describeMatrix(a);
   for (std::size_t i = 0; i < d.rows; ++i) {
     for (std::size_t j = 0; j < d.cols; ++j) {
-      EXPECT_FLOAT_EQ(readStrided(d, i, j), static_cast<float>(i * 4 + j) + 0.5f);
+      EXPECT_FLOAT_EQ(readStrided(d, i, j), static_cast<float>((i * 4) + j) + 0.5f);
     }
   }
 }
@@ -83,7 +82,7 @@ TEST(MatrixDesc, ReadThroughDescriptorMatchesOriginalTransposed) {
   NDArray<float, 2> a({3, 4});
   for (std::size_t i = 0; i < 3; ++i) {
     for (std::size_t j = 0; j < 4; ++j) {
-      a[i][j] = static_cast<float>(i * 4 + j) + 0.25f;
+      a[i][j] = static_cast<float>((i * 4) + j) + 0.25f;
     }
   }
   auto tv = a.t();
@@ -93,17 +92,17 @@ TEST(MatrixDesc, ReadThroughDescriptorMatchesOriginalTransposed) {
   for (std::size_t i = 0; i < d.rows; ++i) {
     for (std::size_t j = 0; j < d.cols; ++j) {
       // tv(i, j) corresponds to a(j, i) in the original buffer.
-      EXPECT_FLOAT_EQ(readStrided(d, i, j), static_cast<float>(j * 4 + i) + 0.25f);
+      EXPECT_FLOAT_EQ(readStrided(d, i, j), static_cast<float>((j * 4) + i) + 0.25f);
     }
   }
 }
 
 TEST(MatrixDesc, DescribeBorrowedReadOnlyIsContiguous) {
-  alignas(32) float buf[3 * 4];
+  alignas(32) std::array<float, 12> buf{};
   for (std::size_t k = 0; k < 12; ++k) {
     buf[k] = static_cast<float>(k);
   }
-  const float *cptr = buf;
+  const float *cptr = buf.data();
   auto view = NDArray<float, 2>::borrow(cptr, std::array<std::size_t, 2>{3, 4});
 
   auto d = clustering::detail::describeMatrix(view);
@@ -120,27 +119,27 @@ TEST(MatrixDesc, DescribeMatrixMutOnOwned) {
   static_assert(std::is_same_v<decltype(d.ptr), float *>,
                 "describeMatrixMut must return mutable-polarity descriptor");
 
-  d.ptr[0 * d.rowStride + 2 * d.colStride] = 11.0f;
-  d.ptr[1 * d.rowStride + 0 * d.colStride] = 22.0f;
+  d.ptr[(0 * d.rowStride) + (2 * d.colStride)] = 11.0f;
+  d.ptr[(1 * d.rowStride) + (0 * d.colStride)] = 22.0f;
 
   EXPECT_FLOAT_EQ(static_cast<float>(a[0][2]), 11.0f);
   EXPECT_FLOAT_EQ(static_cast<float>(a[1][0]), 22.0f);
 }
 
 TEST(MatrixDesc, DescribeMatrixMutOnMutableBorrow) {
-  alignas(32) float buf[2 * 3]{};
-  auto view = NDArray<float, 2>::borrow(buf, std::array<std::size_t, 2>{2, 3});
+  alignas(32) std::array<float, 6> buf{};
+  auto view = NDArray<float, 2>::borrow(buf.data(), std::array<std::size_t, 2>{2, 3});
   EXPECT_TRUE(view.isMutable());
 
   auto d = clustering::detail::describeMatrixMut(view);
-  d.ptr[1 * d.rowStride + 2 * d.colStride] = 42.0f;
+  d.ptr[(1 * d.rowStride) + (2 * d.colStride)] = 42.0f;
   EXPECT_FLOAT_EQ(buf[5], 42.0f);
 }
 
 #ifndef NDEBUG
 TEST(MatrixDesc, DescribeMatrixMutOnReadOnlyBorrowAsserts) {
-  alignas(32) float buf[2 * 3]{};
-  const float *cptr = buf;
+  alignas(32) std::array<float, 6> buf{};
+  const float *cptr = buf.data();
   auto view = NDArray<float, 2>::borrow(cptr, std::array<std::size_t, 2>{2, 3});
   EXPECT_FALSE(view.isMutable());
   EXPECT_DEATH({ (void)clustering::detail::describeMatrixMut(view); }, "");
@@ -157,7 +156,8 @@ TEST(MatrixDesc, AlignmentGranularityReflectsPointer) {
   // An interior-column slice on a row-major source advances the base pointer by
   // sizeof(float) * begin_col. For begin_col == 1 on a 32-aligned base, that is a 4-byte
   // offset: the descriptor must report 4-byte alignment, not 32.
-  auto sliced = a.slice({Range{0, 4, 1}, Range{1, 4, 1}});
+  auto sliced =
+      a.slice({Range{.begin = 0, .end = 4, .step = 1}, Range{.begin = 1, .end = 4, .step = 1}});
   auto dslice = clustering::detail::describeMatrix(sliced);
   const auto addr = reinterpret_cast<std::uintptr_t>(dslice.ptr);
   EXPECT_EQ(addr % dslice.alignment, 0u);

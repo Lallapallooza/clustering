@@ -62,8 +62,8 @@ public:
     if (n == 0) {
       return nullptr;
     }
-    size_type bytes = n * sizeof(T);
-    size_type aligned_bytes = (bytes + Align - 1) / Align * Align;
+    const size_type bytes = n * sizeof(T);
+    const size_type aligned_bytes = (bytes + Align - 1) / Align * Align;
     if (auto *ptr = static_cast<pointer>(std::aligned_alloc(Align, aligned_bytes))) {
       return ptr;
     }
@@ -178,11 +178,11 @@ public:
      * @param index Index in the next dimension.
      * @return A new ConstAccessor for the specified index in the next dimension.
      */
-    inline ConstAccessor operator[](std::size_t index) const noexcept {
+    ConstAccessor operator[](std::size_t index) const noexcept {
       assert(this->m_dim < N && index < this->m_ndarray->dim(this->m_dim + 1));
       // Contig invariant lets the chain collapse to m_index * shape[dim+1] + index at every step,
       // matching the baseline hot-loop asm clang can vectorise into an 8x-unrolled aligned load.
-      size_t new_index = this->m_index * this->m_ndarray->dim(this->m_dim + 1) + index;
+      const size_t new_index = (this->m_index * this->m_ndarray->dim(this->m_dim + 1)) + index;
       return ConstAccessor(*this->m_ndarray, new_index, this->m_dim + 1);
     }
 
@@ -191,14 +191,14 @@ public:
      *
      * @return The element of type T at the accessor's position.
      */
-    inline operator T() const noexcept { return this->m_ndarray->flatIndex(this->m_index); }
+    operator T() const noexcept { return this->m_ndarray->flatIndex(this->m_index); }
 
     /**
      * @brief Returns the flat index in the NDArray corresponding to the accessor.
      *
      * @return The flat index as a size_t.
      */
-    [[nodiscard]] inline size_t index() const noexcept { return this->m_index; }
+    [[nodiscard]] size_t index() const noexcept { return this->m_index; }
   };
 
   /**
@@ -222,9 +222,9 @@ public:
      * @param index Index in the next dimension.
      * @return A new Accessor for the specified index in the next dimension.
      */
-    inline Accessor operator[](std::size_t index) noexcept {
+    Accessor operator[](std::size_t index) noexcept {
       assert(this->m_dim < N && index < this->m_ndarray->dim(this->m_dim + 1));
-      size_t new_index = this->m_index * this->m_ndarray->dim(this->m_dim + 1) + index;
+      const size_t new_index = (this->m_index * this->m_ndarray->dim(this->m_dim + 1)) + index;
       return Accessor(*this->m_ndarray, new_index, this->m_dim + 1);
     }
 
@@ -237,14 +237,13 @@ public:
      * @param value The value to be assigned.
      * @return Reference to the accessor after assignment.
      */
-    inline Accessor &operator=(T value) noexcept {
+    Accessor &operator=(T value) noexcept {
       assert(this->m_ndarray->m_mutable && "write to read-only borrow");
       this->m_ndarray->flatIndex(this->m_index) = value;
       return *this;
     }
   };
 
-public:
   /**
    * @brief Constructs a contiguous owned NDArray with specified dimensions.
    *
@@ -253,7 +252,8 @@ public:
    *
    * @param dims Initializer list specifying the dimensions of the NDArray.
    */
-  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
+  template <Layout L2 = L>
+    requires(L2 == Layout::Contig)
   NDArray(std::initializer_list<std::size_t> dims)
       : m_data(nullptr), m_base(nullptr), m_offset(0), m_storage(NDArrayStorage::Owned),
         m_mutable(true) {
@@ -279,7 +279,8 @@ public:
    *
    * @param shape Dimensions of the NDArray, one entry per axis.
    */
-  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
+  template <Layout L2 = L>
+    requires(L2 == Layout::Contig)
   explicit NDArray(std::array<std::size_t, N> shape)
       : m_data(nullptr), m_base(nullptr), m_shape(shape), m_offset(0),
         m_storage(NDArrayStorage::Owned), m_mutable(true) {
@@ -365,8 +366,9 @@ public:
    * @param index Index in the first dimension.
    * @return An Accessor to the specified index in the first dimension.
    */
-  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
-  inline Accessor operator[](std::size_t index) noexcept {
+  template <Layout L2 = L>
+    requires(L2 == Layout::Contig)
+  Accessor operator[](std::size_t index) noexcept {
     assert(index < m_shape[0]);
     return Accessor(*this, index, 0);
   }
@@ -377,8 +379,9 @@ public:
    * @param index Index in the first dimension.
    * @return A ConstAccessor to the specified index in the first dimension.
    */
-  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
-  inline const ConstAccessor operator[](std::size_t index) const noexcept {
+  template <Layout L2 = L>
+    requires(L2 == Layout::Contig)
+  ConstAccessor operator[](std::size_t index) const noexcept {
     assert(index < m_shape[0]);
     return ConstAccessor(*this, index, 0);
   }
@@ -390,13 +393,13 @@ public:
    * @param ix Indices, one per dimension.
    * @return Reference to the element at @c m_offset + sum_k ix_k * m_strides[k].
    */
-  template <class... Ix> inline T &operator()(Ix... ix) noexcept {
+  template <class... Ix> T &operator()(Ix... ix) noexcept {
     static_assert(sizeof...(Ix) == N, "operator() requires exactly N indices");
     assert(m_mutable && "write to read-only borrow");
     return m_data[computeElementOffset(std::index_sequence_for<Ix...>{}, ix...)];
   }
 
-  template <class... Ix> inline const T &operator()(Ix... ix) const noexcept {
+  template <class... Ix> const T &operator()(Ix... ix) const noexcept {
     static_assert(sizeof...(Ix) == N, "operator() requires exactly N indices");
     return m_data[computeElementOffset(std::index_sequence_for<Ix...>{}, ix...)];
   }
@@ -407,7 +410,7 @@ public:
    * @param index Index in the flat representation of the NDArray.
    * @return Reference to the element at the specified index.
    */
-  inline T &flatIndex(std::size_t index) noexcept {
+  T &flatIndex(std::size_t index) noexcept {
     assert(m_mutable && "write to read-only borrow");
     return m_data[index];
   }
@@ -418,7 +421,7 @@ public:
    * @param index Index in the flat representation of the NDArray.
    * @return Constant reference to the element at the specified index.
    */
-  inline const T &flatIndex(std::size_t index) const noexcept { return m_data[index]; }
+  const T &flatIndex(std::size_t index) const noexcept { return m_data[index]; }
 
   /**
    * @brief Returns the size of a specific dimension of the NDArray.
@@ -426,12 +429,12 @@ public:
    * @param index Index of the dimension.
    * @return Size of the specified dimension as a size_t.
    */
-  inline const size_t dim(std::size_t index) const noexcept { return m_shape[index]; }
+  size_t dim(std::size_t index) const noexcept { return m_shape[index]; }
 
   /**
    * @brief Returns the stride (in elements) for dimension @p index.
    */
-  inline std::ptrdiff_t strideAt(std::size_t index) const noexcept { return m_strides[index]; }
+  std::ptrdiff_t strideAt(std::size_t index) const noexcept { return m_strides[index]; }
 
   /**
    * @brief Reports whether the array's runtime layout is row-major contiguous with zero offset.
@@ -439,7 +442,7 @@ public:
    * For @c Layout::Contig arrays this is always true (the type encodes the guarantee). For
    * @c Layout::MaybeStrided arrays the answer is computed from @c m_strides and @c m_offset.
    */
-  [[nodiscard]] inline bool isContiguous() const noexcept {
+  [[nodiscard]] bool isContiguous() const noexcept {
     if constexpr (L == Layout::Contig) {
       return true;
     } else {
@@ -453,7 +456,7 @@ public:
    * Owned arrays are always mutable. Borrowed arrays carry the flag supplied at borrow time:
    * @c borrow(const T*, ...) flips it off, @c borrow(T*, ...) leaves it on.
    */
-  [[nodiscard]] inline bool isMutable() const noexcept { return m_mutable; }
+  [[nodiscard]] bool isMutable() const noexcept { return m_mutable; }
 
   /**
    * @brief Reports whether the array owns its underlying buffer.
@@ -461,14 +464,14 @@ public:
    * Owned arrays hold their storage in @c m_vec; Borrowed arrays reference an external buffer
    * whose lifetime is the caller's responsibility.
    */
-  [[nodiscard]] inline bool isOwned() const noexcept { return m_storage == NDArrayStorage::Owned; }
+  [[nodiscard]] bool isOwned() const noexcept { return m_storage == NDArrayStorage::Owned; }
 
   /**
    * @brief Provides read-only access to the internal data array.
    *
    * @return Constant pointer to the data array.
    */
-  inline const T *data() const noexcept { return m_data; }
+  const T *data() const noexcept { return m_data; }
 
   /**
    * @brief Provides read-write access to the internal data array.
@@ -478,7 +481,7 @@ public:
    *
    * @return Pointer to the data array.
    */
-  inline T *data() noexcept {
+  T *data() noexcept {
     assert(m_mutable && "write to read-only borrow");
     return m_data;
   }
@@ -490,7 +493,7 @@ public:
    * (or the @c clone / non-contiguous @c reshape paths) installs a new base. @c sameStorage
    * uses this to decide whether two arrays share the underlying buffer.
    */
-  [[nodiscard]] inline T *baseData() const noexcept { return m_base; }
+  [[nodiscard]] T *baseData() const noexcept { return m_base; }
 
   /**
    * @brief Tests whether @c data() is aligned to @p A bytes.
@@ -513,12 +516,12 @@ public:
    * @return Aligned pointer into the buffer. Writes through the mutable overload on a read-only
    *         borrow are undefined; the caller is responsible for honoring the const contract.
    */
-  template <std::size_t A> inline T *alignedData() noexcept {
+  template <std::size_t A> T *alignedData() noexcept {
     assert(isAligned<A>() && "alignedData<A>() requires A-byte aligned data");
     return static_cast<T *>(__builtin_assume_aligned(m_data, A));
   }
 
-  template <std::size_t A> inline const T *alignedData() const noexcept {
+  template <std::size_t A> const T *alignedData() const noexcept {
     assert(isAligned<A>() && "alignedData<A>() requires A-byte aligned data");
     return static_cast<const T *>(__builtin_assume_aligned(m_data, A));
   }
@@ -532,7 +535,8 @@ public:
    * @param ptr Non-owning pointer to the first element. Must stay alive for the view's lifetime.
    * @param shape Dimensions, one entry per axis.
    */
-  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
+  template <Layout L2 = L>
+    requires(L2 == Layout::Contig)
   static NDArray borrow(T *ptr, std::array<std::size_t, N> shape) noexcept {
     return NDArray(clustering::detail::BorrowedTag{}, ptr, ptr, shape,
                    computeContiguousStrides(shape), 0, true);
@@ -544,7 +548,8 @@ public:
    * Stores the caller's @c const T* as @c T* via @c const_cast and flips @c m_mutable off so any
    * write through @c operator() or @c Accessor asserts in debug.
    */
-  template <Layout L2 = L, std::enable_if_t<L2 == Layout::Contig, int> = 0>
+  template <Layout L2 = L>
+    requires(L2 == Layout::Contig)
   static NDArray borrow(const T *ptr, std::array<std::size_t, N> shape) noexcept {
     auto *mutPtr = const_cast<T *>(ptr);
     return NDArray(clustering::detail::BorrowedTag{}, mutPtr, mutPtr, shape,
@@ -557,13 +562,15 @@ public:
    * Available only when @c L == Layout::MaybeStrided. Strides are in elements, not bytes; see
    * @c borrowBytes for the byte-stride entry point used at the Python binding boundary.
    */
-  template <Layout L2 = L, std::enable_if_t<L2 == Layout::MaybeStrided, int> = 0>
+  template <Layout L2 = L>
+    requires(L2 == Layout::MaybeStrided)
   static NDArray borrow(T *ptr, std::array<std::size_t, N> shape,
                         std::array<std::ptrdiff_t, N> strides) noexcept {
     return NDArray(clustering::detail::BorrowedTag{}, ptr, ptr, shape, strides, 0, true);
   }
 
-  template <Layout L2 = L, std::enable_if_t<L2 == Layout::MaybeStrided, int> = 0>
+  template <Layout L2 = L>
+    requires(L2 == Layout::MaybeStrided)
   static NDArray borrow(const T *ptr, std::array<std::size_t, N> shape,
                         std::array<std::ptrdiff_t, N> strides) noexcept {
     auto *mutPtr = const_cast<T *>(ptr);
@@ -573,12 +580,14 @@ public:
   /**
    * @brief Rank-1 convenience borrow; avoids the @c std::array<size_t, 1>{n} boilerplate.
    */
-  template <std::size_t M = N, std::enable_if_t<M == 1 && L == Layout::Contig, int> = 0>
+  template <std::size_t M = N>
+    requires(M == 1 && L == Layout::Contig)
   static NDArray borrow1D(T *ptr, std::size_t n) noexcept {
     return borrow(ptr, std::array<std::size_t, 1>{n});
   }
 
-  template <std::size_t M = N, std::enable_if_t<M == 1 && L == Layout::Contig, int> = 0>
+  template <std::size_t M = N>
+    requires(M == 1 && L == Layout::Contig)
   static NDArray borrow1D(const T *ptr, std::size_t n) noexcept {
     return borrow(ptr, std::array<std::size_t, 1>{n});
   }
@@ -596,7 +605,8 @@ public:
    * @param stridesInBytes Byte offset between successive elements along each axis.
    * @param isMutable Whether writes through the view are permitted.
    */
-  template <Layout L2 = L, std::enable_if_t<L2 == Layout::MaybeStrided, int> = 0>
+  template <Layout L2 = L>
+    requires(L2 == Layout::MaybeStrided)
   static NDArray borrowBytes(T *ptr, std::array<std::size_t, N> shape,
                              std::array<std::ptrdiff_t, N> stridesInBytes,
                              bool isMutable) noexcept {
@@ -616,12 +626,14 @@ public:
    * No implicit @c std::span conversion is provided; callers spell @c fromSpan to avoid
    * overload-resolution ambiguity with the raw-pointer @c borrow overloads.
    */
-  template <std::size_t M = N, std::enable_if_t<M == 1 && L == Layout::Contig, int> = 0>
+  template <std::size_t M = N>
+    requires(M == 1 && L == Layout::Contig)
   static NDArray fromSpan(std::span<T> s) noexcept {
     return borrow(s.data(), std::array<std::size_t, 1>{s.size()});
   }
 
-  template <std::size_t M = N, std::enable_if_t<M == 1 && L == Layout::Contig, int> = 0>
+  template <std::size_t M = N>
+    requires(M == 1 && L == Layout::Contig)
   static NDArray fromSpan(std::span<const T> s) noexcept {
     return borrow(s.data(), std::array<std::size_t, 1>{s.size()});
   }
@@ -633,7 +645,8 @@ public:
    * Result is always @c Layout::MaybeStrided because transposition breaks row-major contiguity
    * for any contiguous source with more than one column.
    */
-  template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
+  template <std::size_t M = N>
+    requires(M == 2)
   NDArray<T, 2, Layout::MaybeStrided> t() noexcept {
     return NDArray<T, 2, Layout::MaybeStrided>(
         clustering::detail::BorrowedTag{}, m_data, m_base,
@@ -641,7 +654,8 @@ public:
         std::array<std::ptrdiff_t, 2>{m_strides[1], m_strides[0]}, m_offset, m_mutable);
   }
 
-  template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
+  template <std::size_t M = N>
+    requires(M == 2)
   NDArray<T, 2, Layout::MaybeStrided> t() const noexcept {
     return NDArray<T, 2, Layout::MaybeStrided>(
         clustering::detail::BorrowedTag{}, const_cast<T *>(m_data), const_cast<T *>(m_base),
@@ -655,7 +669,8 @@ public:
    * Layout is preserved: a row of a @c Contig array is still @c Contig because the inner
    * strides remain the contiguous layout for the reduced shape.
    */
-  template <std::size_t M = N, std::enable_if_t<(M > 1), int> = 0>
+  template <std::size_t M = N>
+    requires(M > 1)
   NDArray<T, N - 1, L> row(std::size_t i) noexcept {
     assert(i < m_shape[0]);
     std::array<std::size_t, N - 1> new_shape{};
@@ -665,11 +680,12 @@ public:
       new_strides[k] = m_strides[k + 1];
     }
     return NDArray<T, N - 1, L>(clustering::detail::BorrowedTag{},
-                                m_data + m_offset + static_cast<std::ptrdiff_t>(i) * m_strides[0],
+                                m_data + m_offset + (static_cast<std::ptrdiff_t>(i) * m_strides[0]),
                                 m_base, new_shape, new_strides, 0, m_mutable);
   }
 
-  template <std::size_t M = N, std::enable_if_t<(M > 1), int> = 0>
+  template <std::size_t M = N>
+    requires(M > 1)
   NDArray<T, N - 1, L> row(std::size_t i) const noexcept {
     assert(i < m_shape[0]);
     std::array<std::size_t, N - 1> new_shape{};
@@ -680,7 +696,7 @@ public:
     }
     return NDArray<T, N - 1, L>(clustering::detail::BorrowedTag{},
                                 const_cast<T *>(m_data) + m_offset +
-                                    static_cast<std::ptrdiff_t>(i) * m_strides[0],
+                                    (static_cast<std::ptrdiff_t>(i) * m_strides[0]),
                                 const_cast<T *>(m_base), new_shape, new_strides, 0, false);
   }
 
@@ -690,22 +706,24 @@ public:
    * Always @c MaybeStrided: column stride equals the row stride of the source, which is not 1
    * for any row-major source with more than one column.
    */
-  template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
+  template <std::size_t M = N>
+    requires(M == 2)
   NDArray<T, 1, Layout::MaybeStrided> col(std::size_t j) noexcept {
     assert(j < m_shape[1]);
     return NDArray<T, 1, Layout::MaybeStrided>(
         clustering::detail::BorrowedTag{},
-        m_data + m_offset + static_cast<std::ptrdiff_t>(j) * m_strides[1], m_base,
+        m_data + m_offset + (static_cast<std::ptrdiff_t>(j) * m_strides[1]), m_base,
         std::array<std::size_t, 1>{m_shape[0]}, std::array<std::ptrdiff_t, 1>{m_strides[0]}, 0,
         m_mutable);
   }
 
-  template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
+  template <std::size_t M = N>
+    requires(M == 2)
   NDArray<T, 1, Layout::MaybeStrided> col(std::size_t j) const noexcept {
     assert(j < m_shape[1]);
     return NDArray<T, 1, Layout::MaybeStrided>(
         clustering::detail::BorrowedTag{},
-        const_cast<T *>(m_data) + m_offset + static_cast<std::ptrdiff_t>(j) * m_strides[1],
+        const_cast<T *>(m_data) + m_offset + (static_cast<std::ptrdiff_t>(j) * m_strides[1]),
         const_cast<T *>(m_base), std::array<std::size_t, 1>{m_shape[0]},
         std::array<std::ptrdiff_t, 1>{m_strides[0]}, 0, false);
   }
@@ -723,8 +741,8 @@ public:
     new_shape[axis] = end - begin;
     return NDArray<T, N, Layout::MaybeStrided>(
         clustering::detail::BorrowedTag{},
-        m_data + m_offset + static_cast<std::ptrdiff_t>(begin) * m_strides[axis], m_base, new_shape,
-        m_strides, 0, m_mutable);
+        m_data + m_offset + (static_cast<std::ptrdiff_t>(begin) * m_strides[axis]), m_base,
+        new_shape, m_strides, 0, m_mutable);
   }
 
   NDArray<T, N, Layout::MaybeStrided> slice(std::size_t axis, std::size_t begin,
@@ -734,7 +752,7 @@ public:
     new_shape[axis] = end - begin;
     return NDArray<T, N, Layout::MaybeStrided>(
         clustering::detail::BorrowedTag{},
-        const_cast<T *>(m_data) + m_offset + static_cast<std::ptrdiff_t>(begin) * m_strides[axis],
+        const_cast<T *>(m_data) + m_offset + (static_cast<std::ptrdiff_t>(begin) * m_strides[axis]),
         const_cast<T *>(m_base), new_shape, m_strides, 0, false);
   }
 
@@ -749,9 +767,9 @@ public:
     std::array<std::ptrdiff_t, N> new_strides{};
     std::ptrdiff_t advance = 0;
     for (std::size_t k = 0; k < N; ++k) {
-      std::size_t end = std::min(ranges[k].end, m_shape[k]);
-      std::size_t begin = ranges[k].begin;
-      std::ptrdiff_t step = ranges[k].step;
+      const std::size_t end = std::min(ranges[k].end, m_shape[k]);
+      const std::size_t begin = ranges[k].begin;
+      const std::ptrdiff_t step = ranges[k].step;
       assert(begin <= end && step > 0);
       new_shape[k] = step == 1 ? (end - begin)
                                : (end - begin + static_cast<std::size_t>(step) - 1) /
@@ -769,9 +787,9 @@ public:
     std::array<std::ptrdiff_t, N> new_strides{};
     std::ptrdiff_t advance = 0;
     for (std::size_t k = 0; k < N; ++k) {
-      std::size_t end = std::min(ranges[k].end, m_shape[k]);
-      std::size_t begin = ranges[k].begin;
-      std::ptrdiff_t step = ranges[k].step;
+      const std::size_t end = std::min(ranges[k].end, m_shape[k]);
+      const std::size_t begin = ranges[k].begin;
+      const std::ptrdiff_t step = ranges[k].step;
       assert(begin <= end && step > 0);
       new_shape[k] = step == 1 ? (end - begin)
                                : (end - begin + static_cast<std::size_t>(step) - 1) /
@@ -1018,7 +1036,7 @@ private:
   }
 
   template <std::size_t... Ks, class... Ix>
-  inline std::size_t computeElementOffset(std::index_sequence<Ks...>, Ix... ix) const noexcept {
+  std::size_t computeElementOffset(std::index_sequence<Ks...>, Ix... ix) const noexcept {
     std::ptrdiff_t off = m_offset;
     ((off += static_cast<std::ptrdiff_t>(ix) * m_strides[Ks]), ...);
     return static_cast<std::size_t>(off);

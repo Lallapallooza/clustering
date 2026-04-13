@@ -7,8 +7,7 @@
 
 #include "clustering/ndarray.h"
 
-namespace clustering {
-namespace math {
+namespace clustering::math {
 
 /**
  * @brief Element-wise exact equality between two NDArrays of matching shape.
@@ -42,7 +41,7 @@ bool arrayEqual(const NDArray<T, N, LA> &a, const NDArray<T, N, LB> &b) noexcept
   }
   std::array<std::size_t, N> idx{};
   for (std::size_t flat = 0; flat < total; ++flat) {
-    bool equal = [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
+    const bool equal = [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
       return a(idx[Ks]...) == b(idx[Ks]...);
     }(std::make_index_sequence<N>{});
     if (!equal) {
@@ -96,7 +95,7 @@ bool allClose(const NDArray<T, N, LA> &a, const NDArray<T, N, LB> &b, T rtol = T
       return std::pair<T, T>{a(idx[Ks]...), b(idx[Ks]...)};
     }(std::make_index_sequence<N>{});
     const T diff = std::fabs(va - vb);
-    const T tol = atol + rtol * std::fabs(vb);
+    const T tol = atol + (rtol * std::fabs(vb));
     if (!(diff <= tol)) {
       return false;
     }
@@ -110,5 +109,4 @@ bool allClose(const NDArray<T, N, LA> &a, const NDArray<T, N, LB> &b, T rtol = T
   return true;
 }
 
-} // namespace math
-} // namespace clustering
+} // namespace clustering::math

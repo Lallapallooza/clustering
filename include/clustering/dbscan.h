@@ -41,10 +41,9 @@ public:
   DBSCAN(const NDArray<T, 2> &points, T eps, size_t minPts,
          size_t n_jobs = std::thread::hardware_concurrency())
       : m_points(points), m_points_dim0(m_points.dim(0)), m_points_dim1(m_points.dim(1)),
-        m_eps(eps), m_minPts(minPts), m_clusterId(0), m_labels(m_points_dim0),
-        m_seen_wave(m_points_dim0), m_current_wave(0), m_query_model(m_points),
-        m_thread_pool(n_jobs) {
-    std::fill(m_labels.begin(), m_labels.end(), UNCLASSIFIED);
+        m_eps(eps), m_minPts(minPts), m_labels(m_points_dim0), m_seen_wave(m_points_dim0),
+        m_query_model(m_points), m_thread_pool(n_jobs) {
+    std::ranges::fill(m_labels, UNCLASSIFIED);
   }
 
   /**
@@ -69,7 +68,7 @@ public:
 
     // Phase 2: Sequential cluster expansion from core points only
     for (size_t i = 0; i < m_points_dim0; ++i) {
-      if (m_labels[i] == UNCLASSIFIED && is_core[i]) {
+      if (m_labels[i] == UNCLASSIFIED && is_core[i] != 0) {
         expandCluster(i, is_core);
         ++m_clusterId;
       }
@@ -105,11 +104,11 @@ private:
   const size_t m_points_dim1;            ///< Number of columns (features) in m_points.
   T m_eps;                               ///< Radius for neighborhood.
   const size_t m_minPts;                 ///< Minimum number of points to form a core point.
-  size_t m_clusterId;                    ///< Current cluster ID being assigned.
+  size_t m_clusterId = 0;                ///< Current cluster ID being assigned.
   std::vector<std::atomic_int> m_labels; ///< Labels assigned to each point in the dataset.
   std::vector<std::atomic<uint32_t>>
       m_seen_wave;               ///< Per-point epoch marker for BFS-frontier dedup.
-  uint32_t m_current_wave;       ///< Monotonic counter; bumped before each frontier wave.
+  uint32_t m_current_wave = 0;   ///< Monotonic counter; bumped before each frontier wave.
   QueryModel m_query_model;      ///< Query model  built from m_points for efficient querying.
   BS::thread_pool m_thread_pool; ///< ThreadPool for parallel execution.
 
@@ -121,7 +120,7 @@ private:
    * @return True if the point is a core point, false otherwise.
    */
   [[nodiscard]] bool isCorePoint(size_t idx) const {
-    NDArray<T, 1> queryPoint = extractPoint(idx);
+    const NDArray<T, 1> queryPoint = extractPoint(idx);
     auto neighbors = m_query_model.query(queryPoint, m_eps, m_minPts);
     return neighbors.size() == m_minPts;
   }
@@ -154,7 +153,7 @@ private:
             std::vector<size_t> local_seeds_vec_cpy;
 
             for (size_t i = start; i < end; ++i) {
-              size_t point = seeds_vec[i];
+              const size_t point = seeds_vec[i];
 
               if (m_labels[point] != UNCLASSIFIED) {
                 continue;
@@ -164,14 +163,14 @@ private:
               m_labels[point] = m_clusterId;
 
               // Only core points expand further
-              if (!is_core[point]) {
+              if (is_core[point] == 0) {
                 continue;
               }
 
-              NDArray<T, 1> query = extractPoint(point);
+              const NDArray<T, 1> query = extractPoint(point);
               auto neighbors = m_query_model.query(query, m_eps);
 
-              for (size_t neighbor_id : neighbors) {
+              for (const size_t neighbor_id : neighbors) {
                 if (m_labels[neighbor_id] != UNCLASSIFIED) {
                   continue;
                 }
@@ -185,7 +184,7 @@ private:
               }
             }
 
-            std::lock_guard lock{mutex};
+            const std::scoped_lock lock{mutex};
             seeds_vec_cpy.insert(seeds_vec_cpy.end(), local_seeds_vec_cpy.begin(),
                                  local_seeds_vec_cpy.end());
           });
@@ -202,7 +201,7 @@ private:
    * @param idx Index of the point in m_points.
    * @return NDArray representing the extracted point.
    */
-  inline NDArray<T, 1> extractPoint(size_t idx) const {
+  NDArray<T, 1> extractPoint(size_t idx) const {
     NDArray<T, 1> point({m_points_dim1});
 
     for (size_t i = 0; i < m_points_dim1; ++i) {

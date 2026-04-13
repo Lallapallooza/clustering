@@ -7,9 +7,9 @@
 #include "clustering/dbscan.h"
 
 using clustering::DBSCAN;
-using clustering::KDTree;
-using clustering::KDTreeDistanceType;
 using clustering::NDArray;
+
+namespace {
 
 NDArray<float, 2> readCSV(const std::string &filename, size_t num_points, size_t dimensions) {
   std::ifstream file(filename);
@@ -36,6 +36,8 @@ NDArray<float, 2> readCSV(const std::string &filename, size_t num_points, size_t
   return data;
 }
 
+} // namespace
+
 int main(int argc, char *argv[]) {
   if (argc < 8) {
     std::cerr << "Usage: " << argv[0]
@@ -49,55 +51,55 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  std::string csvFile = argv[1];
-  size_t numPoints = std::stoul(argv[2]);
-  size_t dimensions = std::stoul(argv[3]);
-  float eps = std::stof(argv[4]);
-  size_t minPts = std::stoul(argv[5]);
-  size_t n_jobs = std::stoul(argv[6]);
-  std::string outputFile = argv[7];
+  const std::string csvFile = argv[1];
+  const size_t numPoints = std::stoul(argv[2]);
+  const size_t dimensions = std::stoul(argv[3]);
+  const float eps = std::stof(argv[4]);
+  const size_t minPts = std::stoul(argv[5]);
+  const size_t n_jobs = std::stoul(argv[6]);
+  const std::string outputFile = argv[7];
 
-  std::cout << "CSV File                : " << csvFile << std::endl;
-  std::cout << "Number of Points        : " << numPoints << std::endl;
-  std::cout << "Dimensions              : " << dimensions << std::endl;
-  std::cout << "Epsilon (eps)           : " << eps << std::endl;
-  std::cout << "Minimum Points (minPts) : " << minPts << std::endl;
-  std::cout << "Number of Jobs (njobs)  : " << n_jobs << std::endl;
-  std::cout << "Output File             : " << outputFile << std::endl << std::endl;
+  std::cout << "CSV File                : " << csvFile << "\n";
+  std::cout << "Number of Points        : " << numPoints << "\n";
+  std::cout << "Dimensions              : " << dimensions << "\n";
+  std::cout << "Epsilon (eps)           : " << eps << "\n";
+  std::cout << "Minimum Points (minPts) : " << minPts << "\n";
+  std::cout << "Number of Jobs (njobs)  : " << n_jobs << "\n";
+  std::cout << "Output File             : " << outputFile << "\n\n";
 
   NDArray<float, 2> points({numPoints, dimensions});
   try {
     points = readCSV(csvFile, numPoints, dimensions);
   } catch (const std::exception &e) {
-    std::cerr << "Error: " << e.what() << std::endl;
+    std::cerr << "Error: " << e.what() << "\n";
     return 1;
   }
 
-  std::cout << "Start!" << std::endl;
+  std::cout << "Start!\n";
 
-  std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+  const std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
   DBSCAN<float> dbscan(points, eps, minPts, n_jobs);
   dbscan.run();
-  std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+  const std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 
   std::cout << "Elapsed = "
             << std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count()
             << "us or "
             << std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count() << "ms"
-            << std::endl;
+            << "\n";
 
   const auto &labels = dbscan.labels();
-  std::cout << "labels size: " << labels.size() << std::endl;
-  std::cout << "nClusters: " << dbscan.nClusters() << std::endl;
+  std::cout << "labels size: " << labels.size() << "\n";
+  std::cout << "nClusters: " << dbscan.nClusters() << "\n";
 
   std::ofstream out(outputFile);
   if (!out.is_open()) {
-    std::cerr << "Unable to open output file: " << outputFile << std::endl;
+    std::cerr << "Unable to open output file: " << outputFile << "\n";
     return 1;
   }
 
-  for (auto &i : labels) {
-    out << i << std::endl;
+  for (const auto &i : labels) {
+    out << i << "\n";
   }
 
   return 0;
