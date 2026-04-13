@@ -152,3 +152,143 @@ static_assert(has_subscript_chain<NDArray<double, 3, Layout::Contig>>,
               "operator[] must be available on Contig arrays of any rank");
 static_assert(!has_subscript_chain<NDArray<double, 3, Layout::MaybeStrided>>,
               "operator[] must be ill-formed on MaybeStrided arrays of any rank");
+
+TEST(Transpose, Rank2SwapsShapeAndStrides) {
+  NDArray<float, 2> arr({3, 5});
+  auto view = arr.t();
+  EXPECT_EQ(view.dim(0), 5u);
+  EXPECT_EQ(view.dim(1), 3u);
+  EXPECT_EQ(view.strideAt(0), 1);
+  EXPECT_EQ(view.strideAt(1), 5);
+}
+
+TEST(Transpose, ElementAccessMatchesSource) {
+  NDArray<float, 2> arr({3, 4});
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      arr[i][j] = static_cast<float>(i * 10 + j);
+    }
+  }
+  auto view = arr.t();
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      EXPECT_FLOAT_EQ(view(j, i), static_cast<float>(arr[i][j]));
+    }
+  }
+}
+
+TEST(Transpose, SharesStorageWithSource) {
+  NDArray<float, 2> arr({3, 5});
+  auto view = arr.t();
+  EXPECT_TRUE(sameStorage(arr, view));
+}
+
+TEST(Row, Rank2RowIsContigRank1) {
+  NDArray<float, 2> arr({4, 6});
+  for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t j = 0; j < 6; ++j) {
+      arr[i][j] = static_cast<float>(i * 100 + j);
+    }
+  }
+  auto view = arr.row(2);
+  EXPECT_EQ(view.dim(0), 6u);
+  EXPECT_TRUE(view.isContiguous());
+  for (std::size_t j = 0; j < 6; ++j) {
+    EXPECT_FLOAT_EQ(view[j], static_cast<float>(arr[2][j]));
+  }
+}
+
+// Type-level: row(i) preserves the Contig layout tag.
+static_assert(std::is_same_v<decltype(std::declval<NDArray<float, 2> &>().row(0)),
+                             NDArray<float, 1, Layout::Contig>>,
+              "row() on a Contig rank-2 must yield a Contig rank-1 view");
+
+TEST(Col, Rank2ColumnIsStridedRank1) {
+  NDArray<float, 2> arr({4, 6});
+  for (std::size_t i = 0; i < 4; ++i) {
+    for (std::size_t j = 0; j < 6; ++j) {
+      arr[i][j] = static_cast<float>(i * 100 + j);
+    }
+  }
+  auto view = arr.col(3);
+  EXPECT_EQ(view.dim(0), 4u);
+  EXPECT_EQ(view.strideAt(0), 6);
+  for (std::size_t i = 0; i < 4; ++i) {
+    EXPECT_FLOAT_EQ(view(i), static_cast<float>(arr[i][3]));
+  }
+}
+
+// col() always returns MaybeStrided: operator[] must be ill-formed on the result.
+static_assert(!has_subscript_chain<decltype(std::declval<NDArray<float, 2> &>().col(0))>,
+              "col() must yield a MaybeStrided view (no subscript chain)");
+
+TEST(Slice, AxisZeroReducesLeadingDim) {
+  NDArray<float, 2> arr({5, 4});
+  for (std::size_t i = 0; i < 5; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      arr[i][j] = static_cast<float>(i * 10 + j);
+    }
+  }
+  auto view = arr.slice(0, 1, 4);
+  EXPECT_EQ(view.dim(0), 3u);
+  EXPECT_EQ(view.dim(1), 4u);
+  EXPECT_EQ(view.strideAt(0), arr.strideAt(0));
+  EXPECT_EQ(view.strideAt(1), arr.strideAt(1));
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      EXPECT_FLOAT_EQ(view(i, j), static_cast<float>(arr[i + 1][j]));
+    }
+  }
+}
+
+TEST(Slice, RangeArrayWithAllSentinel) {
+  NDArray<float, 2> arr({5, 4});
+  for (std::size_t i = 0; i < 5; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      arr[i][j] = static_cast<float>(i * 10 + j);
+    }
+  }
+  auto view =
+      arr.slice(std::array<clustering::Range, 2>{clustering::Range{1, 4}, clustering::all()});
+  EXPECT_EQ(view.dim(0), 3u);
+  EXPECT_EQ(view.dim(1), 4u);
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 4; ++j) {
+      EXPECT_FLOAT_EQ(view(i, j), static_cast<float>(arr[i + 1][j]));
+    }
+  }
+}
+
+TEST(Slice, RangeArrayWithStep) {
+  NDArray<float, 1> arr({10});
+  for (std::size_t i = 0; i < 10; ++i) {
+    arr[i] = static_cast<float>(i);
+  }
+  auto view = arr.slice(std::array<clustering::Range, 1>{clustering::Range{0, 10, 3}});
+  EXPECT_EQ(view.dim(0), 4u);
+  EXPECT_EQ(view.strideAt(0), 3);
+  EXPECT_FLOAT_EQ(view(0), 0.0f);
+  EXPECT_FLOAT_EQ(view(1), 3.0f);
+  EXPECT_FLOAT_EQ(view(2), 6.0f);
+  EXPECT_FLOAT_EQ(view(3), 9.0f);
+}
+
+TEST(Permute, Rank2SwapMatchesTranspose) {
+  NDArray<float, 2> arr({3, 5});
+  for (std::size_t i = 0; i < 3; ++i) {
+    for (std::size_t j = 0; j < 5; ++j) {
+      arr[i][j] = static_cast<float>(i * 100 + j);
+    }
+  }
+  auto via_permute = arr.permute(std::array<std::size_t, 2>{1, 0});
+  auto via_t = arr.t();
+  EXPECT_EQ(via_permute.dim(0), via_t.dim(0));
+  EXPECT_EQ(via_permute.dim(1), via_t.dim(1));
+  EXPECT_EQ(via_permute.strideAt(0), via_t.strideAt(0));
+  EXPECT_EQ(via_permute.strideAt(1), via_t.strideAt(1));
+  for (std::size_t i = 0; i < 5; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      EXPECT_FLOAT_EQ(via_permute(i, j), via_t(i, j));
+    }
+  }
+}

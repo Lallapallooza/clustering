@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -13,8 +14,18 @@
 #include <utility>
 #include <vector>
 
+#include "clustering/ndarray_range.h"
+
 namespace clustering {
 namespace detail {
+
+/**
+ * @brief Tag type used to disambiguate the private borrowed-view constructor on NDArray.
+ *
+ * Only NDArray's template friends can reach the constructor; BorrowedTag lives in @c detail
+ * as a cosmetic guard so external callers cannot accidentally construct a borrowed view.
+ */
+struct BorrowedTag {};
 
 /**
  * @brief Stateless allocator that returns @p Align -byte aligned blocks from std::aligned_alloc.
@@ -107,6 +118,10 @@ template <class T, std::size_t N, Layout L = Layout::Contig> class NDArray {
   static_assert(N >= 1, "NDArray rank must be >= 1");
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
                 "NDArray element type must be float or double");
+
+  // All NDArray template instantiations share friendship so view-producing verbs can construct
+  // a result with a different rank or layout via the private BorrowedTag constructor.
+  template <class U, std::size_t M, Layout LL> friend class NDArray;
 
 public:
   /**
@@ -291,6 +306,18 @@ public:
     return *this;
   }
 
+private:
+  NDArray(clustering::detail::BorrowedTag, T *data, std::array<std::size_t, N> shape,
+          std::array<std::ptrdiff_t, N> strides, std::ptrdiff_t offset, bool is_mutable) noexcept
+      : m_data(data), m_vec(), m_shape(shape), m_strides(strides), m_offset(offset),
+        m_storage(NDArrayStorage::Borrowed), m_mutable(is_mutable) {
+    if constexpr (L == Layout::Contig) {
+      assert(offset == 0 && strides == computeContiguousStrides(shape) &&
+             "Contig NDArray requires contiguous strides and zero offset");
+    }
+  }
+
+public:
   /**
    * @brief Provides access to the elements of the NDArray.
    *
@@ -403,6 +430,195 @@ public:
   }
 
   /**
+   * @brief Transposes a rank-2 NDArray into a borrowed view with swapped axes.
+   *
+   * The returned view reuses the source buffer; @c sameStorage returns true against the source.
+   * Result is always @c Layout::MaybeStrided because transposition breaks row-major contiguity
+   * for any contiguous source with more than one column.
+   */
+  template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
+  NDArray<T, 2, Layout::MaybeStrided> t() noexcept {
+    return NDArray<T, 2, Layout::MaybeStrided>(
+        clustering::detail::BorrowedTag{}, m_data,
+        std::array<std::size_t, 2>{m_shape[1], m_shape[0]},
+        std::array<std::ptrdiff_t, 2>{m_strides[1], m_strides[0]}, m_offset, m_mutable);
+  }
+
+  template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
+  NDArray<T, 2, Layout::MaybeStrided> t() const noexcept {
+    return NDArray<T, 2, Layout::MaybeStrided>(
+        clustering::detail::BorrowedTag{}, const_cast<T *>(m_data),
+        std::array<std::size_t, 2>{m_shape[1], m_shape[0]},
+        std::array<std::ptrdiff_t, 2>{m_strides[1], m_strides[0]}, m_offset, false);
+  }
+
+  /**
+   * @brief Returns a borrowed view of row @p i with the leading dimension dropped.
+   *
+   * Layout is preserved: a row of a @c Contig array is still @c Contig because the inner
+   * strides remain the contiguous layout for the reduced shape.
+   */
+  template <std::size_t M = N, std::enable_if_t<(M > 1), int> = 0>
+  NDArray<T, N - 1, L> row(std::size_t i) noexcept {
+    assert(i < m_shape[0]);
+    std::array<std::size_t, N - 1> new_shape{};
+    std::array<std::ptrdiff_t, N - 1> new_strides{};
+    for (std::size_t k = 0; k + 1 < N; ++k) {
+      new_shape[k] = m_shape[k + 1];
+      new_strides[k] = m_strides[k + 1];
+    }
+    return NDArray<T, N - 1, L>(clustering::detail::BorrowedTag{},
+                                m_data + static_cast<std::ptrdiff_t>(i) * m_strides[0], new_shape,
+                                new_strides, 0, m_mutable);
+  }
+
+  template <std::size_t M = N, std::enable_if_t<(M > 1), int> = 0>
+  NDArray<T, N - 1, L> row(std::size_t i) const noexcept {
+    assert(i < m_shape[0]);
+    std::array<std::size_t, N - 1> new_shape{};
+    std::array<std::ptrdiff_t, N - 1> new_strides{};
+    for (std::size_t k = 0; k + 1 < N; ++k) {
+      new_shape[k] = m_shape[k + 1];
+      new_strides[k] = m_strides[k + 1];
+    }
+    return NDArray<T, N - 1, L>(clustering::detail::BorrowedTag{},
+                                const_cast<T *>(m_data) +
+                                    static_cast<std::ptrdiff_t>(i) * m_strides[0],
+                                new_shape, new_strides, 0, false);
+  }
+
+  /**
+   * @brief Returns a borrowed rank-1 view of column @p j of a rank-2 array.
+   *
+   * Always @c MaybeStrided: column stride equals the row stride of the source, which is not 1
+   * for any row-major source with more than one column.
+   */
+  template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
+  NDArray<T, 1, Layout::MaybeStrided> col(std::size_t j) noexcept {
+    assert(j < m_shape[1]);
+    return NDArray<T, 1, Layout::MaybeStrided>(
+        clustering::detail::BorrowedTag{}, m_data + static_cast<std::ptrdiff_t>(j) * m_strides[1],
+        std::array<std::size_t, 1>{m_shape[0]}, std::array<std::ptrdiff_t, 1>{m_strides[0]}, 0,
+        m_mutable);
+  }
+
+  template <std::size_t M = N, std::enable_if_t<M == 2, int> = 0>
+  NDArray<T, 1, Layout::MaybeStrided> col(std::size_t j) const noexcept {
+    assert(j < m_shape[1]);
+    return NDArray<T, 1, Layout::MaybeStrided>(
+        clustering::detail::BorrowedTag{},
+        const_cast<T *>(m_data) + static_cast<std::ptrdiff_t>(j) * m_strides[1],
+        std::array<std::size_t, 1>{m_shape[0]}, std::array<std::ptrdiff_t, 1>{m_strides[0]}, 0,
+        false);
+  }
+
+  /**
+   * @brief Borrowed half-open slice along a single axis.
+   *
+   * Returned view always carries @c MaybeStrided; callers that need the @c Contig guarantee
+   * back (e.g. axis-0 slice of a contiguous source) can round-trip through @c contiguous().
+   */
+  NDArray<T, N, Layout::MaybeStrided> slice(std::size_t axis, std::size_t begin,
+                                            std::size_t end) noexcept {
+    assert(axis < N && begin <= end && end <= m_shape[axis]);
+    std::array<std::size_t, N> new_shape = m_shape;
+    new_shape[axis] = end - begin;
+    return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{},
+                                               m_data + static_cast<std::ptrdiff_t>(begin) *
+                                                            m_strides[axis],
+                                               new_shape, m_strides, 0, m_mutable);
+  }
+
+  NDArray<T, N, Layout::MaybeStrided> slice(std::size_t axis, std::size_t begin,
+                                            std::size_t end) const noexcept {
+    assert(axis < N && begin <= end && end <= m_shape[axis]);
+    std::array<std::size_t, N> new_shape = m_shape;
+    new_shape[axis] = end - begin;
+    return NDArray<T, N, Layout::MaybeStrided>(
+        clustering::detail::BorrowedTag{},
+        const_cast<T *>(m_data) + static_cast<std::ptrdiff_t>(begin) * m_strides[axis], new_shape,
+        m_strides, 0, false);
+  }
+
+  /**
+   * @brief Borrowed multi-axis slice; each @c Range applies to its corresponding axis.
+   *
+   * Step must be positive (no reversed views in v1). @c end defaults to the axis size via the
+   * sentinel @c Range::all().
+   */
+  NDArray<T, N, Layout::MaybeStrided>
+  slice(const std::array<clustering::Range, N> &ranges) noexcept {
+    std::array<std::size_t, N> new_shape{};
+    std::array<std::ptrdiff_t, N> new_strides{};
+    std::ptrdiff_t base = 0;
+    for (std::size_t k = 0; k < N; ++k) {
+      std::size_t end = std::min(ranges[k].end, m_shape[k]);
+      std::size_t begin = ranges[k].begin;
+      std::ptrdiff_t step = ranges[k].step;
+      assert(begin <= end && step > 0);
+      new_shape[k] = step == 1 ? (end - begin)
+                               : (end - begin + static_cast<std::size_t>(step) - 1) /
+                                     static_cast<std::size_t>(step);
+      new_strides[k] = m_strides[k] * step;
+      base += static_cast<std::ptrdiff_t>(begin) * m_strides[k];
+    }
+    return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{}, m_data + base,
+                                               new_shape, new_strides, 0, m_mutable);
+  }
+
+  NDArray<T, N, Layout::MaybeStrided>
+  slice(const std::array<clustering::Range, N> &ranges) const noexcept {
+    std::array<std::size_t, N> new_shape{};
+    std::array<std::ptrdiff_t, N> new_strides{};
+    std::ptrdiff_t base = 0;
+    for (std::size_t k = 0; k < N; ++k) {
+      std::size_t end = std::min(ranges[k].end, m_shape[k]);
+      std::size_t begin = ranges[k].begin;
+      std::ptrdiff_t step = ranges[k].step;
+      assert(begin <= end && step > 0);
+      new_shape[k] = step == 1 ? (end - begin)
+                               : (end - begin + static_cast<std::size_t>(step) - 1) /
+                                     static_cast<std::size_t>(step);
+      new_strides[k] = m_strides[k] * step;
+      base += static_cast<std::ptrdiff_t>(begin) * m_strides[k];
+    }
+    return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{},
+                                               const_cast<T *>(m_data) + base, new_shape,
+                                               new_strides, 0, false);
+  }
+
+  /**
+   * @brief Borrowed view with axes reordered by @p perm.
+   *
+   * @p perm must be a valid permutation of @c {0, ..., N-1}; validation is an assert in debug.
+   */
+  NDArray<T, N, Layout::MaybeStrided> permute(const std::array<std::size_t, N> &perm) noexcept {
+    std::array<std::size_t, N> new_shape{};
+    std::array<std::ptrdiff_t, N> new_strides{};
+    for (std::size_t k = 0; k < N; ++k) {
+      assert(perm[k] < N);
+      new_shape[k] = m_shape[perm[k]];
+      new_strides[k] = m_strides[perm[k]];
+    }
+    return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{}, m_data, new_shape,
+                                               new_strides, m_offset, m_mutable);
+  }
+
+  NDArray<T, N, Layout::MaybeStrided>
+  permute(const std::array<std::size_t, N> &perm) const noexcept {
+    std::array<std::size_t, N> new_shape{};
+    std::array<std::ptrdiff_t, N> new_strides{};
+    for (std::size_t k = 0; k < N; ++k) {
+      assert(perm[k] < N);
+      new_shape[k] = m_shape[perm[k]];
+      new_strides[k] = m_strides[perm[k]];
+    }
+    return NDArray<T, N, Layout::MaybeStrided>(clustering::detail::BorrowedTag{},
+                                               const_cast<T *>(m_data), new_shape, new_strides,
+                                               m_offset, false);
+  }
+
+  /**
    * @brief Returns a formatted string representing the contents of the NDArray.
    *
    * This method is primarily used for debugging purposes, providing a visual representation
@@ -452,3 +668,15 @@ private:
   NDArrayStorage m_storage;
   bool m_mutable;
 };
+
+/**
+ * @brief Returns true when @p a and @p b share the same underlying buffer base pointer.
+ *
+ * True for borrowed views that preserve the parent data pointer (e.g. @c t(), @c permute());
+ * false for views constructed by advancing the pointer (e.g. @c slice(), @c row(), @c col()).
+ * Ranks and layouts may differ between the two arguments.
+ */
+template <class T, std::size_t NA, Layout LA, std::size_t NB, Layout LB>
+bool sameStorage(const NDArray<T, NA, LA> &a, const NDArray<T, NB, LB> &b) noexcept {
+  return a.data() == b.data();
+}
