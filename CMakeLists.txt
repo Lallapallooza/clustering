@@ -88,6 +88,83 @@ if(CLUSTERING_BUILD_BENCHMARK)
         clustering_warnings
     )
     clustering_enable_tidy(kdtree_benchmark)
+
+    add_executable(gemm_benchmark benchmark/gemm_benchmark.cpp)
+    target_link_libraries(
+        gemm_benchmark
+        benchmark::benchmark
+        clustering_header_lib
+        clustering_warnings
+    )
+
+    # OpenBLAS is optional: when available the benchmark adds a comparative
+    # cblas_sgemm fixture next to ours. pkg-config reliably reports the include
+    # dir on every distro that ships openblas.pc (Nix, Debian, Arch, Homebrew),
+    # avoiding the install-tree probe that find_package(BLAS) skips.
+    find_package(PkgConfig QUIET)
+    set(_clustering_openblas_target "")
+    if(PkgConfig_FOUND)
+        # NixOS's openblas package exports cblas.pc (not openblas.pc); Debian /
+        # Homebrew / Arch all do the same. Try cblas first, fall back to
+        # openblas for the rare distro that uses that name.
+        pkg_check_modules(CLUSTERING_OPENBLAS QUIET IMPORTED_TARGET cblas)
+        if(NOT CLUSTERING_OPENBLAS_FOUND)
+            pkg_check_modules(
+                CLUSTERING_OPENBLAS
+                QUIET
+                IMPORTED_TARGET
+                openblas
+            )
+        endif()
+        if(CLUSTERING_OPENBLAS_FOUND)
+            set(_clustering_openblas_target PkgConfig::CLUSTERING_OPENBLAS)
+        endif()
+    endif()
+
+    if(NOT _clustering_openblas_target)
+        # Fallback for systems without pkg-config: find_package(BLAS) locates the
+        # library, then probe common cblas.h locations.
+        find_package(BLAS QUIET)
+        if(BLAS_FOUND)
+            find_path(
+                CLUSTERING_CBLAS_INCLUDE_DIR
+                cblas.h
+                PATHS
+                    /usr/include
+                    /usr/include/openblas
+                    /usr/local/include
+                    $ENV{OPENBLAS_INCLUDE_DIR}
+            )
+            if(CLUSTERING_CBLAS_INCLUDE_DIR)
+                add_library(_clustering_blas_fallback INTERFACE)
+                target_link_libraries(
+                    _clustering_blas_fallback
+                    INTERFACE ${BLAS_LIBRARIES}
+                )
+                target_include_directories(
+                    _clustering_blas_fallback
+                    INTERFACE ${CLUSTERING_CBLAS_INCLUDE_DIR}
+                )
+                set(_clustering_openblas_target _clustering_blas_fallback)
+            endif()
+        endif()
+    endif()
+
+    if(_clustering_openblas_target)
+        message(STATUS "OpenBLAS found; gemm benchmark will compare against it")
+        target_compile_definitions(
+            gemm_benchmark
+            PRIVATE CLUSTERING_BENCHMARK_OPENBLAS
+        )
+        target_link_libraries(gemm_benchmark ${_clustering_openblas_target})
+    else()
+        message(
+            STATUS
+            "OpenBLAS not found; gemm benchmark will run our path only"
+        )
+    endif()
+
+    clustering_enable_tidy(gemm_benchmark)
 endif()
 
 if(CLUSTERING_BUILD_TESTS)
