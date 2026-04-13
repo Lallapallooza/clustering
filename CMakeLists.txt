@@ -59,7 +59,7 @@ if(CLUSTERING_BUILD_BENCHMARK)
     cpmaddpackage(
         NAME benchmark
         GITHUB_REPOSITORY google/benchmark
-        VERSION 1.8.3
+        VERSION 1.9.4
         OPTIONS "BENCHMARK_ENABLE_GTEST_TESTS OFF;BENCHMARK_ENABLE_TESTING OFF"
     )
     add_executable(kdtree_benchmark benchmark/kdtree_benchmark.cpp)

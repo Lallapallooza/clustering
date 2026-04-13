@@ -36,9 +36,9 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang-18 clang-tidy-18
+          sudo apt-get install -y cmake ninja-build clang-18 clang-tidy-18 libstdc++-13-dev
           sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang-18 -DCLUSTERING_ENABLE_CLANG_TIDY=ON
+        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-18 -DCLUSTERING_ENABLE_CLANG_TIDY=ON
       - name: Build (with clang-tidy)
         run: cmake --build build
