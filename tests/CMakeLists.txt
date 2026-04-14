@@ -4,6 +4,7 @@ add_executable(
     dbscan_test.cpp
     ndarray_test.cpp
     matrix_desc_test.cpp
+    math_dsu_test.cpp
     math_equality_test.cpp
     math_reduce_test.cpp
     math_rng_test.cpp
