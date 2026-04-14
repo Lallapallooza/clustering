@@ -6,19 +6,13 @@
 #include <type_traits>
 
 #include "clustering/always_assert.h"
+#include "clustering/math/defaults.h"
 #include "clustering/math/gemm.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
 #ifdef CLUSTERING_USE_AVX2
 #include <immintrin.h>
-#endif
-
-// TODO: tune the GEMM-crossover threshold on target hardware. 100000 is a FAISS-inspired
-// placeholder; actual crossover depends on the GEMM backend's packing/kernel costs and the
-// SIMD reduction's overhead per (i, j) pair.
-#ifndef CLUSTERING_PAIRWISE_GEMM_THRESHOLD
-#define CLUSTERING_PAIRWISE_GEMM_THRESHOLD 100000
 #endif
 
 // The dispatch metric n*m*d must not wrap. Realistic clustering sizes stay well inside 2^63 on
@@ -339,7 +333,7 @@ void pairwiseSqEuclideanSimd(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY>
  * Writes @c out(i, j) = sum_k (X(i, k) - Y(j, k))^2 for every row pair. @p out must be
  * mutable-owned and contiguous; shape mismatches trigger a release-active assert. Internally
  * dispatches between a SIMD-per-pair kernel (small workloads) and a GEMM-identity kernel
- * (large workloads) against @c CLUSTERING_PAIRWISE_GEMM_THRESHOLD on @c n*m*d.
+ * (large workloads) against @c defaults::pairwiseGemmThreshold on @c n*m*d.
  *
  * @tparam T Element type (@c float or @c double).
  * @tparam LX Layout tag of @p X; CTAD-resolved so strided views (e.g. @c Z.t()) bind without
@@ -368,7 +362,7 @@ void pairwiseSqEuclidean(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y,
   }
 
   const std::size_t work = n * m * X.dim(1);
-  if (work >= CLUSTERING_PAIRWISE_GEMM_THRESHOLD) {
+  if (work >= defaults::pairwiseGemmThreshold) {
     detail::pairwiseSqEuclideanGemm(X, Y, out, pool);
   } else {
     detail::pairwiseSqEuclideanSimd(X, Y, out, pool);
@@ -413,7 +407,7 @@ PairwisePath pairwiseSqEuclideanWithDispatchInfo(const NDArray<T, 2, LX> &X,
   }
 
   const std::size_t work = n * m * X.dim(1);
-  if (work >= CLUSTERING_PAIRWISE_GEMM_THRESHOLD) {
+  if (work >= defaults::pairwiseGemmThreshold) {
     pairwiseSqEuclideanGemm(X, Y, out, pool);
     return PairwisePath::Gemm;
   }
