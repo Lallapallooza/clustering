@@ -5,6 +5,7 @@ add_executable(
     ndarray_test.cpp
     matrix_desc_test.cpp
     math_equality_test.cpp
+    math_reduce_test.cpp
     math_rng_test.cpp
     math_thread_test.cpp
     gemm_scalar_test.cpp
