@@ -6,15 +6,18 @@
 #include <cstdint>
 #include <random>
 #include <type_traits>
+#include <vector>
 
 #include "clustering/math/equality.h"
 #include "clustering/math/pairwise.h"
+#include "clustering/math/reduce.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
 using clustering::Layout;
 using clustering::NDArray;
 using clustering::math::allClose;
+using clustering::math::argmin;
 using clustering::math::arrayEqual;
 using clustering::math::pairwiseSqEuclidean;
 using clustering::math::Pool;
@@ -747,4 +750,99 @@ TEST(PairwiseDispatchThreshold, DispatchInfoEmptyMReturnsSimdAndPreservesSentine
   EXPECT_EQ(path, PairwisePath::Simd);
   EXPECT_EQ(out.dim(0), 4U);
   EXPECT_EQ(out.dim(1), 0U);
+}
+
+namespace {
+
+// Synthesises a labelled cluster dataset: K centroids placed at disjoint one-hot-ish corners
+// scaled by `separation` (so pairwise centroid distances are >> intra-cluster noise radius), and
+// N points drawn from a uniformly-random label in [0, K) with per-coord uniform jitter of
+// amplitude `noise`. Deterministic in `seed`.
+template <class T>
+void synthLabelledClusters(std::size_t n, std::size_t k, std::size_t d, T separation, T noise,
+                           std::uint32_t seed, NDArray<T, 2> &points, NDArray<T, 2> &centroids,
+                           std::vector<std::size_t> &truth) {
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution<T> jitter(-noise, noise);
+  std::uniform_int_distribution<std::size_t> labelDist(0, k - 1);
+
+  for (std::size_t c = 0; c < k; ++c) {
+    for (std::size_t j = 0; j < d; ++j) {
+      centroids(c, j) = T{0};
+    }
+    // Place centroid c along coordinate (c % d) at magnitude separation. Neighboring centroids
+    // that share the same coordinate axis when k > d still separate cleanly because the axis
+    // magnitude tracks cluster index, keeping pairwise separation at least `separation`.
+    const std::size_t axis = c % d;
+    const std::size_t tier = c / d;
+    centroids(c, axis) = separation * static_cast<T>(tier + 1);
+  }
+
+  truth.resize(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::size_t lbl = labelDist(gen);
+    truth[i] = lbl;
+    for (std::size_t j = 0; j < d; ++j) {
+      points(i, j) = centroids(lbl, j) + jitter(gen);
+    }
+  }
+}
+
+} // namespace
+
+// k-means assignment shape: for each point, distances to K centroids go through pairwiseSqEuclidean
+// and the nearest centroid is recovered with reduce.h::argmin. Small workload (work=8192) keeps the
+// dispatch below the GEMM threshold, exercising the SIMD path end-to-end.
+TEST(PairwiseKMeansAssign, RecoversTruthLabelsViaSimdPath) {
+  constexpr std::size_t n = 128;
+  constexpr std::size_t k = 4;
+  constexpr std::size_t d = 16;
+  // separation >> noise keeps intra-cluster radii well below inter-centroid distances.
+  constexpr float separation = 100.0F;
+  constexpr float noise = 0.5F;
+
+  NDArray<float, 2> points({n, d});
+  NDArray<float, 2> centroids({k, d});
+  std::vector<std::size_t> truth;
+  synthLabelledClusters<float>(n, k, d, separation, noise, 9001U, points, centroids, truth);
+
+  NDArray<float, 2> distances({n, k});
+  fillConst(distances, 0.0F);
+
+  // Pin the dispatch path before the assertion loop so a threshold regression is obvious.
+  const PairwisePath path =
+      pairwiseSqEuclideanWithDispatchInfo(points, centroids, distances, Pool{nullptr});
+  ASSERT_EQ(path, PairwisePath::Simd);
+
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::size_t predicted = argmin(distances.row(i));
+    EXPECT_EQ(predicted, truth[i]) << "point i=" << i;
+  }
+}
+
+// Same shape on a larger workload (work=131072) that crosses CLUSTERING_PAIRWISE_GEMM_THRESHOLD,
+// routing through the GEMM-identity kernel. Assignment recovery must be path-independent.
+TEST(PairwiseKMeansAssign, RecoversTruthLabelsViaGemmPath) {
+  constexpr std::size_t n = 256;
+  constexpr std::size_t k = 64;
+  constexpr std::size_t d = 8;
+  constexpr float separation = 100.0F;
+  constexpr float noise = 0.5F;
+
+  NDArray<float, 2> points({n, d});
+  NDArray<float, 2> centroids({k, d});
+  std::vector<std::size_t> truth;
+  synthLabelledClusters<float>(n, k, d, separation, noise, 9002U, points, centroids, truth);
+
+  NDArray<float, 2> distances({n, k});
+  fillConst(distances, 0.0F);
+
+  const PairwisePath path =
+      pairwiseSqEuclideanWithDispatchInfo(points, centroids, distances, Pool{nullptr});
+  ASSERT_EQ(path, PairwisePath::Gemm);
+
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::size_t predicted = argmin(distances.row(i));
+    EXPECT_EQ(predicted, truth[i]) << "point i=" << i;
+  }
 }
