@@ -6,12 +6,9 @@
 #include <numeric>
 #include <stack>
 
+#include "clustering/math/distance.h"
 #include "clustering/memory/linear_alloc.h"
 #include "clustering/ndarray.h"
-
-#ifdef CLUSTERING_USE_AVX2
-#include <immintrin.h>
-#endif
 
 namespace clustering {
 
@@ -288,109 +285,20 @@ private:
   /**
    * @brief Calculates the distance between a query point and a point in a KDTree.
    *
-   * Dispatches to EucledianDistanceScalar or EucledianDistanceAVX2 based on
-   * CLUSTERING_USE_AVX2; with AVX2 the scalar path still runs below 8 dims.
+   * Routes through @c clustering::math::distance::pointwiseSq; the CPO's @c SqEuclideanTag
+   * overload owns the AVX2 / scalar dispatch, including the 8-lane floor and the 32-byte
+   * alignment check on both operands.
    *
-   * @tparam T The data type of the elements in the NDArray.
    * @param query_point A reference to an NDArray representing the query point.
    * @param index The index of the point in the KDTree to compare with the query point.
-   * @return The Euclidean distance between the query point and the specified point in the KDTree.
+   * @return The squared Euclidean distance between the query point and the specified point.
    */
   T distanceSquared(const NDArray<T, 1> &query_point, std::size_t index) const noexcept {
     if constexpr (distanceType == KDTreeDistanceType::kEucledian) {
-#ifdef CLUSTERING_USE_AVX2
-      // Below 8 dims an AVX2 register holds zero useful lanes; the horizontal-sum
-      // epilogue is pure tax. Branch is on a value fixed at tree construction,
-      // perfectly predicted.
-      if (m_points.dim(1) >= 8) {
-        return EucledianDistanceSquaredAVX2(query_point, index);
-      }
-      return EucledianDistanceSquaredScalar(query_point, index);
-#else
-      return EucledianDistanceSquaredScalar(query_point, index);
-#endif
+      return math::distance::pointwiseSq(math::distance::SqEuclideanTag{}, query_point,
+                                         m_points.row(index));
     }
   }
-
-  /**
-   * @brief Calculates the Euclidean distance between a query point and a point in a KDTree using
-   * scalar operations.
-   *
-   * This method is a fallback for environments where AVX2 instructions are not available.
-   * It calculates the Euclidean distance by iterating through each dimension, computing
-   * the difference between corresponding elements of the query point and the KDTree point,
-   * and summing their squares.
-   *
-   * @tparam T The data type of the elements in the NDArray.
-   * @param query_point A reference to an NDArray representing the query point.
-   * @param index The index of the point in the KDTree to compare with the query point.
-   * @return The Euclidean distance between the query point and the specified point in the KDTree.
-   * @exception noexcept This function is marked noexcept, meaning it is not expected to throw
-   * exceptions.
-   */
-  T EucledianDistanceSquaredScalar(const NDArray<T, 1> &query_point,
-                                   std::size_t index) const noexcept {
-    T sum = 0.0f;
-
-    for (std::size_t dim = 0; dim < m_points.dim(1); ++dim) {
-      T diff = query_point[dim] - m_points[index][dim];
-      sum += diff * diff;
-    }
-    return sum;
-  }
-
-#ifdef CLUSTERING_USE_AVX2
-  /**
-   * @brief Calculates the Euclidean distance between a query point and a point in a KDTree using
-   * AVX2 vectorized operations.
-   *
-   * Processes 8 dimensions per iteration with AVX2; a scalar tail handles the remainder.
-   * Compiled only when CLUSTERING_USE_AVX2 is defined.
-   *
-   * @tparam T The data type of the elements in the NDArray.
-   * @param query_point A reference to an NDArray representing the query point.
-   * @param index The index of the point in the KDTree to compare with the query point.
-   * @return The Euclidean distance between the query point and the specified point in the KDTree.
-   * @exception noexcept This function is marked noexcept, meaning it is not expected to throw
-   * exceptions.
-   */
-  T EucledianDistanceSquaredAVX2(const NDArray<T, 1> &query_point,
-                                 std::size_t index) const noexcept {
-    // Initialize a vector to accumulate squared differences, using AVX2 for efficient computation.
-    __m256 sum_vec = _mm256_setzero_ps();
-
-    std::size_t dim;
-    const std::size_t point_dim = m_points.dim(1); // Determine the total number of dimensions.
-
-    // Process dimensions in groups of 8 using AVX2 instructions for vectorized computation.
-    for (dim = 0; dim + 8 <= point_dim; dim += 8) {
-      // Load groups of 8 elements from the query point and KDTree point.
-      const __m256 v1 = _mm256_load_ps(query_point[dim].data());
-      const __m256 v2 = _mm256_load_ps(m_points[index][dim].data());
-
-      // Compute and accumulate the squared differences between elements.
-      const __m256 diff = _mm256_sub_ps(v1, v2);
-      const __m256 sq_diff = _mm256_mul_ps(diff, diff);
-      sum_vec = _mm256_add_ps(sum_vec, sq_diff);
-    }
-
-    // Residual sum with loop unrolling
-    T residual_sum = 0.0f;
-    for (; dim < point_dim; ++dim) {
-      T diff = query_point[dim] - m_points[index][dim];
-      residual_sum += diff * diff;
-    }
-
-    // Efficient horizontal sum of AVX2 vector
-    const __m256 permute = _mm256_permute2f128_ps(sum_vec, sum_vec, 1);
-    sum_vec = _mm256_add_ps(sum_vec, permute);
-    sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
-    sum_vec = _mm256_hadd_ps(sum_vec, sum_vec);
-
-    T simd_sum = _mm_cvtss_f32(_mm256_castps256_ps128(sum_vec));
-    return simd_sum + residual_sum;
-  }
-#endif
 
   AllocT m_allocator; ///< Allocator for the KDTree
 
