@@ -18,6 +18,8 @@ using clustering::math::allClose;
 using clustering::math::arrayEqual;
 using clustering::math::pairwiseSqEuclidean;
 using clustering::math::Pool;
+using clustering::math::detail::pairwiseSqEuclideanGemm;
+using clustering::math::detail::rowNormsSq;
 
 namespace {
 
@@ -272,5 +274,345 @@ TEST(PairwiseSqEuclideanF32Death, ConstBorrowedOutputAbortsAtPublicEntry) {
   ASSERT_FALSE(out.isMutable());
 
   EXPECT_DEATH(pairwiseSqEuclidean(X, Y, out, Pool{nullptr}),
+               "always-assert failed: out\\.isMutable\\(\\)");
+}
+
+namespace {
+
+template <class T, Layout LX>
+void referenceRowNormsSq(const NDArray<T, 2, LX> &X, NDArray<T, 1> &norms) {
+  const std::size_t n = X.dim(0);
+  const std::size_t d = X.dim(1);
+  for (std::size_t i = 0; i < n; ++i) {
+    T s = T{0};
+    for (std::size_t k = 0; k < d; ++k) {
+      const T v = X(i, k);
+      s += v * v;
+    }
+    norms(i) = s;
+  }
+}
+
+template <class T> bool allCloseRank1(const NDArray<T, 1> &a, const NDArray<T, 1> &b, T tol) {
+  if (a.dim(0) != b.dim(0)) {
+    return false;
+  }
+  for (std::size_t i = 0; i < a.dim(0); ++i) {
+    const T d = a(i) - b(i);
+    const T abs = d < T{0} ? -d : d;
+    if (abs > tol) {
+      return false;
+    }
+  }
+  return true;
+}
+
+} // namespace
+
+TEST(RowNormsSqF32, MatchesReferenceForSeveralFeatureDims) {
+  for (const std::size_t d :
+       {std::size_t{1}, std::size_t{7}, std::size_t{8}, std::size_t{16}, std::size_t{128}}) {
+    for (const std::size_t n :
+         {std::size_t{1}, std::size_t{4}, std::size_t{64}, std::size_t{256}}) {
+      NDArray<float, 2> X({n, d});
+      const auto seed = (static_cast<std::uint32_t>(d) * 13U) + static_cast<std::uint32_t>(n);
+      fillRandom(X, seed);
+      NDArray<float, 1> got({n});
+      NDArray<float, 1> expect({n});
+      for (std::size_t i = 0; i < n; ++i) {
+        got(i) = -1.0F;
+        expect(i) = -1.0F;
+      }
+      rowNormsSq(X, got, Pool{nullptr});
+      referenceRowNormsSq<float, Layout::Contig>(X, expect);
+      // Lane-split AVX2 reduction reassociates relative to the scalar reference; the residue
+      // scales with the row's accumulated magnitude (~d/3 under U[-1,1]). 1e-4 absolute covers
+      // d=128 comfortably without masking a real bug.
+      EXPECT_TRUE(allCloseRank1<float>(expect, got, 1e-4F)) << "n=" << n << " d=" << d;
+    }
+  }
+}
+
+TEST(RowNormsSqF64, MatchesReferenceForSeveralFeatureDims) {
+  for (const std::size_t d :
+       {std::size_t{1}, std::size_t{7}, std::size_t{8}, std::size_t{16}, std::size_t{128}}) {
+    for (const std::size_t n :
+         {std::size_t{1}, std::size_t{4}, std::size_t{64}, std::size_t{256}}) {
+      NDArray<double, 2> X({n, d});
+      const auto seed = (static_cast<std::uint32_t>(d) * 17U) + static_cast<std::uint32_t>(n);
+      fillRandom(X, seed);
+      NDArray<double, 1> got({n});
+      NDArray<double, 1> expect({n});
+      for (std::size_t i = 0; i < n; ++i) {
+        got(i) = -1.0;
+        expect(i) = -1.0;
+      }
+      rowNormsSq(X, got, Pool{nullptr});
+      referenceRowNormsSq<double, Layout::Contig>(X, expect);
+      EXPECT_TRUE(allCloseRank1<double>(expect, got, 1e-12)) << "n=" << n << " d=" << d;
+    }
+  }
+}
+
+TEST(RowNormsSqF32, ThreadedMatchesSerialBitExact) {
+  // n=512 with workerCount=4, minChunk=4 -> 128 >= 8 -> parallel fires; per-row inner arithmetic
+  // is untouched across the fan-out, so results must match bit-for-bit.
+  constexpr std::size_t n = 512;
+  constexpr std::size_t d = 16;
+  NDArray<float, 2> X({n, d});
+  fillRandom(X, 701U);
+
+  NDArray<float, 1> serial({n});
+  NDArray<float, 1> threaded({n});
+  for (std::size_t i = 0; i < n; ++i) {
+    serial(i) = 0.0F;
+    threaded(i) = 0.0F;
+  }
+
+  rowNormsSq(X, serial, Pool{nullptr});
+  BS::light_thread_pool pool(4);
+  rowNormsSq(X, threaded, Pool{&pool});
+
+  for (std::size_t i = 0; i < n; ++i) {
+    EXPECT_FLOAT_EQ(serial(i), threaded(i)) << "i=" << i;
+  }
+}
+
+TEST(RowNormsSqF32, EmptyInputLeavesSentinelUntouched) {
+  const NDArray<float, 2> X({0, 8});
+  NDArray<float, 1> norms({0});
+  // Empty X leaves the zero-length output untouched; shape metadata must survive.
+  rowNormsSq(X, norms, Pool{nullptr});
+  EXPECT_EQ(norms.dim(0), 0U);
+}
+
+TEST(RowNormsSqF32, TransposedSourceYieldsCorrectResult) {
+  // Z is stored (d x n); Z.t() is (n x d) MaybeStrided. Scalar fallback path exercised.
+  constexpr std::size_t n = 7;
+  constexpr std::size_t d = 16;
+  NDArray<float, 2> Z({d, n});
+  fillRandom(Z, 801U);
+
+  auto Xstrided = Z.t();
+  using TransposedX = decltype(Xstrided);
+  static_assert(std::is_same_v<TransposedX, NDArray<float, 2, Layout::MaybeStrided>>,
+                "Z.t() must yield Layout::MaybeStrided");
+
+  NDArray<float, 1> got({n});
+  NDArray<float, 1> expect({n});
+  rowNormsSq(Xstrided, got, Pool{nullptr});
+  referenceRowNormsSq<float, Layout::MaybeStrided>(Xstrided, expect);
+  EXPECT_TRUE(allCloseRank1<float>(expect, got, 1e-5F));
+}
+
+TEST(RowNormsSqF32Death, ShapeMismatchAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const NDArray<float, 2> X({4, 8});
+  NDArray<float, 1> norms({3});
+  EXPECT_DEATH(rowNormsSq(X, norms, Pool{nullptr}),
+               "always-assert failed: norms\\.dim\\(0\\) == X\\.dim\\(0\\)");
+}
+
+TEST(RowNormsSqF32Death, ConstBorrowedNormsAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  alignas(32) std::array<float, 32> xData{};
+  alignas(32) std::array<float, 4> normsData{};
+  xData.fill(1.0F);
+  normsData.fill(0.0F);
+  auto X = NDArray<float, 2>::borrow(xData.data(), {4, 8});
+  auto norms =
+      NDArray<float, 1>::borrow1D(static_cast<const float *>(normsData.data()), normsData.size());
+  ASSERT_FALSE(norms.isMutable());
+  EXPECT_DEATH(rowNormsSq(X, norms, Pool{nullptr}),
+               "always-assert failed: norms\\.isMutable\\(\\)");
+}
+
+// GEMM-identity cross-validates against the SIMD-per-pair path. The reconstructed
+// result acquires extra lane-order reassociation (gemm accumulation + norm add + clamp),
+// so tolerances are loosened vs. the tight 1e-5/1e-12 used for the reference loop.
+TEST(PairwiseSqEuclideanGemmF32, MatchesPublicSimdPath) {
+  struct Shape {
+    std::size_t n;
+    std::size_t m;
+    std::size_t d;
+  };
+  for (const Shape s : std::array<Shape, 3>{
+           {{.n = 17, .m = 13, .d = 16}, {.n = 64, .m = 32, .d = 8}, {.n = 4, .m = 4, .d = 1}}}) {
+    NDArray<float, 2> X({s.n, s.d});
+    NDArray<float, 2> Y({s.m, s.d});
+    const auto seed = static_cast<std::uint32_t>((s.n * 31U) + (s.m * 7U) + s.d + 911U);
+    fillRandom(X, seed);
+    fillRandom(Y, seed + 1U);
+
+    NDArray<float, 2> simd({s.n, s.m});
+    NDArray<float, 2> gemmOut({s.n, s.m});
+    fillConst(simd, 0.0F);
+    fillConst(gemmOut, 0.0F);
+
+    pairwiseSqEuclidean(X, Y, simd, Pool{nullptr});
+    pairwiseSqEuclideanGemm(X, Y, gemmOut, Pool{nullptr});
+
+    EXPECT_TRUE(allClose(simd, gemmOut, 1e-4F, 1e-4F))
+        << "n=" << s.n << " m=" << s.m << " d=" << s.d;
+  }
+}
+
+TEST(PairwiseSqEuclideanGemmF64, MatchesPublicSimdPath) {
+  struct Shape {
+    std::size_t n;
+    std::size_t m;
+    std::size_t d;
+  };
+  for (const Shape s : std::array<Shape, 3>{
+           {{.n = 17, .m = 13, .d = 16}, {.n = 64, .m = 32, .d = 8}, {.n = 4, .m = 4, .d = 1}}}) {
+    NDArray<double, 2> X({s.n, s.d});
+    NDArray<double, 2> Y({s.m, s.d});
+    const auto seed = static_cast<std::uint32_t>((s.n * 41U) + (s.m * 11U) + s.d + 313U);
+    fillRandom(X, seed);
+    fillRandom(Y, seed + 1U);
+
+    NDArray<double, 2> simd({s.n, s.m});
+    NDArray<double, 2> gemmOut({s.n, s.m});
+    fillConst(simd, 0.0);
+    fillConst(gemmOut, 0.0);
+
+    pairwiseSqEuclidean(X, Y, simd, Pool{nullptr});
+    pairwiseSqEuclideanGemm(X, Y, gemmOut, Pool{nullptr});
+
+    EXPECT_TRUE(allClose(simd, gemmOut, 1e-10, 1e-10))
+        << "n=" << s.n << " m=" << s.m << " d=" << s.d;
+  }
+}
+
+TEST(PairwiseSqEuclideanGemmF32, ThreadedMatchesSerialWithinTolerance) {
+  // gemm picks its own block cadence internally so the accumulation order may differ between
+  // serial and threaded calls; reuse the cross-path tolerance.
+  constexpr std::size_t n = 128;
+  constexpr std::size_t m = 64;
+  constexpr std::size_t d = 16;
+  NDArray<float, 2> X({n, d});
+  NDArray<float, 2> Y({m, d});
+  fillRandom(X, 1101U);
+  fillRandom(Y, 1102U);
+
+  NDArray<float, 2> serial({n, m});
+  NDArray<float, 2> threaded({n, m});
+  fillConst(serial, 0.0F);
+  fillConst(threaded, 0.0F);
+
+  pairwiseSqEuclideanGemm(X, Y, serial, Pool{nullptr});
+  BS::light_thread_pool pool(4);
+  pairwiseSqEuclideanGemm(X, Y, threaded, Pool{&pool});
+
+  EXPECT_TRUE(allClose(serial, threaded, 1e-4F, 1e-4F));
+}
+
+TEST(PairwiseSqEuclideanGemmF32, ClampsNegativeCancellationToZero) {
+  // X[0] == Y[0] at magnitude 1e3 with a per-lane perturbation drives ||x||^2 + ||y||^2 - 2 x . y
+  // into measurably negative territory under gemm's accumulation order (probed offline:
+  // pre-clamp residue ~-16 at d=128). The analytic squared distance is 0; without the clamp the
+  // stored value leaks a negative. Pin non-negativity AND bounded magnitude near zero.
+  constexpr std::size_t d = 128;
+  NDArray<float, 2> X({1, d});
+  NDArray<float, 2> Y({1, d});
+  for (std::size_t k = 0; k < d; ++k) {
+    const float v = 1.0e3F + (static_cast<float>(k) * 1e-3F);
+    X(0, k) = v;
+    Y(0, k) = v;
+  }
+  NDArray<float, 2> out({1, 1});
+  fillConst(out, -42.0F);
+  pairwiseSqEuclideanGemm(X, Y, out, Pool{nullptr});
+  EXPECT_GE(out(0, 0), 0.0F);
+  // Analytic result is 0; loose upper bound keeps the test portable across BLAS block cadences
+  // that might change the residue magnitude.
+  EXPECT_LE(out(0, 0), 1e-2F);
+}
+
+TEST(PairwiseSqEuclideanGemmF32, EmptyNPreservesShape) {
+  constexpr std::size_t d = 8;
+  const NDArray<float, 2> X({0, d});
+  const NDArray<float, 2> Y({5, d});
+  NDArray<float, 2> out({0, 5});
+  pairwiseSqEuclideanGemm(X, Y, out, Pool{nullptr});
+  EXPECT_EQ(out.dim(0), 0U);
+  EXPECT_EQ(out.dim(1), 5U);
+}
+
+TEST(PairwiseSqEuclideanGemmF32, EmptyMPreservesShape) {
+  constexpr std::size_t d = 8;
+  const NDArray<float, 2> X({4, d});
+  const NDArray<float, 2> Y({0, d});
+  NDArray<float, 2> out({4, 0});
+  pairwiseSqEuclideanGemm(X, Y, out, Pool{nullptr});
+  EXPECT_EQ(out.dim(0), 4U);
+  EXPECT_EQ(out.dim(1), 0U);
+}
+
+TEST(PairwiseSqEuclideanGemmF32, TransposedSourceYieldsCorrectResult) {
+  constexpr std::size_t n = 6;
+  constexpr std::size_t m = 5;
+  constexpr std::size_t d = 16;
+  NDArray<float, 2> Z({d, n});
+  NDArray<float, 2> Y({m, d});
+  fillRandom(Z, 1301U);
+  fillRandom(Y, 1302U);
+
+  auto Xstrided = Z.t();
+  using TransposedX = decltype(Xstrided);
+  static_assert(std::is_same_v<TransposedX, NDArray<float, 2, Layout::MaybeStrided>>,
+                "Z.t() must yield Layout::MaybeStrided");
+
+  NDArray<float, 2> gemmOut({n, m});
+  NDArray<float, 2> simd({n, m});
+  fillConst(gemmOut, 0.0F);
+  fillConst(simd, 0.0F);
+
+  pairwiseSqEuclideanGemm(Xstrided, Y, gemmOut, Pool{nullptr});
+  pairwiseSqEuclidean(Xstrided, Y, simd, Pool{nullptr});
+  EXPECT_TRUE(allClose(simd, gemmOut, 1e-4F, 1e-4F));
+}
+
+TEST(PairwiseSqEuclideanGemmF32Death, FeatureDimMismatchAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const NDArray<float, 2> X({4, 8});
+  const NDArray<float, 2> Y({5, 7});
+  NDArray<float, 2> out({4, 5});
+  EXPECT_DEATH(pairwiseSqEuclideanGemm(X, Y, out, Pool{nullptr}),
+               "always-assert failed: X\\.dim\\(1\\) == Y\\.dim\\(1\\)");
+}
+
+TEST(PairwiseSqEuclideanGemmF32Death, OutputRowMismatchAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const NDArray<float, 2> X({4, 8});
+  const NDArray<float, 2> Y({5, 8});
+  NDArray<float, 2> out({3, 5});
+  EXPECT_DEATH(pairwiseSqEuclideanGemm(X, Y, out, Pool{nullptr}),
+               "always-assert failed: out\\.dim\\(0\\) == X\\.dim\\(0\\)");
+}
+
+TEST(PairwiseSqEuclideanGemmF32Death, OutputColMismatchAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const NDArray<float, 2> X({4, 8});
+  const NDArray<float, 2> Y({5, 8});
+  NDArray<float, 2> out({4, 6});
+  EXPECT_DEATH(pairwiseSqEuclideanGemm(X, Y, out, Pool{nullptr}),
+               "always-assert failed: out\\.dim\\(1\\) == Y\\.dim\\(0\\)");
+}
+
+TEST(PairwiseSqEuclideanGemmF32Death, ConstBorrowedOutputAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  alignas(32) std::array<float, 32> xData{};
+  alignas(32) std::array<float, 40> yData{};
+  alignas(32) std::array<float, 20> outData{};
+  xData.fill(1.0F);
+  yData.fill(1.0F);
+  outData.fill(0.0F);
+
+  auto X = NDArray<float, 2>::borrow(xData.data(), {4, 8});
+  auto Y = NDArray<float, 2>::borrow(yData.data(), {5, 8});
+  auto out = NDArray<float, 2>::borrow(static_cast<const float *>(outData.data()), {4, 5});
+  ASSERT_FALSE(out.isMutable());
+  EXPECT_DEATH(pairwiseSqEuclideanGemm(X, Y, out, Pool{nullptr}),
                "always-assert failed: out\\.isMutable\\(\\)");
 }
