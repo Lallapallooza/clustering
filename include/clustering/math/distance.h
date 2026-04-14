@@ -1,9 +1,14 @@
 #pragma once
 
 #include <cstddef>
+#include <type_traits>
 #include <utility>
 
 #include "clustering/ndarray.h"
+
+#ifdef CLUSTERING_USE_AVX2
+#include "clustering/math/detail/distance_avx2.h"
+#endif
 
 namespace clustering::math::distance {
 
@@ -75,6 +80,12 @@ inline constexpr detail::PointwiseSqFn pointwiseSq{};
  * deterministic for equal inputs regardless of layout. A zero-length operand returns @c T{0}
  * without indexing storage.
  *
+ * When @c CLUSTERING_USE_AVX2 is defined, @c T is @c float, @p n is at least 8, and both
+ * operands are 32-byte aligned, dispatches to @c detail::sqEuclideanAvx2F32. The 8-lane gate
+ * mirrors @c kdtree.h: below 8 dims the horizontal-sum epilogue is pure tax. The alignment
+ * check guards against unaligned Borrowed / strided views reaching @c _mm256_load_ps, which is
+ * undefined behavior on misaligned inputs.
+ *
  * @tparam T  Element type; float or double per the NDArray invariant.
  * @tparam LA Layout tag of @p a.
  * @tparam LB Layout tag of @p b.
@@ -86,6 +97,19 @@ template <class T, Layout LA, Layout LB>
 T tag_invoke(const detail::PointwiseSqFn & /*cpo*/, SqEuclideanTag, const NDArray<T, 1, LA> &a,
              const NDArray<T, 1, LB> &b) noexcept {
   const std::size_t n = a.dim(0);
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float>) {
+    // _mm256_load_ps issues an 8-lane contiguous aligned read. Gate dispatch on contiguity
+    // (a strided view shares element type but not memory layout), 32-byte alignment (misaligned
+    // load is UB), and the 8-dim floor (below 8 the horizontal-sum epilogue is pure tax; matches
+    // the kdtree dispatch rationale).
+    if (n >= 8 && a.isContiguous() && b.isContiguous() && a.template isAligned<32>() &&
+        b.template isAligned<32>()) {
+      return detail::sqEuclideanAvx2F32(a.template alignedData<32>(), b.template alignedData<32>(),
+                                        n);
+    }
+  }
+#endif
   T sum = T{0};
   for (std::size_t i = 0; i < n; ++i) {
     const T diff = a(i) - b(i);
