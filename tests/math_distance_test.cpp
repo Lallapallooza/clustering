@@ -12,6 +12,8 @@
 #endif
 
 using clustering::NDArray;
+using clustering::math::distance::CosineTag;
+using clustering::math::distance::ManhattanTag;
 using clustering::math::distance::pointwiseSq;
 using clustering::math::distance::SqEuclideanTag;
 
@@ -131,6 +133,112 @@ TEST(MathDistanceSqEuclidean, NoexceptPropagates) {
   static_assert(noexcept(pointwiseSq(SqEuclideanTag{}, strA, strB)),
                 "pointwiseSq must be noexcept for MaybeStrided operands too");
   SUCCEED();
+}
+
+TEST(MathDistanceManhattan, HandComputedSmallVector) {
+  NDArray<float, 1> a({3});
+  NDArray<float, 1> b({3});
+  a(0) = 1.0F;
+  a(1) = 2.0F;
+  a(2) = 3.0F;
+  b(0) = 4.0F;
+  b(1) = 6.0F;
+  b(2) = 8.0F;
+  const float d = pointwiseSq(ManhattanTag{}, a, b);
+  EXPECT_FLOAT_EQ(d, 12.0F);
+}
+
+TEST(MathDistanceManhattan, ZeroLengthReturnsZero) {
+  const NDArray<float, 1> a({0});
+  const NDArray<float, 1> b({0});
+  const float d = pointwiseSq(ManhattanTag{}, a, b);
+  EXPECT_FLOAT_EQ(d, 0.0F);
+}
+
+TEST(MathDistanceManhattan, IdenticalOperandsReturnsZero) {
+  NDArray<float, 1> a({5});
+  for (std::size_t i = 0; i < 5; ++i) {
+    a(i) = static_cast<float>(i) * 1.25F;
+  }
+  const float d = pointwiseSq(ManhattanTag{}, a, a);
+  EXPECT_FLOAT_EQ(d, 0.0F);
+}
+
+TEST(MathDistanceCosine, OrthogonalVectorsReturnsOne) {
+  NDArray<float, 1> a({2});
+  NDArray<float, 1> b({2});
+  a(0) = 1.0F;
+  a(1) = 0.0F;
+  b(0) = 0.0F;
+  b(1) = 1.0F;
+  const float d = pointwiseSq(CosineTag{}, a, b);
+  EXPECT_NEAR(d, 1.0F, 1e-6F);
+}
+
+TEST(MathDistanceCosine, IdenticalOperandsReturnsZero) {
+  NDArray<float, 1> a({2});
+  NDArray<float, 1> b({2});
+  a(0) = 3.0F;
+  a(1) = 4.0F;
+  b(0) = 3.0F;
+  b(1) = 4.0F;
+  const float d = pointwiseSq(CosineTag{}, a, b);
+  EXPECT_NEAR(d, 0.0F, 1e-6F);
+}
+
+TEST(MathDistanceCosine, ZeroNormReturnsOneByConvention) {
+  // Cosine is undefined when either operand has zero magnitude. The overload's documented
+  // convention -- return T{1} instead of NaN -- is what downstream neighbor-search code relies on
+  // to stay finite, so this pin is load-bearing, not cosmetic.
+  NDArray<float, 1> a({2});
+  NDArray<float, 1> b({2});
+  a(0) = 0.0F;
+  a(1) = 0.0F;
+  b(0) = 1.0F;
+  b(1) = 1.0F;
+  const float d = pointwiseSq(CosineTag{}, a, b);
+  EXPECT_FLOAT_EQ(d, 1.0F);
+}
+
+namespace user_test {
+namespace {
+
+struct HammingTag {};
+
+template <class T, clustering::Layout LA, clustering::Layout LB>
+T tag_invoke(const clustering::math::distance::detail::PointwiseSqFn & /*cpo*/, HammingTag,
+             const clustering::NDArray<T, 1, LA> &a,
+             const clustering::NDArray<T, 1, LB> &b) noexcept {
+  const std::size_t n = a.dim(0);
+  T diffs = T{0};
+  for (std::size_t i = 0; i < n; ++i) {
+    if (a(i) != b(i)) {
+      diffs += T{1};
+    }
+  }
+  return diffs;
+}
+
+} // namespace
+} // namespace user_test
+
+TEST(MathDistanceExtensibility, UserTagReachesUserNamespaceTagInvokeViaAdl) {
+  // A qualified call inside the CPO would bypass ADL on the tag parameter and never find
+  // user_test::tag_invoke; the call would fall back to a library overload that doesn't match
+  // HammingTag and fail to compile. This test therefore doubles as a compile-time pin on the
+  // extensibility contract: if it links, unqualified dispatch is in force.
+  NDArray<float, 1> a({4});
+  NDArray<float, 1> b({4});
+  a(0) = 1.0F;
+  a(1) = 2.0F;
+  a(2) = 3.0F;
+  a(3) = 4.0F;
+  b(0) = 1.0F;
+  b(1) = 9.0F;
+  b(2) = 3.0F;
+  b(3) = 9.0F;
+  const float d = pointwiseSq(user_test::HammingTag{}, a, b);
+  EXPECT_EQ(d, 2.0F);
 }
 
 #ifdef CLUSTERING_USE_AVX2
