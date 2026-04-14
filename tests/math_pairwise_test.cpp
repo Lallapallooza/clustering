@@ -623,11 +623,10 @@ TEST(PairwiseSqEuclideanGemmF32Death, ConstBorrowedOutputAborts) {
                "always-assert failed: out\\.isMutable\\(\\)");
 }
 
-// The threshold macro must be defined by the header with the documented default. Lock the value
-// so a stray -D override breaking the dispatch tests is obvious, and so the header's #ifndef
-// guard is actually reached in the default build.
+// The threshold must be exposed via the defaults:: namespace with the documented default.
+// Lock the value so a stray -D override breaking the dispatch tests is obvious.
 TEST(PairwiseDispatchThreshold, DefaultValueIsExposedByHeader) {
-  EXPECT_EQ(static_cast<std::size_t>(CLUSTERING_PAIRWISE_GEMM_THRESHOLD), std::size_t{100000});
+  EXPECT_EQ(clustering::math::defaults::pairwiseGemmThreshold, std::size_t{100000});
 }
 
 TEST(PairwiseDispatchThreshold, WorkJustBelowThresholdSelectsSimd) {
@@ -820,7 +819,7 @@ TEST(PairwiseKMeansAssign, RecoversTruthLabelsViaSimdPath) {
   }
 }
 
-// Same shape on a larger workload (work=131072) that crosses CLUSTERING_PAIRWISE_GEMM_THRESHOLD,
+// Same shape on a larger workload (work=131072) that crosses defaults::pairwiseGemmThreshold,
 // routing through the GEMM-identity kernel. Assignment recovery must be path-independent.
 TEST(PairwiseKMeansAssign, RecoversTruthLabelsViaGemmPath) {
   constexpr std::size_t n = 256;
