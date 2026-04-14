@@ -14,9 +14,31 @@
 #include <immintrin.h>
 #endif
 
+// TODO: tune the GEMM-crossover threshold on target hardware. 100000 is a FAISS-inspired
+// placeholder; actual crossover depends on the GEMM backend's packing/kernel costs and the
+// SIMD reduction's overhead per (i, j) pair.
+#ifndef CLUSTERING_PAIRWISE_GEMM_THRESHOLD
+#define CLUSTERING_PAIRWISE_GEMM_THRESHOLD 100000
+#endif
+
+// The dispatch metric n*m*d must not wrap. Realistic clustering sizes stay well inside 2^63 on
+// any LP64 / LLP64 platform we target; a 32-bit size_t would overflow the metric long before it
+// overflows an allocation. Pin the platform expectation so a stray cross-compile flags instead of
+// silently under-counting.
+static_assert(sizeof(std::size_t) >= 8, "pairwise dispatch assumes a 64-bit std::size_t");
+
 namespace clustering::math {
 
 namespace detail {
+
+/**
+ * @brief Tag identifying which inner kernel executed for a pairwise distance request.
+ *
+ * Test surface only. The public @ref pairwiseSqEuclidean dispatches between the SIMD-per-pair
+ * path and the GEMM-identity path and exposes no indication of which ran; this enum lets the
+ * dispatch tests pin the branch crisply without inspecting wall-clock or numerics.
+ */
+enum class PairwisePath : std::uint8_t { Simd, Gemm };
 
 #ifdef CLUSTERING_USE_AVX2
 
@@ -258,32 +280,29 @@ void pairwiseSqEuclideanGemm(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY>
   }
 }
 
-} // namespace detail
-
 /**
- * @brief Pairwise squared Euclidean distances between rows of two matrices.
+ * @brief Small-path pairwise squared Euclidean via SIMD accumulation per (i, j) pair.
  *
- * Writes @c out(i, j) = sum_k (X(i, k) - Y(j, k))^2 for every row pair. @p out must be
- * mutable-owned and contiguous; shape mismatches trigger a release-active assert.
+ * Iterates every row pair and invokes @ref sqEuclideanRow, which picks an AVX2 reduction on
+ * contiguous layouts with @c d at least one lane or falls back to a scalar loop. The outer row
+ * loop fans out over @p pool when @c shouldParallelize clears; per-cell arithmetic order is
+ * untouched across the fan-out so serial and threaded outputs are bit-identical.
  *
  * @tparam T Element type (@c float or @c double).
- * @tparam LX Layout tag of @p X; CTAD-resolved so strided views (e.g. @c Z.t()) bind without
- *         explicit template arguments.
- * @tparam LY Layout tag of @p Y.
+ * @tparam LX Layout tag of @p X; CTAD-resolved.
+ * @tparam LY Layout tag of @p Y; CTAD-resolved.
  * @param X Left operand (n x d).
  * @param Y Right operand (m x d).
- * @param out Output matrix (n x m). @c isMutable() must be true.
- * @param pool Parallelism injection; when the workload clears @c shouldParallelize the outer
- *        row loop fans out over the attached pool.
+ * @param out Output matrix (n x m); @c isMutable() must be true.
+ * @param pool Parallelism injection for the outer row loop.
  */
-template <class T, Layout LX = Layout::Contig, Layout LY = Layout::Contig>
-void pairwiseSqEuclidean(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y, NDArray<T, 2> &out,
-                         Pool pool) {
+template <class T, Layout LX, Layout LY>
+void pairwiseSqEuclideanSimd(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y,
+                             NDArray<T, 2> &out, Pool pool) {
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
-                "pairwiseSqEuclidean<T> requires T to be float or double");
+                "pairwiseSqEuclideanSimd<T> requires T to be float or double");
 
   CLUSTERING_ALWAYS_ASSERT(out.isMutable());
-
   CLUSTERING_ALWAYS_ASSERT(X.dim(1) == Y.dim(1));
   CLUSTERING_ALWAYS_ASSERT(out.dim(0) == X.dim(0));
   CLUSTERING_ALWAYS_ASSERT(out.dim(1) == Y.dim(0));
@@ -297,7 +316,7 @@ void pairwiseSqEuclidean(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y,
   auto runRowRange = [&](std::size_t lo, std::size_t hi) noexcept {
     for (std::size_t i = lo; i < hi; ++i) {
       for (std::size_t j = 0; j < m; ++j) {
-        out(i, j) = detail::sqEuclideanRow<T, LX, LY>(X, i, Y, j);
+        out(i, j) = sqEuclideanRow<T, LX, LY>(X, i, Y, j);
       }
     }
   };
@@ -311,5 +330,97 @@ void pairwiseSqEuclidean(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y,
     runRowRange(0, n);
   }
 }
+
+} // namespace detail
+
+/**
+ * @brief Pairwise squared Euclidean distances between rows of two matrices.
+ *
+ * Writes @c out(i, j) = sum_k (X(i, k) - Y(j, k))^2 for every row pair. @p out must be
+ * mutable-owned and contiguous; shape mismatches trigger a release-active assert. Internally
+ * dispatches between a SIMD-per-pair kernel (small workloads) and a GEMM-identity kernel
+ * (large workloads) against @c CLUSTERING_PAIRWISE_GEMM_THRESHOLD on @c n*m*d.
+ *
+ * @tparam T Element type (@c float or @c double).
+ * @tparam LX Layout tag of @p X; CTAD-resolved so strided views (e.g. @c Z.t()) bind without
+ *         explicit template arguments.
+ * @tparam LY Layout tag of @p Y.
+ * @param X Left operand (n x d).
+ * @param Y Right operand (m x d).
+ * @param out Output matrix (n x m). @c isMutable() must be true.
+ * @param pool Parallelism injection; forwarded to the selected kernel.
+ */
+template <class T, Layout LX = Layout::Contig, Layout LY = Layout::Contig>
+void pairwiseSqEuclidean(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y, NDArray<T, 2> &out,
+                         Pool pool) {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "pairwiseSqEuclidean<T> requires T to be float or double");
+
+  CLUSTERING_ALWAYS_ASSERT(out.isMutable());
+  CLUSTERING_ALWAYS_ASSERT(X.dim(1) == Y.dim(1));
+  CLUSTERING_ALWAYS_ASSERT(out.dim(0) == X.dim(0));
+  CLUSTERING_ALWAYS_ASSERT(out.dim(1) == Y.dim(0));
+
+  const std::size_t n = X.dim(0);
+  const std::size_t m = Y.dim(0);
+  if (n == 0 || m == 0) {
+    return;
+  }
+
+  const std::size_t work = n * m * X.dim(1);
+  if (work >= CLUSTERING_PAIRWISE_GEMM_THRESHOLD) {
+    detail::pairwiseSqEuclideanGemm(X, Y, out, pool);
+  } else {
+    detail::pairwiseSqEuclideanSimd(X, Y, out, pool);
+  }
+}
+
+namespace detail {
+
+/**
+ * @brief Test-only: runs the same dispatch as @ref pairwiseSqEuclidean and reports which kernel
+ * fired.
+ *
+ * Shares the public entry's preconditions, workload metric, and branch. Empty inputs short-circuit
+ * before the branch is evaluated; the return in that case is @c PairwisePath::Simd by convention,
+ * which matches the cheap path any future dispatch refinement would pick for a zero-cell problem.
+ *
+ * @tparam T Element type (@c float or @c double).
+ * @tparam LX Layout tag of @p X; CTAD-resolved.
+ * @tparam LY Layout tag of @p Y; CTAD-resolved.
+ * @param X Left operand (n x d).
+ * @param Y Right operand (m x d).
+ * @param out Output matrix (n x m); @c isMutable() must be true.
+ * @param pool Parallelism injection; forwarded to the selected kernel.
+ * @return Which inner kernel executed.
+ */
+template <class T, Layout LX = Layout::Contig, Layout LY = Layout::Contig>
+PairwisePath pairwiseSqEuclideanWithDispatchInfo(const NDArray<T, 2, LX> &X,
+                                                 const NDArray<T, 2, LY> &Y, NDArray<T, 2> &out,
+                                                 Pool pool) {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "pairwiseSqEuclideanWithDispatchInfo<T> requires T to be float or double");
+
+  CLUSTERING_ALWAYS_ASSERT(out.isMutable());
+  CLUSTERING_ALWAYS_ASSERT(X.dim(1) == Y.dim(1));
+  CLUSTERING_ALWAYS_ASSERT(out.dim(0) == X.dim(0));
+  CLUSTERING_ALWAYS_ASSERT(out.dim(1) == Y.dim(0));
+
+  const std::size_t n = X.dim(0);
+  const std::size_t m = Y.dim(0);
+  if (n == 0 || m == 0) {
+    return PairwisePath::Simd;
+  }
+
+  const std::size_t work = n * m * X.dim(1);
+  if (work >= CLUSTERING_PAIRWISE_GEMM_THRESHOLD) {
+    pairwiseSqEuclideanGemm(X, Y, out, pool);
+    return PairwisePath::Gemm;
+  }
+  pairwiseSqEuclideanSimd(X, Y, out, pool);
+  return PairwisePath::Simd;
+}
+
+} // namespace detail
 
 } // namespace clustering::math

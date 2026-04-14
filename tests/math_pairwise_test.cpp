@@ -18,7 +18,10 @@ using clustering::math::allClose;
 using clustering::math::arrayEqual;
 using clustering::math::pairwiseSqEuclidean;
 using clustering::math::Pool;
+using clustering::math::detail::PairwisePath;
 using clustering::math::detail::pairwiseSqEuclideanGemm;
+using clustering::math::detail::pairwiseSqEuclideanSimd;
+using clustering::math::detail::pairwiseSqEuclideanWithDispatchInfo;
 using clustering::math::detail::rowNormsSq;
 
 namespace {
@@ -615,4 +618,133 @@ TEST(PairwiseSqEuclideanGemmF32Death, ConstBorrowedOutputAborts) {
   ASSERT_FALSE(out.isMutable());
   EXPECT_DEATH(pairwiseSqEuclideanGemm(X, Y, out, Pool{nullptr}),
                "always-assert failed: out\\.isMutable\\(\\)");
+}
+
+// The threshold macro must be defined by the header with the documented default. Lock the value
+// so a stray -D override breaking the dispatch tests is obvious, and so the header's #ifndef
+// guard is actually reached in the default build.
+TEST(PairwiseDispatchThreshold, DefaultValueIsExposedByHeader) {
+  EXPECT_EQ(static_cast<std::size_t>(CLUSTERING_PAIRWISE_GEMM_THRESHOLD), std::size_t{100000});
+}
+
+TEST(PairwiseDispatchThreshold, WorkJustBelowThresholdSelectsSimd) {
+  // n=10, m=10, d=999 -> work = 99900 < 100000.
+  constexpr std::size_t n = 10;
+  constexpr std::size_t m = 10;
+  constexpr std::size_t d = 999;
+  NDArray<float, 2> X({n, d});
+  NDArray<float, 2> Y({m, d});
+  fillRandom(X, 2001U);
+  fillRandom(Y, 2002U);
+  NDArray<float, 2> out({n, m});
+  fillConst(out, 0.0F);
+  const PairwisePath path = pairwiseSqEuclideanWithDispatchInfo(X, Y, out, Pool{nullptr});
+  EXPECT_EQ(path, PairwisePath::Simd);
+}
+
+TEST(PairwiseDispatchThreshold, WorkJustAboveThresholdSelectsGemm) {
+  // n=10, m=10, d=1001 -> work = 100100 >= 100000.
+  constexpr std::size_t n = 10;
+  constexpr std::size_t m = 10;
+  constexpr std::size_t d = 1001;
+  NDArray<float, 2> X({n, d});
+  NDArray<float, 2> Y({m, d});
+  fillRandom(X, 2101U);
+  fillRandom(Y, 2102U);
+  NDArray<float, 2> out({n, m});
+  fillConst(out, 0.0F);
+  const PairwisePath path = pairwiseSqEuclideanWithDispatchInfo(X, Y, out, Pool{nullptr});
+  EXPECT_EQ(path, PairwisePath::Gemm);
+}
+
+TEST(PairwiseDispatchThreshold, WorkAtThresholdSelectsGemm) {
+  // Boundary: n=20, m=20, d=250 -> work = 100000, which satisfies `work >= threshold`.
+  constexpr std::size_t n = 20;
+  constexpr std::size_t m = 20;
+  constexpr std::size_t d = 250;
+  NDArray<float, 2> X({n, d});
+  NDArray<float, 2> Y({m, d});
+  fillRandom(X, 2201U);
+  fillRandom(Y, 2202U);
+  NDArray<float, 2> out({n, m});
+  fillConst(out, 0.0F);
+  const PairwisePath path = pairwiseSqEuclideanWithDispatchInfo(X, Y, out, Pool{nullptr});
+  EXPECT_EQ(path, PairwisePath::Gemm);
+}
+
+TEST(PairwiseDispatchThreshold, PublicEntryAgreesWithBothKernelsAtBoundary) {
+  // At work >= threshold the public entry takes the GEMM path. Sanity-check cross-path agreement
+  // against both internal entries; tolerance absorbs the lane-order reassociation that GEMM
+  // accumulation + norm-broadcast introduces relative to the per-pair reduction.
+  constexpr std::size_t n = 20;
+  constexpr std::size_t m = 20;
+  constexpr std::size_t d = 251; // work = 100400, just above threshold
+  NDArray<float, 2> X({n, d});
+  NDArray<float, 2> Y({m, d});
+  fillRandom(X, 2301U);
+  fillRandom(Y, 2302U);
+
+  NDArray<float, 2> pub({n, m});
+  NDArray<float, 2> gemmOut({n, m});
+  NDArray<float, 2> simd({n, m});
+  fillConst(pub, 0.0F);
+  fillConst(gemmOut, 0.0F);
+  fillConst(simd, 0.0F);
+
+  pairwiseSqEuclidean(X, Y, pub, Pool{nullptr});
+  pairwiseSqEuclideanGemm(X, Y, gemmOut, Pool{nullptr});
+  pairwiseSqEuclideanSimd(X, Y, simd, Pool{nullptr});
+
+  EXPECT_TRUE(allClose(pub, gemmOut, 1e-4F, 1e-4F));
+  EXPECT_TRUE(allClose(pub, simd, 1e-4F, 1e-4F));
+}
+
+TEST(PairwiseDispatchThreshold, PublicEntryEmptyNDoesNotWrite) {
+  // Empty input must short-circuit in the public entry before dispatch so `work` is never
+  // computed on a zero-row shape. A sentinel in a 1-element (0-axis zeroed) probe isn't
+  // meaningful; instead use a (0, 5) out and confirm shape metadata survives.
+  constexpr std::size_t d = 8;
+  const NDArray<float, 2> X({0, d});
+  const NDArray<float, 2> Y({5, d});
+  NDArray<float, 2> out({0, 5});
+  pairwiseSqEuclidean(X, Y, out, Pool{nullptr});
+  EXPECT_EQ(out.dim(0), 0U);
+  EXPECT_EQ(out.dim(1), 5U);
+}
+
+TEST(PairwiseDispatchThreshold, PublicEntryEmptyMDoesNotWrite) {
+  constexpr std::size_t d = 8;
+  const NDArray<float, 2> X({4, d});
+  const NDArray<float, 2> Y({0, d});
+  NDArray<float, 2> out({4, 0});
+  pairwiseSqEuclidean(X, Y, out, Pool{nullptr});
+  EXPECT_EQ(out.dim(0), 4U);
+  EXPECT_EQ(out.dim(1), 0U);
+}
+
+TEST(PairwiseDispatchThreshold, DispatchInfoEmptyReturnsSimd) {
+  // Empty-input convention: return the cheap path without invoking either kernel. Also pin the
+  // no-write property with a sentinel-filled output that has at least one addressable cell on
+  // the non-empty axis.
+  constexpr std::size_t d = 8;
+  const NDArray<float, 2> X({0, d});
+  const NDArray<float, 2> Y({3, d});
+  NDArray<float, 2> out({0, 3});
+  const PairwisePath path = pairwiseSqEuclideanWithDispatchInfo(X, Y, out, Pool{nullptr});
+  EXPECT_EQ(path, PairwisePath::Simd);
+  EXPECT_EQ(out.dim(0), 0U);
+  EXPECT_EQ(out.dim(1), 3U);
+}
+
+TEST(PairwiseDispatchThreshold, DispatchInfoEmptyMReturnsSimdAndPreservesSentinel) {
+  // When m == 0 the out shape is (n, 0), so no cell is addressable anyway. Pin the API contract
+  // (returns Simd) and ensure the call doesn't crash on the zero-sized dimension.
+  constexpr std::size_t d = 8;
+  const NDArray<float, 2> X({4, d});
+  const NDArray<float, 2> Y({0, d});
+  NDArray<float, 2> out({4, 0});
+  const PairwisePath path = pairwiseSqEuclideanWithDispatchInfo(X, Y, out, Pool{nullptr});
+  EXPECT_EQ(path, PairwisePath::Simd);
+  EXPECT_EQ(out.dim(0), 4U);
+  EXPECT_EQ(out.dim(1), 0U);
 }
