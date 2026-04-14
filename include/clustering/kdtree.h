@@ -288,10 +288,8 @@ private:
   /**
    * @brief Calculates the distance between a query point and a point in a KDTree.
    *
-   * This function serves as a wrapper to select the appropriate distance calculation
-   * method (either EucledianDistanceScalar or EucledianDistanceAVX2) based on whether AVX2
-   * instructions are being used. If CLUSTERING_USE_AVX2 is defined, EucledianDistanceAVX2 is used;
-   * otherwise, EucledianDistanceScalar is used.
+   * Dispatches to EucledianDistanceScalar or EucledianDistanceAVX2 based on
+   * CLUSTERING_USE_AVX2; with AVX2 the scalar path still runs below 8 dims.
    *
    * @tparam T The data type of the elements in the NDArray.
    * @param query_point A reference to an NDArray representing the query point.
@@ -346,10 +344,8 @@ private:
    * @brief Calculates the Euclidean distance between a query point and a point in a KDTree using
    * AVX2 vectorized operations.
    *
-   * This method leverages AVX2 instructions to process multiple dimensions simultaneously
-   * for faster computation. It is used when CLUSTERING_USE_AVX2 is defined. The method
-   * calculates the distance by vectorized operations on blocks of 8 dimensions and
-   * handles any remaining dimensions scalarly.
+   * Processes 8 dimensions per iteration with AVX2; a scalar tail handles the remainder.
+   * Compiled only when CLUSTERING_USE_AVX2 is defined.
    *
    * @tparam T The data type of the elements in the NDArray.
    * @param query_point A reference to an NDArray representing the query point.
