@@ -19,10 +19,9 @@ namespace clustering {
 /**
  * @brief Implements the DBSCAN clustering algorithm.
  *
- * DBSCAN (Density-Based Spatial Clustering of Applications with Noise) is a popular
- * clustering algorithm which is fundamentally very different from k-means.
- * It focuses on the density of data points in a region and connects regions of
- * sufficient density into clusters. It can also identify outliers (noise) in the data.
+ * DBSCAN (Density-Based Spatial Clustering of Applications with Noise) groups points by
+ * local density: regions of sufficient density become clusters, and points that fall outside
+ * any such region are labeled as noise.
  *
  * @tparam T The data type of the points. It must support basic arithmetic operations.
  */

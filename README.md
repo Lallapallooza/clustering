@@ -7,12 +7,10 @@ it efficiently handles large datasets,
 making it ideal for machine learning, data mining, and complex data analysis tasks.
 
 ## Features
-- **Highly Efficient**: Utilizes the speed and efficiency of C++ for rapid clustering operations.
-- **Any Point Dimension Support**: Capable of processing data with any number of dimensions.
-- **Kd-Tree Implementation**: Leverages kd-trees for efficient handling of multi-dimensional data.
-- **Multithreading Capabilities**: Exploits parallel processing to handle large datasets swiftly.
-- **Scalable and Versatile**: Excellently suited for large datasets and adaptable for various clustering scenarios.
-- **User-friendly**: Simple interface for seamless integration into C++ based projects.
+- Header-only C++20, no runtime deps.
+- Any point dimension; AVX2 fast path at >= 8 dims.
+- KD-Tree-accelerated region queries.
+- Parallel DBSCAN via a thread pool.
 
 ## Installation
 **C++ 20 compiler is required.**
@@ -63,7 +61,7 @@ int main() {
 
 ## Performance
 The graphics below show the performance compared to the scikit-learn implementation using the KD-Tree.
-In summary, the CPU time results are generally several times better,
+The CPU time results are generally several times better,
 but this can vary based on data configuration and number of jobs.
 For memory efficiency, this library significantly outperforms scikit-learn.
 

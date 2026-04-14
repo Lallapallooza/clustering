@@ -13,7 +13,7 @@ namespace clustering::math::detail {
 /**
  * @brief Backend tag for the hand-rolled Goto-style reference GEMM.
  *
- * Serves as the default @c Backend template argument of the public one-shot @c gemm entry.
+ * Default @c Backend template argument of the public one-shot @c gemm entry.
  * Concrete backends are expected to expose a static @c run template with the same signature;
  * swapping in (for example) an @c OpenBlasGemm adapter is a one-word change at the call site.
  *
