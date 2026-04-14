@@ -1,7 +1,13 @@
 #include <benchmark/benchmark.h>
 
+#ifdef __linux__
+#include <sched.h>
+#endif
+
 #include <BS_thread_pool.hpp>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <random>
 
 #include "clustering/math/gemm.h"
@@ -10,6 +16,10 @@
 
 #ifdef CLUSTERING_BENCHMARK_OPENBLAS
 #include <cblas.h>
+// Some dev environments (e.g. Nix) layer BLIS's cblas.h shim ahead of OpenBLAS's in -isystem
+// order, so the OpenBLAS-specific thread-control prototype is not visible through <cblas.h>.
+// We link against libopenblas unconditionally under this gate, so forward-declare the symbol.
+extern "C" void openblas_set_num_threads(int num_threads);
 #endif
 
 using clustering::NDArray;
@@ -101,12 +111,17 @@ void runOpenBlas(benchmark::State &state, std::size_t M, std::size_t N, std::siz
 // pairwise-L2 / kNN-graph workload the math arch is sized around.
 void BM_OurGemm_Canonical(benchmark::State &state) { runOurGemm(state, 10000, 10, 64); }
 void BM_OurGemm_Square(benchmark::State &state) { runOurGemm(state, 1024, 1024, 1024); }
+// Square_1023 isolates Zen L1 4K-aliasing: the byte-stride at M=1024 is 4096, which aliases
+// into a single L1 set on Zen; M=1023 (stride 4092) does not. Paired with Square_1024 the
+// ratio gap exposes aliasing empirically.
+void BM_OurGemm_Square_1023(benchmark::State &state) { runOurGemm(state, 1023, 1023, 1023); }
 void BM_OurGemm_TallSkinny(benchmark::State &state) { runOurGemm(state, 10000, 64, 128); }
 void BM_OurGemm_Small(benchmark::State &state) { runOurGemm(state, 64, 64, 64); }
 
 #ifdef CLUSTERING_BENCHMARK_OPENBLAS
 void BM_OpenBLAS_Canonical(benchmark::State &state) { runOpenBlas(state, 10000, 10, 64); }
 void BM_OpenBLAS_Square(benchmark::State &state) { runOpenBlas(state, 1024, 1024, 1024); }
+void BM_OpenBLAS_Square_1023(benchmark::State &state) { runOpenBlas(state, 1023, 1023, 1023); }
 void BM_OpenBLAS_TallSkinny(benchmark::State &state) { runOpenBlas(state, 10000, 64, 128); }
 void BM_OpenBLAS_Small(benchmark::State &state) { runOpenBlas(state, 64, 64, 64); }
 #else
@@ -120,23 +135,62 @@ void reportOpenblasAbsent(benchmark::State &state) {
 void BM_OpenBLAS_Canonical(benchmark::State &state) { reportOpenblasAbsent(state); }
 #endif
 
+// The GEMM comparison is only meaningful when both paths execute on the V-Cache CCD
+// (cores 0-7). Running on the other CCD or straddling both changes the L3 roofline by
+// ~3x and invalidates every baseline. The wrapper in tools/gemm_bench.sh is the intended
+// entry point; this guard catches direct invocations that skip the wrapper.
+void enforceAffinitySentinel() {
+#ifdef __linux__
+  cpu_set_t mask;
+  CPU_ZERO(&mask);
+  if (sched_getaffinity(0, sizeof(mask), &mask) != 0) {
+    std::fprintf(stderr, "gemm_benchmark: sched_getaffinity failed; cannot verify CPU pinning\n");
+    std::exit(1);
+  }
+  const int count = CPU_COUNT(&mask);
+  bool hasHighCpu = false;
+  for (int cpu = 8; cpu < CPU_SETSIZE; ++cpu) {
+    if (CPU_ISSET(cpu, &mask)) {
+      hasHighCpu = true;
+      break;
+    }
+  }
+  if (count > 8 || hasHighCpu) {
+    std::fprintf(stderr,
+                 "gemm_benchmark requires CPU affinity pinned to cores 0-7 (CCD0 / V-Cache). "
+                 "Use tools/gemm_bench.sh or run under: taskset --cpu-list 0-7\n");
+    std::exit(1);
+  }
+#endif
+}
+
 } // namespace
 
 // UseRealTime: our path and OpenBLAS both fan out to 8 workers; CPU time on the main thread
 // understates the kernel's parallel throughput. Real time is what the caller observes.
 BENCHMARK(BM_OurGemm_Canonical)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_OurGemm_Square)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_OurGemm_Square_1023)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_OurGemm_TallSkinny)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_OurGemm_Small)->Unit(benchmark::kMicrosecond)->UseRealTime();
 
 #ifdef CLUSTERING_BENCHMARK_OPENBLAS
 BENCHMARK(BM_OpenBLAS_Canonical)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_OpenBLAS_Square)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_OpenBLAS_Square_1023)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_OpenBLAS_TallSkinny)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_OpenBLAS_Small)->Unit(benchmark::kMicrosecond)->UseRealTime();
 #else
 BENCHMARK(BM_OpenBLAS_Canonical);
 #endif
 
-// NOLINTNEXTLINE(misc-const-correctness,modernize-avoid-c-arrays)
-BENCHMARK_MAIN();
+int main(int argc, char **argv) {
+  enforceAffinitySentinel();
+  ::benchmark::Initialize(&argc, argv);
+  if (::benchmark::ReportUnrecognizedArguments(argc, argv)) {
+    return 1;
+  }
+  ::benchmark::RunSpecifiedBenchmarks();
+  ::benchmark::Shutdown();
+  return 0;
+}
