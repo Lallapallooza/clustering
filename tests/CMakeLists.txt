@@ -7,6 +7,7 @@ add_executable(
     math_dsu_test.cpp
     math_equality_test.cpp
     math_heap_test.cpp
+    math_pairwise_test.cpp
     math_reduce_test.cpp
     math_rng_test.cpp
     math_thread_test.cpp
