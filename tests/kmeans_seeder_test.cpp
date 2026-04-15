@@ -106,17 +106,17 @@ TEST(SeederScratch, SecondEnsureAtSameShapeIsNoop) {
   EXPECT_EQ(s.candRows.data(), dataAfterFirst) << "scratch reallocated despite matching shape";
 }
 
-// The local-trials count is the canonical 2 + floor(log2(k)) for k >= 2, capped at 1 for k <= 1.
+// The local-trials count is sklearn's @c 2 + floor(ln(k)) for k >= 2, capped at 1 for k <= 1.
 TEST(SeederScratch, LocalTrialsMatchesDocumentedFormula) {
   EXPECT_EQ(greedyKmppLocalTrials(0), 1U);
   EXPECT_EQ(greedyKmppLocalTrials(1), 1U);
-  EXPECT_EQ(greedyKmppLocalTrials(2), 3U);
+  EXPECT_EQ(greedyKmppLocalTrials(2), 2U);
   EXPECT_EQ(greedyKmppLocalTrials(3), 3U);
-  EXPECT_EQ(greedyKmppLocalTrials(4), 4U);
-  EXPECT_EQ(greedyKmppLocalTrials(8), 5U);
-  EXPECT_EQ(greedyKmppLocalTrials(16), 6U);
-  EXPECT_EQ(greedyKmppLocalTrials(64), 8U); // gate shape
-  EXPECT_EQ(greedyKmppLocalTrials(1024), 12U);
+  EXPECT_EQ(greedyKmppLocalTrials(4), 3U);
+  EXPECT_EQ(greedyKmppLocalTrials(8), 4U);
+  EXPECT_EQ(greedyKmppLocalTrials(16), 4U);
+  EXPECT_EQ(greedyKmppLocalTrials(64), 6U);
+  EXPECT_EQ(greedyKmppLocalTrials(1024), 8U);
 }
 
 // End-to-end: at the perf-gate shape, the new seeder still produces a valid k-means++ seed --
