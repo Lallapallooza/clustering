@@ -23,6 +23,9 @@ add_executable(
     gemm_mutability_death_test.cpp
     gemm_backend_dispatch_test.cpp
     gemm_threading_test.cpp
+    kmeans_test.cpp
+    kmeans_alloc_counter_test.cpp
+    kmeans_determinism_test.cpp
 )
 target_link_libraries(
     clustering_tests
