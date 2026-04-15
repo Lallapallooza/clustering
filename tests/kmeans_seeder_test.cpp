@@ -100,10 +100,12 @@ TEST(SeederBatchKernel, BatchMatchesPerRowSmallD) {
 // regress the alloc counter and break A7.
 TEST(SeederScratch, SecondEnsureAtSameShapeIsNoop) {
   GreedyKmppScratch<float> s;
-  ensureGreedyKmppScratchShape<float>(s, 8, 32);
+  ensureGreedyKmppScratchShape<float>(s, 8, 32, 1000);
   const float *const dataAfterFirst = s.candRows.data();
-  ensureGreedyKmppScratchShape<float>(s, 8, 32);
+  const float *const cumAfterFirst = s.cumDistSq.data();
+  ensureGreedyKmppScratchShape<float>(s, 8, 32, 1000);
   EXPECT_EQ(s.candRows.data(), dataAfterFirst) << "scratch reallocated despite matching shape";
+  EXPECT_EQ(s.cumDistSq.data(), cumAfterFirst) << "cum scratch reallocated despite matching shape";
 }
 
 // The local-trials count is sklearn's @c 2 + floor(ln(k)) for k >= 2, capped at 1 for k <= 1.
@@ -131,7 +133,7 @@ TEST(SeederBehaviour, GreedyKmppProducesDistinctCentroidRowsAtGateShape) {
   NDArray<float, 2> centroids({k, d});
   NDArray<float, 1> minSq({n});
   GreedyKmppScratch<float> scratch;
-  ensureGreedyKmppScratchShape<float>(scratch, greedyKmppLocalTrials(k), d);
+  ensureGreedyKmppScratchShape<float>(scratch, greedyKmppLocalTrials(k), d, n);
   seedGreedyKMeansPlusPlus<float>(X, centroids, minSq, scratch, 42U,
                                   clustering::math::Pool{nullptr});
 
@@ -184,14 +186,14 @@ TEST(SeederBehaviour, DeterministicAcrossInvocationsAtGateShape) {
   NDArray<float, 2> centroids1({k, d});
   NDArray<float, 1> minSq1({n});
   GreedyKmppScratch<float> scratch1;
-  ensureGreedyKmppScratchShape<float>(scratch1, greedyKmppLocalTrials(k), d);
+  ensureGreedyKmppScratchShape<float>(scratch1, greedyKmppLocalTrials(k), d, n);
   seedGreedyKMeansPlusPlus<float>(X, centroids1, minSq1, scratch1, 7U,
                                   clustering::math::Pool{nullptr});
 
   NDArray<float, 2> centroids2({k, d});
   NDArray<float, 1> minSq2({n});
   GreedyKmppScratch<float> scratch2;
-  ensureGreedyKmppScratchShape<float>(scratch2, greedyKmppLocalTrials(k), d);
+  ensureGreedyKmppScratchShape<float>(scratch2, greedyKmppLocalTrials(k), d, n);
   seedGreedyKMeansPlusPlus<float>(X, centroids2, minSq2, scratch2, 7U,
                                   clustering::math::Pool{nullptr});
 
