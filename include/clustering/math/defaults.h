@@ -52,4 +52,23 @@ inline constexpr std::size_t pairwiseGemmThreshold = CLUSTERING_PAIRWISE_GEMM_TH
 inline constexpr std::size_t pairwiseGemmThreshold = 100000;
 #endif
 
+#ifdef CLUSTERING_PAIRWISE_ARGMIN_MAX_D
+/**
+ * @brief Maximum feature dimension for which the fused @c pairwiseArgminSqEuclidean driver is
+ *        used. Above this @c d, callers fall back to the materialized two-step.
+ *
+ * The fused outer driver keeps the full K range in-register (no K-blocking), so raising this
+ * past @c 256 risks register spills that erase the measured win over the materialized path.
+ * Override project-wide at build time with @c -DCLUSTERING_PAIRWISE_ARGMIN_MAX_D=<value>; must
+ * be set uniformly across the build so dispatch is consistent across translation units.
+ */
+inline constexpr std::size_t pairwiseArgminMaxD = CLUSTERING_PAIRWISE_ARGMIN_MAX_D;
+#else
+/**
+ * @brief Maximum feature dimension for which the fused @c pairwiseArgminSqEuclidean driver is
+ *        used. Above this @c d, callers fall back to the materialized two-step.
+ */
+inline constexpr std::size_t pairwiseArgminMaxD = 256;
+#endif
+
 } // namespace clustering::math::defaults

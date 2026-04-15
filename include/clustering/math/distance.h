@@ -91,6 +91,8 @@ inline constexpr detail::PointwiseSqFn pointwiseSq{};
 template <class T, Layout LA, Layout LB>
 T tag_invoke(const detail::PointwiseSqFn & /*cpo*/, SqEuclideanTag, const NDArray<T, 1, LA> &a,
              const NDArray<T, 1, LB> &b) noexcept {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "pointwiseSq: integer element types not supported");
   const std::size_t n = a.dim(0);
 #ifdef CLUSTERING_USE_AVX2
   if constexpr (std::is_same_v<T, float>) {
@@ -132,6 +134,8 @@ T tag_invoke(const detail::PointwiseSqFn & /*cpo*/, SqEuclideanTag, const NDArra
 template <class T, Layout LA, Layout LB>
 T tag_invoke(const detail::PointwiseSqFn & /*cpo*/, ManhattanTag, const NDArray<T, 1, LA> &a,
              const NDArray<T, 1, LB> &b) noexcept {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "pointwiseSq: integer element types not supported");
   const std::size_t n = a.dim(0);
   T sum = T{0};
   for (std::size_t i = 0; i < n; ++i) {
@@ -160,6 +164,8 @@ T tag_invoke(const detail::PointwiseSqFn & /*cpo*/, ManhattanTag, const NDArray<
 template <class T, Layout LA, Layout LB>
 T tag_invoke(const detail::PointwiseSqFn & /*cpo*/, CosineTag, const NDArray<T, 1, LA> &a,
              const NDArray<T, 1, LB> &b) noexcept {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "pointwiseSq: integer element types not supported");
   const std::size_t n = a.dim(0);
   T dot = T{0};
   T na = T{0};

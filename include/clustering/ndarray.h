@@ -117,8 +117,13 @@ enum class Layout : std::uint8_t { Contig, MaybeStrided };
  */
 template <class T, std::size_t N, Layout L = Layout::Contig> class NDArray {
   static_assert(N >= 1, "NDArray rank must be >= 1");
-  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
-                "NDArray element type must be float or double");
+  // Widened from {float, double} so integer widths (signed/unsigned) are permitted as label /
+  // index / count storage. bool stays excluded: std::vector<bool> is a specialization without
+  // contiguous T-addressable storage, which would silently break data(), alignedData, and the
+  // AlignedAllocator<T, 32> invariant. Distance / reduction / GEMM primitives carry their own
+  // float/double gates so integer NDArrays cannot reach numeric math without a compile error.
+  static_assert(std::is_arithmetic_v<T> && !std::is_same_v<T, bool>,
+                "NDArray element type must be arithmetic and not bool");
 
   // All NDArray template instantiations share friendship so view-producing verbs can construct
   // a result with a different rank or layout via the private BorrowedTag constructor.

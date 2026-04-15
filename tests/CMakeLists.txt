@@ -3,12 +3,16 @@ add_executable(
     kdtree_test.cpp
     dbscan_test.cpp
     ndarray_test.cpp
+    ndarray_integer_allowlist_test.cpp
     matrix_desc_test.cpp
+    math_accumulate_by_label_test.cpp
+    math_centroid_shift_test.cpp
     math_distance_test.cpp
     math_dsu_test.cpp
     math_equality_test.cpp
     math_heap_test.cpp
     math_pairwise_test.cpp
+    math_pairwise_argmin_test.cpp
     math_reduce_test.cpp
     math_rng_test.cpp
     math_thread_test.cpp

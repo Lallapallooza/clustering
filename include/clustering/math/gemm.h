@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <type_traits>
 
 #include "clustering/always_assert.h"
 #include "clustering/math/defaults.h"
@@ -29,6 +30,11 @@ namespace clustering::math {
 template <class T, Layout LA, Layout LB, class Backend = defaults::Backend>
 void gemm(const NDArray<T, 2, LA> &A, const NDArray<T, 2, LB> &B, NDArray<T, 2> &C, Pool pool,
           T alpha = T{1}, T beta = T{0}) {
+  // Integer NDArrays are permitted as label / index storage but must never reach numeric math:
+  // the microkernel pack layout keys on kKernelMr<T> / kKernelNr<T> which default to 0 for any
+  // unspecialized T, so without this gate integer T would divide by zero inside gemm_pack.h.
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "gemm<T> requires T to be float or double");
   // Mutability check precedes descriptor extraction: describeMatrixMut's debug-only assert would
   // otherwise mask the violation in release builds.
   CLUSTERING_ALWAYS_ASSERT(C.isMutable());
