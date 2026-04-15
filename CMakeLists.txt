@@ -97,6 +97,15 @@ if(CLUSTERING_BUILD_BENCHMARK)
         clustering_warnings
     )
 
+    add_executable(kmeans_benchmark benchmark/kmeans_benchmark.cpp)
+    target_link_libraries(
+        kmeans_benchmark
+        benchmark::benchmark
+        clustering_header_lib
+        clustering_warnings
+    )
+    clustering_enable_tidy(kmeans_benchmark)
+
     # OpenBLAS is optional: when available the benchmark adds a comparative
     # cblas_sgemm fixture next to ours. pkg-config reliably reports the include
     # dir on every distro that ships openblas.pc (Nix, Debian, Arch, Homebrew),

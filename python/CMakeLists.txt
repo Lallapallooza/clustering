@@ -24,7 +24,7 @@ target_link_libraries(_clustering PRIVATE bshoshany_thread_pool)
 target_compile_features(_clustering PRIVATE cxx_std_20)
 
 if(CLUSTERING_COMPILER_SUPPORTS_AVX2)
-    target_compile_options(_clustering PRIVATE -mavx2)
+    target_compile_options(_clustering PRIVATE -mavx2 -mfma)
     target_compile_definitions(_clustering PRIVATE CLUSTERING_USE_AVX2)
 endif()
 
