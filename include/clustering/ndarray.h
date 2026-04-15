@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +29,22 @@ namespace detail {
  * as a cosmetic guard so external callers cannot accidentally construct a borrowed view.
  */
 struct BorrowedTag {};
+
+/**
+ * @brief Process-global counter of non-empty @ref AlignedAllocator::allocate calls.
+ *
+ * Test-only surface. Incremented on every @c allocate that actually issues a backing
+ * @c std::aligned_alloc (the @c n == 0 short-circuit does not count). Empty-allocation
+ * short-circuits leave the counter untouched so caller-side reads are stable.
+ *
+ * Callers wrap an instrumented region with a read before and after, asserting the delta
+ * falls within their budget. Relaxed ordering is enough because the counter is a tally,
+ * not a synchronization primitive.
+ */
+inline std::atomic<std::uint64_t> &alignedAllocCallCount() noexcept {
+  static std::atomic<std::uint64_t> counter{0};
+  return counter;
+}
 
 /**
  * @brief Stateless allocator that returns @p Align -byte aligned blocks from std::aligned_alloc.
@@ -64,6 +81,7 @@ public:
     }
     const size_type bytes = n * sizeof(T);
     const size_type aligned_bytes = (bytes + Align - 1) / Align * Align;
+    alignedAllocCallCount().fetch_add(1, std::memory_order_relaxed);
     if (auto *ptr = static_cast<pointer>(std::aligned_alloc(Align, aligned_bytes))) {
       return ptr;
     }
