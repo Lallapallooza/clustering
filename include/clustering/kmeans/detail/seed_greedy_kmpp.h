@@ -171,6 +171,34 @@ inline void sqEuclideanRowToBatchAvx2Fixed(const double *x, const double *candDa
 }
 
 /**
+ * @brief Compute @p L squared Euclidean distances against a transposed @c (d, L) candidate
+ *        layout, streaming the @p x row through one SIMD accumulator that holds all @p L lanes.
+ *
+ * The (d, L) layout puts the k-th feature of every candidate at @c cand[k*L .. k*L + L), so for
+ * @c L == 8 a single @c _mm256_load_ps fetches all 8 candidates' k-th component; broadcasting
+ * @c x[k] then folds 8 squared-distance contributions in one FMA. At @c d < 8 this collapses
+ * the per-row scoring from @c L*d scalar ops to @c d SIMD ops, breaking the d=4 bottleneck on
+ * the high-k seeding hot path. Identical numerical result to the @c (L, d) row-batched kernel
+ * within float reassociation tolerance.
+ *
+ * @param x         Pointer to the @p d -length x row.
+ * @param candData  Pointer to the (d, 8) transposed candidate matrix; lane t = candidate t.
+ * @param d         Feature dimension.
+ * @param out       Length-8 output buffer; @c out[t] receives @c ||x - cand_t||^2.
+ */
+inline void sqEuclideanRowAgainst8Transposed(const float *x, const float *candData, std::size_t d,
+                                             float *out) noexcept {
+  __m256 acc = _mm256_setzero_ps();
+  for (std::size_t k = 0; k < d; ++k) {
+    const __m256 cv = _mm256_load_ps(candData + (k * 8));
+    const __m256 xv = _mm256_set1_ps(x[k]);
+    const __m256 diff = _mm256_sub_ps(xv, cv);
+    acc = _mm256_fmadd_ps(diff, diff, acc);
+  }
+  _mm256_storeu_ps(out, acc);
+}
+
+/**
  * @brief Compute squared Euclidean distance from one @p x row to @p L candidate rows in
  *        parallel using @p L independent AVX2 accumulators.
  *
@@ -259,30 +287,39 @@ inline void sqEuclideanRowToBatch(const T *x, const T *candData, std::size_t L, 
  * The solver owns one instance across @c run() calls so the candidate-row pack and the inverse
  * CDF scratch are not reallocated at the same shape tuple. Sized lazily by
  * @ref ensureGreedyKmppScratchShape; callers outside the solver should size @c candRows to
- * @c (greedyKmppLocalTrials(k), d) and @c cumDistSq to length @c n before calling
- * @ref seedGreedyKMeansPlusPlus.
+ * @c (greedyKmppLocalTrials(k), d), @c candRowsT to @c (d, 8) and @c cumDistSq to length @c n
+ * before calling @ref seedGreedyKMeansPlusPlus.
  */
 template <class T> struct GreedyKmppScratch {
   /// Packed candidate rows for one outer iteration: shape @c (L, d) where
   /// @c L = greedyKmppLocalTrials(k). Reused across all @c k-1 outer picks within one fit.
   NDArray<T, 2, Layout::Contig> candRows;
+  /// Transposed candidate rows: shape @c (d, 8). Padded to a fixed 8-wide YMM lane regardless of
+  /// the true @p L (lanes past L hold infinity so they cannot win the score). Used by the
+  /// transposed scoring kernel on the d < 8 hot path; ignored when the row-batched kernel is
+  /// the better choice.
+  NDArray<T, 2, Layout::Contig> candRowsT;
   /// Per-outer-iteration prefix sum of @c minSq, length @c n. Refreshed once per outer pick;
   /// the L candidate draws then run @c log(n) binary search instead of an @c L*n linear scan.
   NDArray<T, 1> cumDistSq;
 
-  GreedyKmppScratch() : candRows({0, 0}), cumDistSq({0}) {}
+  GreedyKmppScratch() : candRows({0, 0}), candRowsT({0, 0}), cumDistSq({0}) {}
 };
 
 /**
- * @brief Lazily resize @p scratch to hold a @c (L, d) candidate-row pack and length-n cum array.
+ * @brief Lazily resize @p scratch to hold a @c (L, d) candidate-row pack, a @c (d, 8) transposed
+ *        pack and a length-n cumulative-distance array.
  *
- * No-op when both buffers already match the requested shape; otherwise reallocates.
+ * No-op when all three buffers already match the requested shape; otherwise reallocates.
  */
 template <class T>
 inline void ensureGreedyKmppScratchShape(GreedyKmppScratch<T> &scratch, std::size_t L,
                                          std::size_t d, std::size_t n) {
   if (scratch.candRows.dim(0) != L || scratch.candRows.dim(1) != d) {
     scratch.candRows = NDArray<T, 2, Layout::Contig>({L, d});
+  }
+  if (scratch.candRowsT.dim(0) != d || scratch.candRowsT.dim(1) != 8) {
+    scratch.candRowsT = NDArray<T, 2, Layout::Contig>({d == 0 ? std::size_t{1} : d, 8});
   }
   if (scratch.cumDistSq.dim(0) != n) {
     scratch.cumDistSq = NDArray<T, 1>({n});
@@ -339,6 +376,9 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
   CLUSTERING_ALWAYS_ASSERT(scratch.candRows.isMutable());
   CLUSTERING_ALWAYS_ASSERT(scratch.candRows.dim(0) >= nLocalTrials);
   CLUSTERING_ALWAYS_ASSERT(scratch.candRows.dim(1) == d);
+  CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.isMutable());
+  CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.dim(0) >= d);
+  CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.dim(1) >= 8);
   CLUSTERING_ALWAYS_ASSERT(scratch.cumDistSq.isMutable());
   CLUSTERING_ALWAYS_ASSERT(scratch.cumDistSq.dim(0) >= n);
   CLUSTERING_ALWAYS_ASSERT(k >= 1);
@@ -354,6 +394,9 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
   T *minSq = outMinDistSq.data();
   T *candRowsData = scratch.candRows.data();
   T *cumDistSq = scratch.cumDistSq.data();
+#ifdef CLUSTERING_USE_AVX2
+  T *candRowsTData = scratch.candRowsT.data();
+#endif
 
   // Step 1: pick first centroid uniformly. randUniformU64 is the deterministic primitive; we
   // map it onto [0, n) via modulo, which carries a tiny bias for very large n but is the
@@ -423,25 +466,63 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
       std::memcpy(candRowsData + (t * d), xData + (candidates[t] * d), d * sizeof(T));
     }
 
-    // Fused scoring: for each x row, compute L distances against the candidate pack and update
-    // L parallel running sums in one pass. The single-x-stream path is the load-bearing win
-    // over L separate per-candidate sweeps because n*d at our envelope (~12.8 MB at the gate
-    // shape) far exceeds L2 -- one stream is the difference between bandwidth-bound and
-    // bandwidth-bound times L.
+    // Reset per-candidate running scores.
     for (std::size_t t = 0; t < nLocalTrials; ++t) {
       scores[t] = T{0};
     }
     // Stack scratch for one row of candidate distances; sized to cover the L envelope at
-    // realistic k (L = 2 + log2(k) <= 32 spans k up to 2^30, well past any usable shape).
+    // realistic k (L = 2 + ln(k) <= 32 spans k up to 2^30, well past any usable shape).
     constexpr std::size_t kMaxLocalTrials = 32;
     std::array<T, kMaxLocalTrials> distRow{};
     CLUSTERING_ALWAYS_ASSERT(nLocalTrials <= distRow.size());
-    for (std::size_t i = 0; i < n; ++i) {
-      const T *xi = xData + (i * d);
-      const T mi = minSq[i];
-      sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d, distRow.data());
-      for (std::size_t t = 0; t < nLocalTrials; ++t) {
-        scores[t] += (distRow[t] < mi) ? distRow[t] : mi;
+
+    bool scoredViaTransposed = false;
+#ifdef CLUSTERING_USE_AVX2
+    // Low-d hot path: when d < kAvx2Lanes the (L, d) row-batched kernel falls into a scalar
+    // tail (no SIMD width inside the K-loop), which dominates wall time at d=4 high-k shapes.
+    // The transposed (d, 8) layout puts the same-feature components of all 8 candidates in one
+    // YMM register, so each broadcast-of-x[k] + FMA folds 8 distances at once.
+    if constexpr (std::is_same_v<T, float>) {
+      if (d > 0 && d < math::detail::kAvx2Lanes<float>) {
+        // Transpose the (L, d) candidate pack into a (d, 8) layout. Lanes past nLocalTrials are
+        // zeroed; the score loop only reads the first nLocalTrials lanes so the fill value does
+        // not matter for correctness.
+        for (std::size_t kk = 0; kk < d; ++kk) {
+          float *dstK = candRowsTData + (kk * 8);
+          for (std::size_t t = 0; t < nLocalTrials; ++t) {
+            dstK[t] = candRowsData[(t * d) + kk];
+          }
+          for (std::size_t t = nLocalTrials; t < 8; ++t) {
+            dstK[t] = 0.0F;
+          }
+        }
+        alignas(32) std::array<float, 8> distRow8{};
+        for (std::size_t i = 0; i < n; ++i) {
+          const float *xi = xData + (i * d);
+          const float mi = minSq[i];
+          sqEuclideanRowAgainst8Transposed(xi, candRowsTData, d, distRow8.data());
+          for (std::size_t t = 0; t < nLocalTrials; ++t) {
+            scores[t] += (distRow8[t] < mi) ? distRow8[t] : mi;
+          }
+        }
+        scoredViaTransposed = true;
+      }
+    }
+#endif
+
+    if (!scoredViaTransposed) {
+      // Fused scoring: for each x row, compute L distances against the candidate pack and update
+      // L parallel running sums in one pass. The single-x-stream path is the load-bearing win
+      // over L separate per-candidate sweeps because n*d at our envelope (~12.8 MB at the gate
+      // shape) far exceeds L2 -- one stream is the difference between bandwidth-bound and
+      // bandwidth-bound times L.
+      for (std::size_t i = 0; i < n; ++i) {
+        const T *xi = xData + (i * d);
+        const T mi = minSq[i];
+        sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d, distRow.data());
+        for (std::size_t t = 0; t < nLocalTrials; ++t) {
+          scores[t] += (distRow[t] < mi) ? distRow[t] : mi;
+        }
       }
     }
 
