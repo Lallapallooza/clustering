@@ -284,11 +284,12 @@ inline void sqEuclideanRowToBatch(const T *x, const T *candData, std::size_t L, 
 /**
  * @brief Scratch storage for @ref seedGreedyKMeansPlusPlus.
  *
- * The solver owns one instance across @c run() calls so the candidate-row pack and the inverse
- * CDF scratch are not reallocated at the same shape tuple. Sized lazily by
- * @ref ensureGreedyKmppScratchShape; callers outside the solver should size @c candRows to
- * @c (greedyKmppLocalTrials(k), d), @c candRowsT to @c (d, 8) and @c cumDistSq to length @c n
- * before calling @ref seedGreedyKMeansPlusPlus.
+ * The solver owns one instance across @c run() calls so the candidate-row pack, the per-(point,
+ * candidate) score plane and the inverse CDF scratch are not reallocated at the same shape
+ * tuple. Sized lazily by @ref ensureGreedyKmppScratchShape; callers outside the solver should
+ * size @c candRows to @c (greedyKmppLocalTrials(k), d), @c candRowsT to @c (d, 8),
+ * @c candDistSq to @c (n, 8), and @c cumDistSq to length @c n before calling
+ * @ref seedGreedyKMeansPlusPlus.
  */
 template <class T> struct GreedyKmppScratch {
   /// Packed candidate rows for one outer iteration: shape @c (L, d) where
@@ -299,18 +300,22 @@ template <class T> struct GreedyKmppScratch {
   /// transposed scoring kernel on the d < 8 hot path; ignored when the row-batched kernel is
   /// the better choice.
   NDArray<T, 2, Layout::Contig> candRowsT;
+  /// Per-outer-iteration cache of candidate distances: shape @c (n, 8). Lets the commit step
+  /// pick out the winner column without re-scanning x against the winner centroid -- saves an
+  /// O(n*d) pass per outer pick.
+  NDArray<T, 2, Layout::Contig> candDistSq;
   /// Per-outer-iteration prefix sum of @c minSq, length @c n. Refreshed once per outer pick;
   /// the L candidate draws then run @c log(n) binary search instead of an @c L*n linear scan.
   NDArray<T, 1> cumDistSq;
 
-  GreedyKmppScratch() : candRows({0, 0}), candRowsT({0, 0}), cumDistSq({0}) {}
+  GreedyKmppScratch() : candRows({0, 0}), candRowsT({0, 0}), candDistSq({0, 0}), cumDistSq({0}) {}
 };
 
 /**
- * @brief Lazily resize @p scratch to hold a @c (L, d) candidate-row pack, a @c (d, 8) transposed
- *        pack and a length-n cumulative-distance array.
+ * @brief Lazily resize @p scratch to hold the candidate pack and per-(point, candidate)
+ *        score-cache buffers.
  *
- * No-op when all three buffers already match the requested shape; otherwise reallocates.
+ * No-op when all buffers already match the requested shape; otherwise reallocates.
  */
 template <class T>
 inline void ensureGreedyKmppScratchShape(GreedyKmppScratch<T> &scratch, std::size_t L,
@@ -320,6 +325,9 @@ inline void ensureGreedyKmppScratchShape(GreedyKmppScratch<T> &scratch, std::siz
   }
   if (scratch.candRowsT.dim(0) != d || scratch.candRowsT.dim(1) != 8) {
     scratch.candRowsT = NDArray<T, 2, Layout::Contig>({d == 0 ? std::size_t{1} : d, 8});
+  }
+  if (scratch.candDistSq.dim(0) != n || scratch.candDistSq.dim(1) != 8) {
+    scratch.candDistSq = NDArray<T, 2, Layout::Contig>({n == 0 ? std::size_t{1} : n, 8});
   }
   if (scratch.cumDistSq.dim(0) != n) {
     scratch.cumDistSq = NDArray<T, 1>({n});
@@ -379,6 +387,9 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
   CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.isMutable());
   CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.dim(0) >= d);
   CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.dim(1) >= 8);
+  CLUSTERING_ALWAYS_ASSERT(scratch.candDistSq.isMutable());
+  CLUSTERING_ALWAYS_ASSERT(scratch.candDistSq.dim(0) >= n);
+  CLUSTERING_ALWAYS_ASSERT(scratch.candDistSq.dim(1) >= 8);
   CLUSTERING_ALWAYS_ASSERT(scratch.cumDistSq.isMutable());
   CLUSTERING_ALWAYS_ASSERT(scratch.cumDistSq.dim(0) >= n);
   CLUSTERING_ALWAYS_ASSERT(k >= 1);
@@ -394,6 +405,7 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
   T *minSq = outMinDistSq.data();
   T *candRowsData = scratch.candRows.data();
   T *cumDistSq = scratch.cumDistSq.data();
+  T *candDistSqData = scratch.candDistSq.data();
 #ifdef CLUSTERING_USE_AVX2
   T *candRowsTData = scratch.candRowsT.data();
 #endif
@@ -497,13 +509,13 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
             dstK[t] = 0.0F;
           }
         }
-        alignas(32) std::array<float, 8> distRow8{};
         for (std::size_t i = 0; i < n; ++i) {
           const float *xi = xData + (i * d);
           const float mi = minSq[i];
-          sqEuclideanRowAgainst8Transposed(xi, candRowsTData, d, distRow8.data());
+          float *dstRow = candDistSqData + (i * 8);
+          sqEuclideanRowAgainst8Transposed(xi, candRowsTData, d, dstRow);
           for (std::size_t t = 0; t < nLocalTrials; ++t) {
-            scores[t] += (distRow8[t] < mi) ? distRow8[t] : mi;
+            scores[t] += (dstRow[t] < mi) ? dstRow[t] : mi;
           }
         }
         scoredViaTransposed = true;
@@ -521,7 +533,9 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
         const T *xi = xData + (i * d);
         const T mi = minSq[i];
         sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d, distRow.data());
+        T *dstRow = candDistSqData + (i * 8);
         for (std::size_t t = 0; t < nLocalTrials; ++t) {
+          dstRow[t] = distRow[t];
           scores[t] += (distRow[t] < mi) ? distRow[t] : mi;
         }
       }
@@ -537,14 +551,13 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
     }
     const std::size_t bestCandidate = candidates[bestT];
 
-    // Commit best candidate: copy its row into @p outCentroids and refresh @c minSq to the
-    // per-point minimum against the newly added centroid. The candidate-row pack already has
-    // the winning row at index @c bestT, so the read for the minSq refresh shares the cache
-    // line with the data the prior scoring loop just wrote.
+    // Commit best candidate: copy its row into @p outCentroids and refresh @c minSq from the
+    // cached candidate-distance plane. This skips a fresh O(n*d) scan against the winner row
+    // -- the scoring loop already computed the per-(point, candidate) distance matrix.
     const T *winnerRow = xData + (bestCandidate * d);
     std::memcpy(centroidsData + (c * d), winnerRow, d * sizeof(T));
     for (std::size_t i = 0; i < n; ++i) {
-      const T cand = sqEuclideanRowPtr(xData + (i * d), winnerRow, d);
+      const T cand = candDistSqData[(i * 8) + bestT];
       if (cand < minSq[i]) {
         minSq[i] = cand;
       }
