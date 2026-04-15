@@ -434,6 +434,57 @@ void refreshCentroidSqNorms(const NDArray<T, 2, Layout::Contig> &centroids,
 }
 
 /**
+ * @brief Overwrite @p minDistSq(i) with the directly-computed @c ||X(i) - centroids[labels(i)]||^2.
+ *
+ * The fused argmin path tracks @c ||c||^2 - 2 x.c then adds @c ||x||^2 at the tile epilogue. At
+ * large centroid magnitudes the f32 sum @c ||c||^2 + ||x||^2 - 2 x.c suffers catastrophic
+ * cancellation (the two large terms partially cancel, the residual is dominated by rounding
+ * noise). Argmin labels are unaffected because @c ||x||^2 is constant per row -- the same
+ * additive shift applies to every candidate centroid. Inertia and the empty-cluster reseed
+ * argmax both read the absolute distances and need the direct subtract-square-sum to be
+ * numerically faithful at large coordinate magnitudes.
+ */
+template <class T>
+void recomputeMinDistSqDirect(const NDArray<T, 2, Layout::Contig> &X,
+                              const NDArray<T, 2, Layout::Contig> &centroids,
+                              const NDArray<std::int32_t, 1> &labels, NDArray<T, 1> &minDistSq,
+                              math::Pool pool) noexcept {
+  const std::size_t n = X.dim(0);
+  const std::size_t d = X.dim(1);
+  const std::size_t k = centroids.dim(0);
+  if (n == 0 || d == 0 || k == 0) {
+    return;
+  }
+
+  auto runRowRange = [&](std::size_t lo, std::size_t hi) noexcept {
+    for (std::size_t i = lo; i < hi; ++i) {
+      const std::int32_t lbl = labels(i);
+      if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
+        minDistSq(i) = T{0};
+        continue;
+      }
+      const T *xRow = X.data() + (i * d);
+      const T *cRow = centroids.data() + (static_cast<std::size_t>(lbl) * d);
+      T sum = T{0};
+      for (std::size_t t = 0; t < d; ++t) {
+        const T diff = xRow[t] - cRow[t];
+        sum += diff * diff;
+      }
+      minDistSq(i) = sum;
+    }
+  };
+
+  if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
+    pool.pool
+        ->submit_blocks(std::size_t{0}, n,
+                        [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
+        .wait();
+  } else {
+    runRowRange(0, n);
+  }
+}
+
+/**
  * @brief Drive the Lloyd iteration to completion given preallocated scratch.
  *
  * Assignment uses @c math::pairwiseArgminSqEuclidean (fused AVX2 path at @c d <= 256). Label
@@ -472,6 +523,12 @@ std::pair<std::size_t, bool> runLloydFused(const NDArray<T, 2, Layout::Contig> &
     // -- alloc counter tests snapshot here.
     runAssignment<T>(X, scratch, pool);
 
+    // The fused argmin path tracks @c ||c||^2 - 2 x.c and adds @c ||x||^2 in the tile epilogue;
+    // at large centroid magnitudes the f32 sum cancels catastrophically. Argmin labels survive
+    // (additive shift), but reseed argmax and inertia need true distances -- a single direct
+    // sweep is k-times cheaper than the assignment itself, so this is safe to land in-loop.
+    recomputeMinDistSqDirect<T>(X, centroids, *scratch.labels, minDistSq, pool);
+
     // Save current centroids for the shift check once the mean step lands.
     std::memcpy(centroidsOld.data(), centroids.data(),
                 centroids.dim(0) * centroids.dim(1) * sizeof(T));
@@ -500,8 +557,10 @@ std::pair<std::size_t, bool> runLloydFused(const NDArray<T, 2, Layout::Contig> &
   }
 
   // Re-assign labels against the final centroids so the exposed assignment matches the
-  // centroid matrix callers see. No extra allocation; minDistSq becomes the inertia payload.
+  // centroid matrix callers see, then refresh minDistSq directly so the caller-facing inertia
+  // sums true squared distances rather than the cancellation-prone decomposed residual.
   runAssignment<T>(X, scratch, pool);
+  recomputeMinDistSqDirect<T>(X, centroids, *scratch.labels, minDistSq, pool);
 
   return {iter, converged};
 }
