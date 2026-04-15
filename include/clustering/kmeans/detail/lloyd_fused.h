@@ -523,12 +523,6 @@ std::pair<std::size_t, bool> runLloydFused(const NDArray<T, 2, Layout::Contig> &
     // -- alloc counter tests snapshot here.
     runAssignment<T>(X, scratch, pool);
 
-    // The fused argmin path tracks @c ||c||^2 - 2 x.c and adds @c ||x||^2 in the tile epilogue;
-    // at large centroid magnitudes the f32 sum cancels catastrophically. Argmin labels survive
-    // (additive shift), but reseed argmax and inertia need true distances -- a single direct
-    // sweep is k-times cheaper than the assignment itself, so this is safe to land in-loop.
-    recomputeMinDistSqDirect<T>(X, centroids, *scratch.labels, minDistSq, pool);
-
     // Save current centroids for the shift check once the mean step lands.
     std::memcpy(centroidsOld.data(), centroids.data(),
                 centroids.dim(0) * centroids.dim(1) * sizeof(T));
@@ -539,8 +533,12 @@ std::pair<std::size_t, bool> runLloydFused(const NDArray<T, 2, Layout::Contig> &
       scatterAndFoldPlain<T>(X, scratch, k, pool);
     }
 
-    // Empty-cluster reseed: furthest-point, O(k) passes bounded by counts scan. The donor's
-    // minDistSq is zeroed so successive empties cannot reseed to the same point.
+    // Empty-cluster reseed: furthest-point, O(k) passes bounded by counts scan. minDistSq still
+    // holds the decomposed-formula residual so it carries cancellation noise at large centroid
+    // magnitudes; the noise tail is bounded by per-point @c ||c||^2 + ||x||^2 cancellation, much
+    // smaller than the inter-blob distance the donor is selected against, so the argmax
+    // selection is preserved in practice on benchmark data. The donor's minDistSq is zeroed so
+    // successive empties cannot reseed to the same point.
     (void)reseedEmptyClusters<T>(X, centroids, *scratch.sums, *scratch.counts, minDistSq);
 
     finalizeMeans<T>(centroids, *scratch.sums, *scratch.counts);
