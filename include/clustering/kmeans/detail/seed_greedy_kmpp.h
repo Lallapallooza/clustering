@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -255,30 +256,36 @@ inline void sqEuclideanRowToBatch(const T *x, const T *candData, std::size_t L, 
 /**
  * @brief Scratch storage for @ref seedGreedyKMeansPlusPlus.
  *
- * The solver owns one instance across @c run() calls so the candidate-row pack used by the
- * batched scoring kernel is not reallocated at the same shape tuple. Sized lazily by
- * @ref ensureGreedyKmppScratchShape; callers outside the solver should size @c candRows
- * to @c (greedyKmppLocalTrials(k), d) before calling @ref seedGreedyKMeansPlusPlus.
+ * The solver owns one instance across @c run() calls so the candidate-row pack and the inverse
+ * CDF scratch are not reallocated at the same shape tuple. Sized lazily by
+ * @ref ensureGreedyKmppScratchShape; callers outside the solver should size @c candRows to
+ * @c (greedyKmppLocalTrials(k), d) and @c cumDistSq to length @c n before calling
+ * @ref seedGreedyKMeansPlusPlus.
  */
 template <class T> struct GreedyKmppScratch {
   /// Packed candidate rows for one outer iteration: shape @c (L, d) where
   /// @c L = greedyKmppLocalTrials(k). Reused across all @c k-1 outer picks within one fit.
   NDArray<T, 2, Layout::Contig> candRows;
+  /// Per-outer-iteration prefix sum of @c minSq, length @c n. Refreshed once per outer pick;
+  /// the L candidate draws then run @c log(n) binary search instead of an @c L*n linear scan.
+  NDArray<T, 1> cumDistSq;
 
-  GreedyKmppScratch() : candRows({0, 0}) {}
+  GreedyKmppScratch() : candRows({0, 0}), cumDistSq({0}) {}
 };
 
 /**
- * @brief Lazily resize @p scratch to hold a @c (L, d) candidate-row pack.
+ * @brief Lazily resize @p scratch to hold a @c (L, d) candidate-row pack and length-n cum array.
  *
- * No-op when the existing @c candRows already matches the requested shape; otherwise
- * reallocates. Intended for callers that own @ref GreedyKmppScratch across repeated fits.
+ * No-op when both buffers already match the requested shape; otherwise reallocates.
  */
 template <class T>
 inline void ensureGreedyKmppScratchShape(GreedyKmppScratch<T> &scratch, std::size_t L,
-                                         std::size_t d) {
+                                         std::size_t d, std::size_t n) {
   if (scratch.candRows.dim(0) != L || scratch.candRows.dim(1) != d) {
     scratch.candRows = NDArray<T, 2, Layout::Contig>({L, d});
+  }
+  if (scratch.cumDistSq.dim(0) != n) {
+    scratch.cumDistSq = NDArray<T, 1>({n});
   }
 }
 
@@ -332,6 +339,8 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
   CLUSTERING_ALWAYS_ASSERT(scratch.candRows.isMutable());
   CLUSTERING_ALWAYS_ASSERT(scratch.candRows.dim(0) >= nLocalTrials);
   CLUSTERING_ALWAYS_ASSERT(scratch.candRows.dim(1) == d);
+  CLUSTERING_ALWAYS_ASSERT(scratch.cumDistSq.isMutable());
+  CLUSTERING_ALWAYS_ASSERT(scratch.cumDistSq.dim(0) >= n);
   CLUSTERING_ALWAYS_ASSERT(k >= 1);
   CLUSTERING_ALWAYS_ASSERT(n >= k);
 
@@ -344,6 +353,7 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
   T *centroidsData = outCentroids.data();
   T *minSq = outMinDistSq.data();
   T *candRowsData = scratch.candRows.data();
+  T *cumDistSq = scratch.cumDistSq.data();
 
   // Step 1: pick first centroid uniformly. randUniformU64 is the deterministic primitive; we
   // map it onto [0, n) via modulo, which carries a tiny bias for very large n but is the
@@ -367,12 +377,14 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
   std::vector<T> scores(nLocalTrials, T{0});
 
   for (std::size_t c = 1; c < k; ++c) {
-    // Sum of current minSq is the "weight total" -- a deterministic running sum is enough; no
-    // need for Kahan because we only use it as a probability normalizer.
-    T total = T{0};
+    // Build the cumulative-distance array in a single pass and pull the total off the tail.
+    // No need for Kahan because the cum array is only used as a probability normalizer.
+    T runningSum = T{0};
     for (std::size_t i = 0; i < n; ++i) {
-      total += minSq[i];
+      runningSum += minSq[i];
+      cumDistSq[i] = runningSum;
     }
+    const T total = runningSum;
 
     // Degenerate guard: if every chosen centroid coincides with every remaining point (e.g.
     // duplicated data), total can collapse to ~0. Pick the next centroid uniformly so the
@@ -391,20 +403,16 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
       continue;
     }
 
-    // Draw nLocalTrials candidates by inverse-CDF sampling on the running cumulative-distance
-    // array. The fixed-trial loop is a deterministic sequence of randUnit draws so identical
-    // seed + identical n produces identical candidate sets.
+    // Draw nLocalTrials candidates by inverse-CDF sampling on the cumulative array via
+    // @c std::upper_bound (binary search), trimming the @c L*n linear scan to @c L*log(n).
+    // Determinism is preserved: identical seed + identical n still produces identical candidate
+    // sets because the @c randUnit draw sequence is the same and the cum array is identical.
+    const T *cumBegin = cumDistSq;
+    const T *cumEnd = cumDistSq + n;
     for (std::size_t t = 0; t < nLocalTrials; ++t) {
       const T u = math::randUnit<T>(rng) * total;
-      T cum = T{0};
-      std::size_t pick = n - 1;
-      for (std::size_t i = 0; i < n; ++i) {
-        cum += minSq[i];
-        if (cum > u) {
-          pick = i;
-          break;
-        }
-      }
+      const T *it = std::upper_bound(cumBegin, cumEnd, u);
+      const std::size_t pick = (it == cumEnd) ? (n - 1) : static_cast<std::size_t>(it - cumBegin);
       candidates[t] = pick;
     }
 

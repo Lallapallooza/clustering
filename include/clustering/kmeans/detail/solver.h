@@ -115,7 +115,7 @@ public:
       seedAfkMc2<T>(X, k, afkmc2ChainLengthDefault, seed, m_afkmc2Scratch, m_centroids, pool);
     } else {
       const std::size_t L = greedyKmppLocalTrials(k);
-      ensureGreedyKmppScratchShape<T>(m_greedyKmppScratch, L, d);
+      ensureGreedyKmppScratchShape<T>(m_greedyKmppScratch, L, d, n);
       seedGreedyKMeansPlusPlus<T>(X, m_centroids, m_minDistSq, m_greedyKmppScratch, seed, pool);
     }
 
