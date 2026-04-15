@@ -82,7 +82,7 @@ borrowFromNumpyStridedReadOnly(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu
 }
 
 /**
- * @brief Wrap an Owned NDArray as a numpy array with a capsule keeping the storage alive.
+ * @brief Wrap an Owned rank-@p N NDArray as a numpy array with a capsule keeping storage alive.
  *
  * The NDArray is moved onto the heap; the returned @c nb::ndarray carries a capsule whose
  * deleter destroys the heap NDArray when Python's GC releases the last reference. No element
@@ -94,21 +94,29 @@ borrowFromNumpyStridedReadOnly(nb::ndarray<const T, nb::ndim<2>, nb::device::cpu
  * buffer underlying a @c Borrowed view, so passing a borrow would leave the numpy array
  * pointing at storage whose lifetime the capsule cannot extend.
  *
- * @tparam T Element type, @c float or @c double.
+ * Valid element types follow NDArray's substrate rule (@c std::is_arithmetic_v<T> and not
+ * @c bool); for example, @c float rank-2 centroid buffers and @c std::int32_t rank-1 label
+ * buffers both compose against this single overload.
+ *
+ * @tparam T Element type permitted by NDArray's substrate allowlist.
+ * @tparam N Rank of the NDArray (at least 1).
  * @param arr Owned contiguous NDArray to surrender to Python.
  * @return Numpy ndarray viewing the heap-moved NDArray's buffer.
  */
-template <class T>
-inline nb::ndarray<nb::numpy, T, nb::ndim<2>> wrapAsNumpy(NDArray<T, 2, Layout::Contig> arr) {
+template <class T, std::size_t N>
+inline nb::ndarray<nb::numpy, T, nb::ndim<N>> wrapAsNumpy(NDArray<T, N, Layout::Contig> arr) {
   assert(arr.isOwned() &&
          "wrapAsNumpy requires an Owned NDArray; the capsule cannot extend a Borrowed buffer's "
          "lifetime");
-  auto heap = std::make_unique<NDArray<T, 2, Layout::Contig>>(std::move(arr));
+  auto heap = std::make_unique<NDArray<T, N, Layout::Contig>>(std::move(arr));
   nb::capsule owner(
-      heap.get(), [](void *p) noexcept { delete static_cast<NDArray<T, 2, Layout::Contig> *>(p); });
+      heap.get(), [](void *p) noexcept { delete static_cast<NDArray<T, N, Layout::Contig> *>(p); });
   auto *raw = heap.release();
-  std::size_t shape[2] = {raw->dim(0), raw->dim(1)};
-  return nb::ndarray<nb::numpy, T, nb::ndim<2>>(raw->data(), 2, shape, owner);
+  std::size_t shape[N]{};
+  for (std::size_t k = 0; k < N; ++k) {
+    shape[k] = raw->dim(k);
+  }
+  return nb::ndarray<nb::numpy, T, nb::ndim<N>>(raw->data(), N, shape, owner);
 }
 
 } // namespace clustering::python

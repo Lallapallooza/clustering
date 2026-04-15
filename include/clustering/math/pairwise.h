@@ -200,7 +200,7 @@ void rowNormsSq(const NDArray<T, 2, LX> &X, NDArray<T, 1> &norms, Pool pool) {
     }
   };
 
-  if (pool.shouldParallelize(n, 4, 2)) {
+  if (pool.shouldParallelize(n, 4, 2) && pool.pool != nullptr) {
     pool.pool
         ->submit_blocks(std::size_t{0}, n,
                         [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
@@ -264,7 +264,7 @@ void pairwiseSqEuclideanGemm(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY>
   };
 
   const std::size_t totalCells = n * m;
-  if (pool.shouldParallelize(totalCells, 64, 2)) {
+  if (pool.shouldParallelize(totalCells, 64, 2) && pool.pool != nullptr) {
     pool.pool
         ->submit_blocks(std::size_t{0}, n,
                         [&](std::size_t lo, std::size_t hi) { runBroadcastRange(lo, hi); })
@@ -315,7 +315,7 @@ void pairwiseSqEuclideanSimd(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY>
     }
   };
 
-  if (pool.shouldParallelize(n, 4, 2)) {
+  if (pool.shouldParallelize(n, 4, 2) && pool.pool != nullptr) {
     pool.pool
         ->submit_blocks(std::size_t{0}, n,
                         [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
