@@ -18,9 +18,12 @@ namespace clustering {
 /**
  * @brief Lloyd-family k-means with fused-argmin-GEMM Lloyd seeded by greedy k-means++.
  *
- * The shipped algorithm is fused-argmin Lloyd seeded by greedy k-means++. Additional
- * seeders are reserved in @ref kmeans::detail::Seeder; calling @ref forceSeeder with
- * an unimplemented variant aborts via @c CLUSTERING_ALWAYS_ASSERT until that path ships.
+ * Default @c run dispatches between Lloyd and Yinyang based on @c k; both produce final
+ * labels in @c [0, k) and matching inertia within float tolerance. Seeder dispatch picks
+ * greedy k-means++ by default and escalates to AFK-MC2 at
+ * @c n >= @c kmeans::detail::afkmc2NThreshold AND @c k >= @c kmeans::detail::afkmc2KFloor;
+ * forcing AFK-MC2 below either threshold falls through to greedy k-means++ and @ref lastSeeder
+ * reports the seeder that actually ran.
  *
  * @note @c KMeans does NOT own @p X. The caller must keep the @c NDArray alive for the
  *       lifetime of every @ref run call on this instance. An @c n_init > 1 harness

@@ -13,6 +13,7 @@
 #include "clustering/always_assert.h"
 #include "clustering/kmeans/detail/dispatch.h"
 #include "clustering/kmeans/detail/lloyd_fused.h"
+#include "clustering/kmeans/detail/seed_afkmc2.h"
 #include "clustering/kmeans/detail/seed_greedy_kmpp.h"
 #include "clustering/math/detail/pairwise_argmin_outer.h"
 #include "clustering/math/reduce.h"
@@ -82,16 +83,34 @@ public:
     const Algorithm algo = algoOverride.value_or(autoAlgo);
     const Seeder seeder = seederOverride.value_or(autoSeeder);
 
-    // AFK-MC2 dispatch path is not yet implemented; a forced request here aborts up front so
-    // callers get a clear diagnostic rather than a silent fallback.
-    CLUSTERING_ALWAYS_ASSERT(algo == Algorithm::kLloydFusedGemm);
-    CLUSTERING_ALWAYS_ASSERT(seeder == Seeder::kGreedyKMeansPlusPlus);
+    Seeder seeder;
+    if (seederOverride.has_value()) {
+      seeder = *seederOverride;
+      const bool implemented = seeder == Seeder::kGreedyKMeansPlusPlus || seeder == Seeder::kAfkMc2;
+      CLUSTERING_ALWAYS_ASSERT(implemented);
+    } else {
+      seeder = chooseSeeder(n, k);
+    }
+
+    // AFK-MC2's MCMC approximation guarantee degrades at small k; below @c afkmc2KFloor the
+    // greedy k-means++ variant is cheaper and higher quality. The fallback is observable via
+    // @c lastSeeder(), which reports the seeder that actually ran.
+    if (seeder == Seeder::kAfkMc2 && k < afkmc2KFloor) {
+      seeder = Seeder::kGreedyKMeansPlusPlus;
+    }
 
     m_lastAlgorithm = algo;
     m_lastSeeder = seeder;
 
-    // Seed.
-    seedGreedyKMeansPlusPlus<T>(X, m_centroids, m_minDistSq, m_tmpDistSq, seed, pool);
+    // Seed. Both seeders populate @c m_centroids; the downstream Lloyd / Yinyang drivers run
+    // their own assignment sweep before reading @c m_minDistSq, so AFK-MC2 deliberately skips
+    // the per-point distance prime that greedy-kmpp produces as a side-effect.
+    if (seeder == Seeder::kAfkMc2) {
+      ensureAfkMc2ScratchShape<T>(m_afkmc2Scratch, n);
+      seedAfkMc2<T>(X, k, afkmc2ChainLengthDefault, seed, m_afkmc2Scratch, m_centroids, pool);
+    } else {
+      seedGreedyKMeansPlusPlus<T>(X, m_centroids, m_minDistSq, m_tmpDistSq, seed, pool);
+    }
 
     // Drive Lloyd.
     const LloydScratch<T> scratch{&m_centroids,   &m_centroidsOld,  &m_cSqNorms,      &m_sums,
@@ -134,6 +153,10 @@ public:
     m_foldComp = NDArray<T, 1>({0});
     m_packedB = NDArray<T, 1>({0});
     m_packedCSqNorms = NDArray<T, 1>({0});
+    m_yinyangBounds = YinyangBounds<T>{};
+    m_yinyangPlan = YinyangPlan<T>{};
+    m_lastYinyangStats = YinyangRunStats{};
+    m_afkmc2Scratch = AfkMc2Scratch<T>{};
     m_n = 0;
     m_d = 0;
     m_k = 0;
@@ -209,6 +232,11 @@ private:
   NDArray<T, 1> m_foldComp;
   NDArray<T, 1> m_packedB;
   NDArray<T, 1> m_packedCSqNorms;
+
+  YinyangBounds<T> m_yinyangBounds;
+  YinyangPlan<T> m_yinyangPlan;
+  YinyangRunStats m_lastYinyangStats{};
+  AfkMc2Scratch<T> m_afkmc2Scratch{};
 
   std::size_t m_n = 0;
   std::size_t m_d = 0;
