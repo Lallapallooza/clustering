@@ -18,6 +18,7 @@
 #ifdef CLUSTERING_USE_AVX2
 #include <immintrin.h>
 
+#include "clustering/math/defaults.h"
 #include "clustering/math/detail/gemm_kernel_avx2_f32_argmin.h"
 #endif
 
@@ -161,9 +162,9 @@ inline void pairwiseArgminOuterAvx2F32(const NDArray<float, 2, Layout::Contig> &
   const std::size_t normsPaddedSize = nPanels * kNr;
   const std::size_t bpackSize = nPanels * cpanelSize;
 
-  // Pack the full centroid matrix once per call. Memory is ceil(k/Nr) * d * Nr floats; for the
-  // V1 envelope (k <= 1024, d <= 128) this is bounded at ~772 KiB — large but strictly better
-  // than re-packing per M-tile.
+  // Pack the full centroid matrix once per call. Memory is ceil(k/Nr) * d * Nr floats; with the
+  // fused path gated at @c d <= defaults::pairwiseArgminMaxD this is strictly bounded and fits
+  // comfortably in L2 for the envelopes the fused driver is advantageous on.
   std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> bpackedStorage(bpackSize);
   std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> normsPackedStorage(
       normsPaddedSize);
@@ -186,10 +187,11 @@ inline void pairwiseArgminOuterAvx2F32(const NDArray<float, 2, Layout::Contig> &
     const std::size_t iBase = tileIdx * kMr;
     const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
 
-    // Pack the M-strip via packA at column 0, full K. ceil(mc/Mr) * Mr * d floats; for mc <= 8
-    // that is exactly Mr * d = 8 * d <= 8 * 256 = 2048 floats (8 KiB) per tile.
-    alignas(32) std::array<float, kMr * 256> apScratch{};
-    CLUSTERING_ALWAYS_ASSERT(d <= 256);
+    // Pack the M-strip via packA at column 0, full K. Full K in-register is the reason the fused
+    // driver caps at @c defaults::pairwiseArgminMaxD: the 8 YMM accumulators cannot absorb more
+    // than that many columns without spilling.
+    alignas(32) std::array<float, kMr * defaults::pairwiseArgminMaxD> apScratch{};
+    CLUSTERING_ALWAYS_ASSERT(d <= defaults::pairwiseArgminMaxD);
     const auto xDesc = ::clustering::detail::describeMatrix(X);
     packA<float>(xDesc, iBase, mc, 0, d, apScratch.data());
 
@@ -318,8 +320,8 @@ inline void pairwiseArgminOuterAvx2F32WithScratch(const NDArray<float, 2, Layout
     const std::size_t iBase = tileIdx * kMr;
     const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
 
-    alignas(32) std::array<float, kMr * 256> apScratch{};
-    CLUSTERING_ALWAYS_ASSERT(d <= 256);
+    alignas(32) std::array<float, kMr * defaults::pairwiseArgminMaxD> apScratch{};
+    CLUSTERING_ALWAYS_ASSERT(d <= defaults::pairwiseArgminMaxD);
     const auto xDesc = ::clustering::detail::describeMatrix(X);
     packA<float>(xDesc, iBase, mc, 0, d, apScratch.data());
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 #include <utility>
 
@@ -13,6 +14,9 @@
 #include "clustering/math/accumulate_by_label.h"
 #include "clustering/math/centroid_shift.h"
 #include "clustering/math/defaults.h"
+#include "clustering/math/detail/gemm_outer_prepacked.h"
+#include "clustering/math/detail/gemm_pack.h"
+#include "clustering/math/detail/matrix_desc.h"
 #include "clustering/math/detail/pairwise_argmin_outer.h"
 #include "clustering/math/pairwise.h"
 #include "clustering/math/pairwise_argmin.h"
@@ -48,19 +52,124 @@ template <class T> struct LloydScratch {
   /// Kahan roll-up compensation for the serial fold pass (@c k * d).
   NDArray<T, 1> *foldComp;
   /// Packed-B scratch for the fused argmin hot path. Sized via @c packedBScratchSizeFloats.
+  /// Doubles as the Goto-packed centroid buffer the chunked materialized fallback reads out of
+  /// (same @c packB layout), so the two assignment paths share one panel storage.
   NDArray<T, 1> *packedB;
-  /// Packed centroid-norms scratch paired with @c packedB.
+  /// Packed centroid-norms scratch paired with @c packedB; fused-argmin-only.
   NDArray<T, 1> *packedCSqNorms;
+  /// Chunk distance tile for the materialized assignment fallback (@c chunkRows x k).
+  /// Sized via @c math::chunkedMaterializedScratchShape; unused on the fused-argmin path.
+  NDArray<T, 2, Layout::Contig> *distsChunk;
+  /// Per-worker A-pack arena for @c gemmRunPrepacked (@c blocks * kMc * kKc elements).
+  NDArray<T, 1> *gemmApArena;
+  /// Per-chunk row-squared-norm buffer used by the chunked broadcast step.
+  NDArray<T, 1> *xChunkNormsSq;
 };
 
 /**
- * @brief Run the assignment step against caller-owned packed scratch when available.
+ * @brief Compute per-row argmin over 256-row chunks reading all scratch from @p scratch.
  *
- * Routes to the AVX2 fused outer with caller-supplied scratch when the precondition set
- * matches (@c T == float, contiguous + 32-byte aligned, @c d <= @c pairwiseArgminMaxD).
- * Otherwise falls back to the public entry at @c math::pairwiseArgminSqEuclidean, which
- * picks its own path. The fallback is the only path that may allocate during the Lloyd
- * loop; it fires at @c d > 256 and is documented in the contract as out-of-envelope.
+ * Mirrors @c math::detail::pairwiseArgminMaterializedWithScratch shape-for-shape but replaces
+ * the per-chunk @c pairwiseSqEuclidean (which allocates xNorms, yNorms, and GEMM arenas) with
+ * an explicit @c packB + @c gemmRunPrepacked sequence over caller-owned scratch. Net effect:
+ * a full Lloyd iteration at @c d > @c pairwiseArgminMaxD executes zero @c AlignedAllocator
+ * calls, preserving the solver's zero-alloc iteration contract.
+ */
+template <class T>
+void runChunkedMaterializedAssignment(const NDArray<T, 2, Layout::Contig> &X,
+                                      const LloydScratch<T> &scratch, math::Pool pool) noexcept {
+  const auto &centroids = *scratch.centroids;
+  const auto &cSqNorms = *scratch.cSqNorms;
+  NDArray<std::int32_t, 1> &labels = *scratch.labels;
+  NDArray<T, 1> &minDistSq = *scratch.minDistSq;
+  NDArray<T, 2, Layout::Contig> &distsChunk = *scratch.distsChunk;
+
+  const std::size_t n = X.dim(0);
+  const std::size_t k = centroids.dim(0);
+  const std::size_t d = X.dim(1);
+  if (n == 0 || k == 0) {
+    return;
+  }
+
+  // The single-call @c packB emits one panel per row-strip; @c gemmRunPrepacked then reads that
+  // panel assuming @c (jc, pc) tile walks match the packer's layout. That match only holds when
+  // @c d <= kKc<T> and @c k <= kNc<T>. Outside the envelope the reader silently picks the wrong
+  // centroid columns; guard loudly so a future envelope widening surfaces as an assert rather
+  // than a numerical mystery.
+  CLUSTERING_ALWAYS_ASSERT(d <= math::detail::kKc<T>);
+  CLUSTERING_ALWAYS_ASSERT(k <= math::detail::kNc<T>);
+
+  // Pack the full centroid matrix once per call into the shared packedB buffer. Layout matches
+  // the fused path's @c packB output exactly so the two assignment paths can share storage.
+  const auto cTransposed = centroids.t();
+  const auto cDesc = ::clustering::detail::describeMatrix(cTransposed);
+  math::detail::packB<T>(cDesc, 0, d, 0, k, scratch.packedB->data());
+
+  const std::size_t chunkCap = math::pairwiseArgminChunkRows;
+  T *apArena = scratch.gemmApArena->data();
+  T *xChunkNorms = scratch.xChunkNormsSq->data();
+
+  for (std::size_t iBase = 0; iBase < n; iBase += chunkCap) {
+    const std::size_t chunkRows = (iBase + chunkCap <= n) ? chunkCap : (n - iBase);
+
+    // Contiguous sub-view of X: row iBase through iBase + chunkRows - 1. Zero-copy borrow.
+    auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(X.data() + (iBase * d), {chunkRows, d});
+
+    // Per-row squared norm for the broadcast epilogue. Kept in a caller-owned scratch array so
+    // the chunk loop does not allocate.
+    for (std::size_t r = 0; r < chunkRows; ++r) {
+      xChunkNorms[r] = math::detail::sqNormRow<T, Layout::Contig>(xChunk, r);
+    }
+
+    // distsChunk = -2 * xChunk * centroids.t(). Using the pre-packed centroids buffer and
+    // caller-owned A-pack arena keeps the GEMM alloc-free.
+    auto distsView = NDArray<T, 2>::borrow(distsChunk.data(), {chunkRows, k});
+    const auto xDesc = ::clustering::detail::describeMatrix(xChunk);
+    auto distsDesc = ::clustering::detail::describeMatrixMut(distsView);
+    math::detail::gemmRunPrepacked<T>(xDesc, scratch.packedB->data(), d, k, distsDesc, T{-2}, T{0},
+                                      apArena, pool);
+
+    auto scanRange = [&](std::size_t lo, std::size_t hi) noexcept {
+      for (std::size_t i = lo; i < hi; ++i) {
+        const T xn = xChunkNorms[i];
+        const T *row = distsChunk.data() + (i * k);
+        T bestVal = std::numeric_limits<T>::infinity();
+        std::int32_t bestIdx = 0;
+        for (std::size_t j = 0; j < k; ++j) {
+          // Reconstruct ||x||^2 + ||c||^2 - 2 x . c, clamping cancellation artefacts to zero
+          // the same way @c pairwiseSqEuclideanGemm's broadcast pass does.
+          T v = row[j] + xn + cSqNorms(j);
+          if (v < T{0}) {
+            v = T{0};
+          }
+          if (j == 0 || v < bestVal) {
+            bestVal = v;
+            bestIdx = static_cast<std::int32_t>(j);
+          }
+        }
+        minDistSq(iBase + i) = bestVal;
+        labels(iBase + i) = bestIdx;
+      }
+    };
+
+    if (pool.shouldParallelize(chunkRows, 4, 2) && pool.pool != nullptr) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, chunkRows,
+                          [&](std::size_t lo, std::size_t hi) { scanRange(lo, hi); })
+          .wait();
+    } else {
+      scanRange(0, chunkRows);
+    }
+  }
+}
+
+/**
+ * @brief Run the assignment step against caller-owned scratch, splitting on @c d.
+ *
+ * Routes to the AVX2 fused outer with pre-packed scratch when the precondition set matches
+ * (@c T == float, contiguous + 32-byte aligned, @c d <= @c pairwiseArgminMaxD). Otherwise
+ * forwards to @ref runChunkedMaterializedAssignment which consumes the solver's chunked
+ * distance tile, @c packedB, and GEMM A-pack arena to keep the iteration loop alloc-free.
  */
 template <class T>
 void runAssignment(const NDArray<T, 2, Layout::Contig> &X, const LloydScratch<T> &scratch,
@@ -78,8 +187,7 @@ void runAssignment(const NDArray<T, 2, Layout::Contig> &X, const LloydScratch<T>
     }
   }
 #endif
-  math::pairwiseArgminSqEuclidean<T>(X, *scratch.centroids, *scratch.cSqNorms, *scratch.labels,
-                                     *scratch.minDistSq, pool);
+  runChunkedMaterializedAssignment<T>(X, scratch, pool);
 }
 
 /**

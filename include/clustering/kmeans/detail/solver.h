@@ -15,7 +15,12 @@
 #include "clustering/kmeans/detail/lloyd_fused.h"
 #include "clustering/kmeans/detail/seed_afkmc2.h"
 #include "clustering/kmeans/detail/seed_greedy_kmpp.h"
+#include "clustering/kmeans/detail/yinyang.h"
+#include "clustering/kmeans/detail/yinyang_bounds.h"
+#include "clustering/math/defaults.h"
+#include "clustering/math/detail/gemm_outer.h"
 #include "clustering/math/detail/pairwise_argmin_outer.h"
+#include "clustering/math/pairwise_argmin.h"
 #include "clustering/math/reduce.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
@@ -41,9 +46,9 @@ template <class T> class Solver {
 public:
   Solver()
       : m_centroids({0, 0}), m_centroidsOld({0, 0}), m_cSqNorms({0}), m_sums({0, 0}), m_counts({0}),
-        m_labels({0}), m_minDistSq({0}), m_tmpDistSq({0}), m_shiftSq({0}), m_partialSums({0}),
-        m_partialComps({0}), m_partialCounts({0}), m_foldComp({0}), m_packedB({0}),
-        m_packedCSqNorms({0}) {}
+        m_labels({0}), m_minDistSq({0}), m_shiftSq({0}), m_partialSums({0}), m_partialComps({0}),
+        m_partialCounts({0}), m_foldComp({0}), m_packedB({0}), m_packedCSqNorms({0}),
+        m_distsChunk({0, 0}), m_gemmApArena({0}), m_xChunkNormsSq({0}) {}
 
   /**
    * @brief Fit one run of k-means with the supplied algorithm/seeder overrides.
@@ -109,15 +114,35 @@ public:
       ensureAfkMc2ScratchShape<T>(m_afkmc2Scratch, n);
       seedAfkMc2<T>(X, k, afkmc2ChainLengthDefault, seed, m_afkmc2Scratch, m_centroids, pool);
     } else {
-      seedGreedyKMeansPlusPlus<T>(X, m_centroids, m_minDistSq, m_tmpDistSq, seed, pool);
+      const std::size_t L = greedyKmppLocalTrials(k);
+      ensureGreedyKmppScratchShape<T>(m_greedyKmppScratch, L, d);
+      seedGreedyKMeansPlusPlus<T>(X, m_centroids, m_minDistSq, m_greedyKmppScratch, seed, pool);
     }
 
-    // Drive Lloyd.
-    const LloydScratch<T> scratch{&m_centroids,   &m_centroidsOld,  &m_cSqNorms,      &m_sums,
-                                  &m_counts,      &m_labels,        &m_minDistSq,     &m_shiftSq,
-                                  &m_partialSums, &m_partialComps,  &m_partialCounts, &m_foldComp,
-                                  &m_packedB,     &m_packedCSqNorms};
-    const auto [iter, converged] = runLloydFused<T>(X, scratch, k, maxIter, tol, pool);
+    // Drive the selected solver.
+    const LloydScratch<T> scratch{
+        &m_centroids,     &m_centroidsOld, &m_cSqNorms, &m_sums,           &m_counts,
+        &m_labels,        &m_minDistSq,    &m_shiftSq,  &m_partialSums,    &m_partialComps,
+        &m_partialCounts, &m_foldComp,     &m_packedB,  &m_packedCSqNorms, &m_distsChunk,
+        &m_gemmApArena,   &m_xChunkNormsSq};
+
+    std::size_t iter = 0;
+    bool converged = false;
+    m_lastYinyangStats = YinyangRunStats{};
+    if (algo == Algorithm::kYinyang) {
+      const std::size_t t = yinyangGroupCount(k);
+      ensureBoundsShape<T>(m_yinyangBounds, n, k, t);
+      ensurePlanShape<T>(m_yinyangPlan, k, d, t);
+      const YinyangScratch<T> yinyang{&m_yinyangBounds, &m_yinyangPlan};
+      const auto [it, conv] =
+          runYinyang<T>(X, scratch, yinyang, k, maxIter, tol, pool, m_lastYinyangStats);
+      iter = it;
+      converged = conv;
+    } else {
+      const auto [it, conv] = runLloydFused<T>(X, scratch, k, maxIter, tol, pool);
+      iter = it;
+      converged = conv;
+    }
     m_nIter = iter;
     m_converged = converged;
 
@@ -145,7 +170,6 @@ public:
     m_counts = NDArray<std::int32_t, 1>({0});
     m_labels = NDArray<std::int32_t, 1>({0});
     m_minDistSq = NDArray<T, 1>({0});
-    m_tmpDistSq = NDArray<T, 1>({0});
     m_shiftSq = NDArray<T, 1>({0});
     m_partialSums = NDArray<T, 1>({0});
     m_partialComps = NDArray<T, 1>({0});
@@ -153,10 +177,14 @@ public:
     m_foldComp = NDArray<T, 1>({0});
     m_packedB = NDArray<T, 1>({0});
     m_packedCSqNorms = NDArray<T, 1>({0});
+    m_distsChunk = NDArray<T, 2, Layout::Contig>({0, 0});
+    m_gemmApArena = NDArray<T, 1>({0});
+    m_xChunkNormsSq = NDArray<T, 1>({0});
     m_yinyangBounds = YinyangBounds<T>{};
     m_yinyangPlan = YinyangPlan<T>{};
     m_lastYinyangStats = YinyangRunStats{};
     m_afkmc2Scratch = AfkMc2Scratch<T>{};
+    m_greedyKmppScratch = GreedyKmppScratch<T>{};
     m_n = 0;
     m_d = 0;
     m_k = 0;
@@ -194,13 +222,23 @@ private:
       m_counts = NDArray<std::int32_t, 1>({k});
       m_labels = NDArray<std::int32_t, 1>({n});
       m_minDistSq = NDArray<T, 1>({n});
-      m_tmpDistSq = NDArray<T, 1>({n});
       m_shiftSq = NDArray<T, 1>({k});
       m_foldComp = NDArray<T, 1>({k * d});
       const std::size_t packedBSize = math::detail::packedBScratchSizeFloats(k, d);
       const std::size_t packedNormsSize = math::detail::packedCSqNormsScratchSizeFloats(k);
       m_packedB = NDArray<T, 1>({packedBSize == 0 ? std::size_t{1} : packedBSize});
       m_packedCSqNorms = NDArray<T, 1>({packedNormsSize == 0 ? std::size_t{1} : packedNormsSize});
+      // Sized only when the materialized fallback might fire (d > fused cutoff); smaller shapes
+      // collapse to a 1x1 placeholder so allocations stay proportional to the workload.
+      const bool needsChunk = d > math::defaults::pairwiseArgminMaxD;
+      const auto chunkShape = needsChunk ? math::chunkedMaterializedScratchShape(n, k)
+                                         : std::array<std::size_t, 2>{1, 1};
+      m_distsChunk = NDArray<T, 2, Layout::Contig>({chunkShape[0], chunkShape[1]});
+      const std::size_t chunkRows =
+          (n < math::pairwiseArgminChunkRows) ? n : math::pairwiseArgminChunkRows;
+      const std::size_t chunkRowsClamped = chunkRows == 0 ? std::size_t{1} : chunkRows;
+      const std::size_t xNormsLen = needsChunk ? chunkRowsClamped : std::size_t{1};
+      m_xChunkNormsSq = NDArray<T, 1>({xNormsLen});
     }
 
     // Per-block scratch sizing. Block count caps at workerCount (see BlockPartition in
@@ -210,6 +248,12 @@ private:
     m_partialSums = NDArray<T, 1>({blocks * k * d});
     m_partialComps = NDArray<T, 1>({blocks * k * d});
     m_partialCounts = NDArray<std::int32_t, 1>({blocks * k});
+
+    // Gemm A-pack arena sized to @c blocks * kMc * kKc so @c gemmRunPrepacked's per-worker
+    // slice indexing (@c workerIndex() * kMc * kKc) stays in-bounds on every fan-out path.
+    const bool needsChunk = d > math::defaults::pairwiseArgminMaxD;
+    const std::size_t apSize = blocks * math::detail::kMc<T> * math::detail::kKc<T>;
+    m_gemmApArena = NDArray<T, 1>({needsChunk ? apSize : std::size_t{1}});
 
     m_n = n;
     m_d = d;
@@ -224,7 +268,6 @@ private:
   NDArray<std::int32_t, 1> m_counts;
   NDArray<std::int32_t, 1> m_labels;
   NDArray<T, 1> m_minDistSq;
-  NDArray<T, 1> m_tmpDistSq;
   NDArray<T, 1> m_shiftSq;
   NDArray<T, 1> m_partialSums;
   NDArray<T, 1> m_partialComps;
@@ -232,11 +275,15 @@ private:
   NDArray<T, 1> m_foldComp;
   NDArray<T, 1> m_packedB;
   NDArray<T, 1> m_packedCSqNorms;
+  NDArray<T, 2, Layout::Contig> m_distsChunk;
+  NDArray<T, 1> m_gemmApArena;
+  NDArray<T, 1> m_xChunkNormsSq;
 
   YinyangBounds<T> m_yinyangBounds;
   YinyangPlan<T> m_yinyangPlan;
   YinyangRunStats m_lastYinyangStats{};
   AfkMc2Scratch<T> m_afkmc2Scratch{};
+  GreedyKmppScratch<T> m_greedyKmppScratch{};
 
   std::size_t m_n = 0;
   std::size_t m_d = 0;
