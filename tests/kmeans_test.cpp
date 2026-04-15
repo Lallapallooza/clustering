@@ -622,7 +622,7 @@ TEST(AfkMc2, AtK1ProducesOneCentroid) {
 }
 
 TEST(KMeansEndToEnd, LabelsMatchBruteForceArgminAtMidDim) {
-  // d > pairwiseArgminMaxD (16) routes the Lloyd assignment step through the internal chunked
+  // d > pairwiseArgminMaxD routes the Lloyd assignment step through the internal chunked
   // materialized path (packB + gemmRunPrepacked over solver-owned scratch). Shape is chosen so
   // n exceeds one pairwiseArgminChunkRows boundary -- exercising both a whole chunk and a tail
   // pass -- and so k is well inside the [1, kNc<float>] envelope the single-call packB supports.
@@ -630,7 +630,7 @@ TEST(KMeansEndToEnd, LabelsMatchBruteForceArgminAtMidDim) {
   // final centroids, so any divergence between the chunked driver and the textbook
   // argmin_c ||x - c||^2 surfaces as a labels[i] mismatch.
   constexpr std::size_t n = 600;
-  constexpr std::size_t d = 32;
+  constexpr std::size_t d = 96;
   constexpr std::size_t k = 16;
   const Blobs b = makeBlobs(n, d, k, 0.4F, 2027U);
   ASSERT_GT(d, clustering::math::defaults::pairwiseArgminMaxD);
