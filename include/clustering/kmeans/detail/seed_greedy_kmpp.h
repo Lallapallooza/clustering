@@ -478,12 +478,13 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
 
     bool scoredViaTransposed = false;
 #ifdef CLUSTERING_USE_AVX2
-    // Low-d hot path: when d < kAvx2Lanes the (L, d) row-batched kernel falls into a scalar
-    // tail (no SIMD width inside the K-loop), which dominates wall time at d=4 high-k shapes.
-    // The transposed (d, 8) layout puts the same-feature components of all 8 candidates in one
-    // YMM register, so each broadcast-of-x[k] + FMA folds 8 distances at once.
+    // Low-d hot path: at d <= kAvx2Lanes the (L, d) row-batched kernel either falls into the
+    // scalar K-tail (d < 8) or pays @c L horizontal-sum reductions for one K-iter of work
+    // (d == 8). The transposed (d, 8) layout puts the same-feature components of all 8
+    // candidates in one YMM register, so each broadcast-of-x[k] + FMA folds 8 distances at
+    // once -- @c d SIMD FMAs per row plus a single store, replacing @c L hadd reductions.
     if constexpr (std::is_same_v<T, float>) {
-      if (d > 0 && d < math::detail::kAvx2Lanes<float>) {
+      if (d > 0 && d <= math::detail::kAvx2Lanes<float>) {
         // Transpose the (L, d) candidate pack into a (d, 8) layout. Lanes past nLocalTrials are
         // zeroed; the score loop only reads the first nLocalTrials lanes so the fill value does
         // not matter for correctness.
