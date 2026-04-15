@@ -52,6 +52,20 @@ inline constexpr std::size_t afkmc2KFloor = CLUSTERING_KMEANS_AFKMC2_K_FLOOR;
 inline constexpr std::size_t afkmc2KFloor = 100;
 #endif
 
+#ifdef CLUSTERING_KMEANS_AFKMC2_CHAIN_LENGTH
+/**
+ * @brief Default Markov chain length for AFK-MC2 per centroid pick.
+ *
+ * Bachem 2016 reports @c m=200 as the sweet spot for the log-k approximation guarantee.
+ * Override with @c -DCLUSTERING_KMEANS_AFKMC2_CHAIN_LENGTH=<value>; values below a few dozen
+ * trade the provable bound for faster seeding, values above 200 amortize into larger @c n
+ * regimes where the chain's sublinear-in-n behavior is the dominant cost.
+ */
+inline constexpr std::size_t afkmc2ChainLengthDefault = CLUSTERING_KMEANS_AFKMC2_CHAIN_LENGTH;
+#else
+inline constexpr std::size_t afkmc2ChainLengthDefault = 200;
+#endif
+
 #ifdef CLUSTERING_KMEANS_KAHAN_N_THRESHOLD
 /**
  * @brief @c n threshold at which the centroid accumulator switches to the Kahan-compensated
