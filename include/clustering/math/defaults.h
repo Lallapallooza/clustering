@@ -68,11 +68,12 @@ inline constexpr std::size_t pairwiseArgminMaxD = CLUSTERING_PAIRWISE_ARGMIN_MAX
  * @brief Maximum feature dimension for which the fused @c pairwiseArgminSqEuclidean driver is
  *        used. Above this @c d, callers fall back to the materialized two-step.
  *
- * Matches the Faiss-measured AVX2 fused-argmin-GEMM envelope: the fused kernel keeps its full
- * K range in register, so above this @c d the accumulator path spills and the chunked
- * materialized fallback wins on cache residency.
+ * The fused kernel keeps its full K range in register; above this @c d the accumulator path
+ * spills and the chunked materialized fallback wins on cache residency. Measured locally on
+ * Zen 5 with the @c gemmKernel8x6Avx2F32FusedArgmin layout: the fused path beats chunked
+ * materialized through @c d == 64, and breaks even or loses past that.
  */
-inline constexpr std::size_t pairwiseArgminMaxD = 16;
+inline constexpr std::size_t pairwiseArgminMaxD = 64;
 #endif
 
 } // namespace clustering::math::defaults

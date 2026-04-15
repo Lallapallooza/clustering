@@ -51,8 +51,8 @@ template <class T> void computeRowNormsReference(const NDArray<T, 2> &A, NDArray
 
 } // namespace
 
-TEST(PairwiseArgminDispatch, DefaultMaxDIs16) {
-  EXPECT_EQ(clustering::math::defaults::pairwiseArgminMaxD, std::size_t{16});
+TEST(PairwiseArgminDispatch, DefaultMaxDIs64) {
+  EXPECT_EQ(clustering::math::defaults::pairwiseArgminMaxD, std::size_t{64});
 }
 
 TEST(PairwiseArgminDispatch, ContiguousSmallDTakesFusedPath) {
@@ -98,9 +98,9 @@ TEST(PairwiseArgminDispatch, LargeDBeyondMaxFallsBackToMaterialized) {
 }
 
 TEST(PairwiseArgminDispatch, MidDimBeyondMaxFallsBackToMaterialized) {
-  // d=17, d=32, d=128 are all above pairwiseArgminMaxD=16 so they route through the chunked
-  // materialized path -- this pins the Faiss-parity cutoff.
-  for (const std::size_t d : {std::size_t{17}, std::size_t{32}, std::size_t{128}}) {
+  // d=65, d=128, d=256 are all above pairwiseArgminMaxD=64 so they route through the chunked
+  // materialized path -- this pins the configured cutoff.
+  for (const std::size_t d : {std::size_t{65}, std::size_t{128}, std::size_t{256}}) {
     constexpr std::size_t n = 32;
     constexpr std::size_t k = 8;
     NDArray<float, 2> X({n, d});
