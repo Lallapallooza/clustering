@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -22,20 +23,22 @@ namespace clustering::kmeans::detail {
 /**
  * @brief Compute the local-trials count used by greedy k-means++.
  *
- * @return @c 2 + floor(log2(k)); always at least 1 (the @c k=1 path is short-circuited above
- *         this routine, but a non-zero floor is the safer contract).
+ * Matches sklearn's convention @c 2 + floor(ln(k)). Gives k=8 -> L=4, k=64 -> L=6, k=256 ->
+ * L=7, k=1000 -> L=8, against a @c 2 + floor(log2(k)) variant that would give k=8 -> L=5,
+ * k=256 -> L=10. The natural-log form keeps inertia within the per-pick scoring envelope while
+ * trimming ~30% off the seeder's candidate work at high @c k.
+ *
+ * @return Local-trials count; always at least 1 (the @c k=1 path is short-circuited above this
+ *         routine, but a non-zero floor is the safer contract).
  */
 [[nodiscard]] inline std::size_t greedyKmppLocalTrials(std::size_t k) noexcept {
   if (k <= 1) {
     return 1;
   }
-  // floor(log2(k)) for k >= 2.
-  std::size_t lg = 0;
-  std::size_t v = k;
-  while ((v >>= 1U) != 0U) {
-    ++lg;
-  }
-  return 2 + lg;
+  // std::log is constexpr-callable in C++26 only; this routine fires once per fit so the
+  // runtime call is fine, and the cast-to-size_t of a non-negative value is well-defined.
+  const auto lnK = std::log(static_cast<double>(k));
+  return 2 + static_cast<std::size_t>(lnK);
 }
 
 /**
