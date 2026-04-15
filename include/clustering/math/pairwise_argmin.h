@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -14,6 +15,30 @@
 
 namespace clustering::math {
 
+/**
+ * @brief Chunk height used by the materialized argmin path when striping over @c n.
+ *
+ * Matches scikit-learn's @c CHUNK_SIZE = 256 for euclidean-distance assignment so the per-chunk
+ * distance tile (@c chunkRows * k * sizeof(T)) stays L2-resident on targets with >=256 KiB L2.
+ */
+inline constexpr std::size_t pairwiseArgminChunkRows = 256;
+
+/**
+ * @brief Required shape for the chunked materialized argmin scratch buffer.
+ *
+ * The caller sizes an owning @c NDArray<T, 2> with these dimensions and forwards it as
+ * @c distsScratch to @ref pairwiseArgminMaterializedWithScratch. The height collapses to
+ * @c n when @c n is smaller than the chunk row cap so small inputs do not overallocate.
+ *
+ * @param n Row count of the data matrix.
+ * @param k Row count of the centroid matrix.
+ */
+[[nodiscard]] inline std::array<std::size_t, 2>
+chunkedMaterializedScratchShape(std::size_t n, std::size_t k) noexcept {
+  const std::size_t rows = (n < pairwiseArgminChunkRows) ? n : pairwiseArgminChunkRows;
+  return {rows == 0 ? std::size_t{1} : rows, k == 0 ? std::size_t{1} : k};
+}
+
 namespace detail {
 
 /**
@@ -26,12 +51,96 @@ namespace detail {
 enum class ArgminPath : std::uint8_t { Fused, Materialized };
 
 /**
+ * @brief Compute per-row argmin + minimum squared distance over @p n in 256-row strips using a
+ *        caller-owned distance tile.
+ *
+ * For each chunk of up to @c pairwiseArgminChunkRows rows of @p X, calls
+ * @c pairwiseSqEuclidean against the full centroid matrix to fill the @p distsScratch tile,
+ * then scalar-argmins each row into @p labels + @p outMinSq. The tile is sized so one full
+ * chunk's worth of distances stays L2-resident across the GEMM and the argmin scan; keeping
+ * the output matrix off DRAM is the load-bearing win over materializing @c (n, k) up front.
+ *
+ * Chunks are independent so the outer chunk loop parallelises freely; per-row argmin carries
+ * no reduction across rows, so threaded and serial runs produce bit-identical labels and
+ * within-reassociation-tolerance @c outMinSq.
+ *
+ * @tparam T  Element type (@c float or @c double).
+ * @tparam LX Layout tag of @p X.
+ * @tparam LC Layout tag of @p C.
+ * @param X             Data matrix (n x d).
+ * @param C             Centroid matrix (k x d).
+ * @param labels        Output labels of length n; must be mutable.
+ * @param outMinSq      Output minimum squared distances of length n; must be mutable.
+ * @param distsScratch  Distance tile of shape @ref chunkedMaterializedScratchShape; the
+ *                      function reuses it across chunks.
+ * @param pool          Parallelism injection; forwarded to the per-chunk @c pairwiseSqEuclidean.
+ */
+template <class T, Layout LX, Layout LC>
+void pairwiseArgminMaterializedWithScratch(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LC> &C,
+                                           NDArray<std::int32_t, 1> &labels,
+                                           NDArray<T, 1> &outMinSq, NDArray<T, 2> &distsScratch,
+                                           Pool pool) {
+  const std::size_t n = X.dim(0);
+  const std::size_t k = C.dim(0);
+  const std::size_t d = X.dim(1);
+  if (n == 0 || k == 0) {
+    return;
+  }
+  const std::size_t chunkCap = pairwiseArgminChunkRows;
+  CLUSTERING_ALWAYS_ASSERT(distsScratch.dim(1) >= k);
+  CLUSTERING_ALWAYS_ASSERT(distsScratch.dim(0) >= (n < chunkCap ? n : chunkCap));
+
+  auto runChunk = [&](std::size_t iBase, std::size_t chunkRows, const auto &xChunk) noexcept {
+    // The scratch tile may be wider than k when the caller pre-sized with k padded up; the
+    // dispatch view narrows it back to (chunkRows, k) so the callee sees exactly one chunk.
+    NDArray<T, 2> distsView = NDArray<T, 2>::borrow(distsScratch.data(), {chunkRows, k});
+    pairwiseSqEuclidean(xChunk, C, distsView, pool);
+
+    auto scanRange = [&](std::size_t lo, std::size_t hi) noexcept {
+      for (std::size_t i = lo; i < hi; ++i) {
+        const T *row = distsView.data() + (i * k);
+        T bestVal = row[0];
+        std::int32_t bestIdx = 0;
+        for (std::size_t j = 1; j < k; ++j) {
+          const T v = row[j];
+          if (v < bestVal) {
+            bestVal = v;
+            bestIdx = static_cast<std::int32_t>(j);
+          }
+        }
+        outMinSq(iBase + i) = bestVal;
+        labels(iBase + i) = bestIdx;
+      }
+    };
+
+    if (pool.shouldParallelize(chunkRows, 4, 2) && pool.pool != nullptr) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, chunkRows,
+                          [&](std::size_t lo, std::size_t hi) { scanRange(lo, hi); })
+          .wait();
+    } else {
+      scanRange(0, chunkRows);
+    }
+  };
+
+  for (std::size_t iBase = 0; iBase < n; iBase += chunkCap) {
+    const std::size_t chunkRows = (iBase + chunkCap <= n) ? chunkCap : (n - iBase);
+    if constexpr (LX == Layout::Contig) {
+      auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(X.data() + (iBase * d), {chunkRows, d});
+      runChunk(iBase, chunkRows, xChunk);
+    } else {
+      auto xChunk = X.slice(0, iBase, iBase + chunkRows);
+      runChunk(iBase, chunkRows, xChunk);
+    }
+  }
+}
+
+/**
  * @brief Compute per-row argmin and minimum squared distance via the materialized two-step.
  *
- * Materializes the full @c (n x k) pairwise squared-distance matrix via
- * @c pairwiseSqEuclideanGemm, then scans each row for its argmin. Used as the fall-through
- * path when @c d exceeds @c defaults::pairwiseArgminMaxD and as the correctness oracle for
- * the fused path in tests.
+ * Convenience wrapper that allocates the chunked distance scratch and forwards to
+ * @ref pairwiseArgminMaterializedWithScratch. Used as the fall-through path when @c d exceeds
+ * @c defaults::pairwiseArgminMaxD and as the correctness oracle for the fused path in tests.
  */
 template <class T, Layout LX, Layout LC>
 void pairwiseArgminMaterialized(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LC> &C,
@@ -39,34 +148,13 @@ void pairwiseArgminMaterialized(const NDArray<T, 2, LX> &X, const NDArray<T, 2, 
                                 Pool pool) {
   const std::size_t n = X.dim(0);
   const std::size_t k = C.dim(0);
-
-  NDArray<T, 2> dists({n, k});
-  pairwiseSqEuclidean(X, C, dists, pool);
-
-  auto scanRange = [&](std::size_t lo, std::size_t hi) noexcept {
-    for (std::size_t i = lo; i < hi; ++i) {
-      T bestVal = dists(i, 0);
-      std::int32_t bestIdx = 0;
-      for (std::size_t j = 1; j < k; ++j) {
-        const T v = dists(i, j);
-        if (v < bestVal) {
-          bestVal = v;
-          bestIdx = static_cast<std::int32_t>(j);
-        }
-      }
-      outMinSq(i) = bestVal;
-      labels(i) = bestIdx;
-    }
-  };
-
-  if (pool.shouldParallelize(n, 4, 2) && pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, n,
-                        [&](std::size_t lo, std::size_t hi) { scanRange(lo, hi); })
-        .wait();
-  } else {
-    scanRange(0, n);
+  if (n == 0 || k == 0) {
+    return;
   }
+
+  const auto shape = chunkedMaterializedScratchShape(n, k);
+  NDArray<T, 2> distsScratch({shape[0], shape[1]});
+  pairwiseArgminMaterializedWithScratch(X, C, labels, outMinSq, distsScratch, pool);
 }
 
 /**

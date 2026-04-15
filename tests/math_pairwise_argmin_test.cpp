@@ -51,8 +51,8 @@ template <class T> void computeRowNormsReference(const NDArray<T, 2> &A, NDArray
 
 } // namespace
 
-TEST(PairwiseArgminDispatch, DefaultMaxDIs256) {
-  EXPECT_EQ(clustering::math::defaults::pairwiseArgminMaxD, std::size_t{256});
+TEST(PairwiseArgminDispatch, DefaultMaxDIs16) {
+  EXPECT_EQ(clustering::math::defaults::pairwiseArgminMaxD, std::size_t{16});
 }
 
 TEST(PairwiseArgminDispatch, ContiguousSmallDTakesFusedPath) {
@@ -78,8 +78,8 @@ TEST(PairwiseArgminDispatch, ContiguousSmallDTakesFusedPath) {
 }
 
 TEST(PairwiseArgminDispatch, LargeDBeyondMaxFallsBackToMaterialized) {
-  // d = 257 crosses pairwiseArgminMaxD = 256, so the fused path must refuse even though the
-  // other dispatch conditions are satisfied.
+  // d = 257 crosses pairwiseArgminMaxD, so the fused path must refuse even though the other
+  // dispatch conditions are satisfied.
   constexpr std::size_t n = 8;
   constexpr std::size_t k = 6;
   constexpr std::size_t d = 257;
@@ -95,6 +95,27 @@ TEST(PairwiseArgminDispatch, LargeDBeyondMaxFallsBackToMaterialized) {
   const ArgminPath path =
       pairwiseArgminSqEuclideanWithDispatchInfo(X, C, cSqNorms, labels, outMin, Pool{nullptr});
   EXPECT_EQ(path, ArgminPath::Materialized);
+}
+
+TEST(PairwiseArgminDispatch, MidDimBeyondMaxFallsBackToMaterialized) {
+  // d=17, d=32, d=128 are all above pairwiseArgminMaxD=16 so they route through the chunked
+  // materialized path -- this pins the Faiss-parity cutoff.
+  for (const std::size_t d : {std::size_t{17}, std::size_t{32}, std::size_t{128}}) {
+    constexpr std::size_t n = 32;
+    constexpr std::size_t k = 8;
+    NDArray<float, 2> X({n, d});
+    NDArray<float, 2> C({k, d});
+    NDArray<float, 1> cSqNorms({k});
+    fillRandom(X, 1001U);
+    fillRandom(C, 1002U);
+    computeRowNormsReference(C, cSqNorms);
+
+    NDArray<std::int32_t, 1> labels({n});
+    NDArray<float, 1> outMin({n});
+    const ArgminPath path =
+        pairwiseArgminSqEuclideanWithDispatchInfo(X, C, cSqNorms, labels, outMin, Pool{nullptr});
+    EXPECT_EQ(path, ArgminPath::Materialized) << "d=" << d;
+  }
 }
 
 TEST(PairwiseArgminDispatch, StridedXFallsBackToMaterialized) {
@@ -298,6 +319,86 @@ TEST(PairwiseArgminAgreement, NonMultipleOfNrPartialPanel) {
     // beyond column k in cSqNorms' unpacked form, but the packer sets it to +inf).
     ASSERT_GE(li, 0);
     ASSERT_LT(li, static_cast<std::int32_t>(k));
+  }
+}
+
+TEST(PairwiseArgminAgreement, ChunkedMaterializedMatchesBruteForceAcrossBoundary) {
+  // Chunk-boundary stress: n straddles pairwiseArgminChunkRows so both whole-chunk and partial
+  // tail paths execute in one call. Compare labels + minDistSq to a triple-nested scalar
+  // reference so a bug in either the chunk loop or the per-chunk pairwiseSqEuclidean surfaces.
+  using clustering::math::chunkedMaterializedScratchShape;
+  using clustering::math::detail::pairwiseArgminMaterializedWithScratch;
+  const std::vector<std::size_t> ns{200, 256, 300, 700};
+  const std::vector<std::size_t> ds{32, 128};
+  constexpr std::size_t k = 16;
+  std::uint32_t seed = 20000U;
+
+  for (const std::size_t n : ns) {
+    for (const std::size_t d : ds) {
+      NDArray<float, 2> X({n, d});
+      NDArray<float, 2> C({k, d});
+      NDArray<float, 1> cSqNorms({k});
+      fillRandom(X, seed++);
+      fillRandom(C, seed++);
+      computeRowNormsReference(C, cSqNorms);
+
+      NDArray<std::int32_t, 1> labels({n});
+      NDArray<float, 1> outMin({n});
+      const auto shape = chunkedMaterializedScratchShape(n, k);
+      NDArray<float, 2> distsScratch({shape[0], shape[1]});
+      pairwiseArgminMaterializedWithScratch(X, C, labels, outMin, distsScratch, Pool{nullptr});
+
+      for (std::size_t i = 0; i < n; ++i) {
+        float bestVal = std::numeric_limits<float>::infinity();
+        std::int32_t bestIdx = 0;
+        for (std::size_t j = 0; j < k; ++j) {
+          float s = 0.0F;
+          for (std::size_t t = 0; t < d; ++t) {
+            const float diff = X(i, t) - C(j, t);
+            s += diff * diff;
+          }
+          if (s < bestVal) {
+            bestVal = s;
+            bestIdx = static_cast<std::int32_t>(j);
+          }
+        }
+        EXPECT_EQ(labels(i), bestIdx) << "n=" << n << " d=" << d << " i=" << i;
+        const float denom = std::max(std::abs(bestVal), 1e-6F);
+        EXPECT_LE(std::abs(outMin(i) - bestVal) / denom, 1e-3F)
+            << "n=" << n << " d=" << d << " i=" << i;
+      }
+    }
+  }
+}
+
+TEST(PairwiseArgminAgreement, ChunkedAndUnchunkedWrapperAgreeOnLabels) {
+  // The public pairwiseArgminMaterialized wrapper and the explicit with-scratch entry must
+  // produce bit-identical labels (the chunk loop is shape-deterministic, not order-dependent).
+  using clustering::math::chunkedMaterializedScratchShape;
+  using clustering::math::detail::pairwiseArgminMaterializedWithScratch;
+  constexpr std::size_t n = 512;
+  constexpr std::size_t d = 64;
+  constexpr std::size_t k = 24;
+  NDArray<float, 2> X({n, d});
+  NDArray<float, 2> C({k, d});
+  NDArray<float, 1> cSqNorms({k});
+  fillRandom(X, 31000U);
+  fillRandom(C, 31001U);
+  computeRowNormsReference(C, cSqNorms);
+
+  NDArray<std::int32_t, 1> labelsA({n});
+  NDArray<float, 1> minA({n});
+  pairwiseArgminMaterialized(X, C, labelsA, minA, Pool{nullptr});
+
+  NDArray<std::int32_t, 1> labelsB({n});
+  NDArray<float, 1> minB({n});
+  const auto shape = chunkedMaterializedScratchShape(n, k);
+  NDArray<float, 2> distsScratch({shape[0], shape[1]});
+  pairwiseArgminMaterializedWithScratch(X, C, labelsB, minB, distsScratch, Pool{nullptr});
+
+  for (std::size_t i = 0; i < n; ++i) {
+    EXPECT_EQ(labelsA(i), labelsB(i)) << "at i=" << i;
+    EXPECT_FLOAT_EQ(minA(i), minB(i)) << "at i=" << i;
   }
 }
 

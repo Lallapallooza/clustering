@@ -26,6 +26,7 @@ add_executable(
     kmeans_test.cpp
     kmeans_alloc_counter_test.cpp
     kmeans_determinism_test.cpp
+    kmeans_seeder_test.cpp
 )
 target_link_libraries(
     clustering_tests

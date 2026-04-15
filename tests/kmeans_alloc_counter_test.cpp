@@ -48,6 +48,25 @@ TEST(KMeansAllocCounter, NoAllocationInWarmRun) {
   EXPECT_EQ(after, before) << "warm run allocated " << (after - before) << " times";
 }
 
+// Mid-dim shape that routes through the chunked materialized path. Warm iterations share the
+// solver's pre-sized distance tile, so the iteration loop sees zero alignedAlloc events.
+TEST(KMeansAllocCounter, NoAllocationInWarmRunAtMidDim) {
+  constexpr std::size_t n = 1000;
+  constexpr std::size_t d = 32;
+  constexpr std::size_t k = 64;
+  const NDArray<float, 2> X = makeData(n, d, 123U);
+
+  KMeans<float> km(k, 1);
+  km.run(X, 20, 1e-4F, 13U);
+
+  auto &counter = clustering::detail::alignedAllocCallCount();
+  const std::uint64_t before = counter.load(std::memory_order_relaxed);
+  km.run(X, 20, 1e-4F, 17U);
+  const std::uint64_t after = counter.load(std::memory_order_relaxed);
+
+  EXPECT_EQ(after, before) << "warm run allocated " << (after - before) << " times";
+}
+
 // Bounding the first-run allocation count so a future regression that adds an unintended
 // per-iteration alloc shows up as a linear-in-maxIter blowup.
 TEST(KMeansAllocCounter, FirstRunAllocCountIndependentOfMaxIter) {

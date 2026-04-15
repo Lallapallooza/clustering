@@ -337,6 +337,26 @@ TEST(KMeansEndToEnd, ResetReleasesThenReruns) {
   EXPECT_GT(km.nIter(), 0U);
 }
 
+TEST(KMeansEndToEnd, ChooseAlgorithmPrefersYinyangAtOrAboveThreshold) {
+  // The dispatch rule is: k >= yinyangKThreshold picks Yinyang, otherwise Lloyd. Asserting on
+  // chooseAlgorithm directly lets the test exercise the rule independent of the threshold's
+  // calibrated value -- on hardware where the crossover lies beyond any reasonable k the
+  // constant lands at size_t::max(), and running an end-to-end fit at k=size_t::max() is not a
+  // useful assertion.
+  namespace kd = clustering::kmeans::detail;
+  const std::size_t threshold = kd::yinyangKThreshold;
+  if (threshold == std::numeric_limits<std::size_t>::max()) {
+    // Calibration pinned auto-dispatch to Lloyd on this target. Verify the rule's "below" side.
+    EXPECT_EQ(kd::chooseAlgorithm(1000, 16, 64), kd::Algorithm::kLloydFusedGemm);
+    EXPECT_EQ(kd::chooseAlgorithm(1000, 16, 1024), kd::Algorithm::kLloydFusedGemm);
+  } else {
+    EXPECT_EQ(kd::chooseAlgorithm(1000, 16, threshold), kd::Algorithm::kYinyang);
+    if (threshold > 1) {
+      EXPECT_EQ(kd::chooseAlgorithm(1000, 16, threshold - 1), kd::Algorithm::kLloydFusedGemm);
+    }
+  }
+}
+
 TEST(KMeansEndToEnd, LastAlgorithmAndSeederReportLloydAndGreedy) {
   NDArray<float, 2> X({64, 4});
   for (std::size_t i = 0; i < 64; ++i) {
@@ -598,5 +618,47 @@ TEST(AfkMc2, AtK1ProducesOneCentroid) {
   for (std::size_t t = 0; t < d; ++t) {
     const auto expected = static_cast<float>(sum[t] / static_cast<double>(n));
     EXPECT_NEAR(km.centroids()(0, t), expected, 1e-4F);
+  }
+}
+
+TEST(KMeansEndToEnd, LabelsMatchBruteForceArgminAtMidDim) {
+  // d > pairwiseArgminMaxD (16) routes the Lloyd assignment step through the internal chunked
+  // materialized path (packB + gemmRunPrepacked over solver-owned scratch). Shape is chosen so
+  // n exceeds one pairwiseArgminChunkRows boundary -- exercising both a whole chunk and a tail
+  // pass -- and so k is well inside the [1, kNc<float>] envelope the single-call packB supports.
+  // The test pins label correctness by comparing against scalar brute-force argmin over the
+  // final centroids, so any divergence between the chunked driver and the textbook
+  // argmin_c ||x - c||^2 surfaces as a labels[i] mismatch.
+  constexpr std::size_t n = 600;
+  constexpr std::size_t d = 32;
+  constexpr std::size_t k = 16;
+  const Blobs b = makeBlobs(n, d, k, 0.4F, 2027U);
+  ASSERT_GT(d, clustering::math::defaults::pairwiseArgminMaxD);
+
+  KMeans<float> km(k, 1);
+  km.run(b.X, 100, 1e-4F, 42U);
+  ASSERT_EQ(km.lastAlgorithm(), clustering::kmeans::detail::Algorithm::kLloydFusedGemm);
+
+  const auto &centroids = km.centroids();
+  const auto &labels = km.labels();
+  ASSERT_EQ(centroids.dim(0), k);
+  ASSERT_EQ(centroids.dim(1), d);
+  ASSERT_EQ(labels.dim(0), n);
+
+  for (std::size_t i = 0; i < n; ++i) {
+    float bestVal = std::numeric_limits<float>::infinity();
+    std::int32_t bestIdx = 0;
+    for (std::size_t j = 0; j < k; ++j) {
+      float s = 0.0F;
+      for (std::size_t t = 0; t < d; ++t) {
+        const float diff = b.X(i, t) - centroids(j, t);
+        s += diff * diff;
+      }
+      if (s < bestVal) {
+        bestVal = s;
+        bestIdx = static_cast<std::int32_t>(j);
+      }
+    }
+    EXPECT_EQ(labels(i), bestIdx) << "i=" << i;
   }
 }
