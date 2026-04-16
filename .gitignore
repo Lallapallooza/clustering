@@ -40,6 +40,9 @@
 # *.iml
 # *.ipr
 
+# Tooling caches
+.cache/
+
 # CMake
 cmake-build-*/
 build*/
