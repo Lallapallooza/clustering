@@ -1,5 +1,8 @@
 # C++ Clustering Library
 
+[![CI](https://github.com/Lallapallooza/clustering/actions/workflows/ci.yml/badge.svg)](https://github.com/Lallapallooza/clustering/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Lallapallooza/clustering)](https://github.com/Lallapallooza/clustering/releases/latest)
+
 Header-only C++20 clustering library with KD-Tree acceleration, AVX2
 hot paths, and a thread pool for parallel workloads. Ships DBSCAN and
 k-means with a nanobind Python binding.
@@ -19,7 +22,7 @@ k-means with a nanobind Python binding.
 CPMAddPackage(
     NAME clustering
     GITHUB_REPOSITORY Lallapallooza/clustering
-    GIT_TAG v0.3.0
+    GIT_TAG v0.2.0
     OPTIONS "CLUSTERING_USE_AVX2 ON"
 )
 target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
@@ -148,7 +151,7 @@ uv run pre-commit run --all-files                # run every hook on the repo
 
 After `install`, hooks run automatically on `git commit`. The configured hooks are `clang-format` for C++, `gersemi` for CMake, `ruff` for Python, the standard whitespace/YAML checks, and `commitizen` which enforces [Conventional Commits](https://www.conventionalcommits.org/) on the commit message itself (e.g. `feat:`, `fix:`, `build:`, `chore:`, `docs:`).
 
-clang-tidy is **not** a pre-commit hook (too slow, needs a compile database). It runs as part of the build whenever `CLUSTERING_ENABLE_CLANG_TIDY` is on, and in the `tidy` CI job.
+clang-tidy is **not** a pre-commit hook (too slow, needs a compile database). It runs as part of the build whenever `CLUSTERING_ENABLE_CLANG_TIDY` is on, and in CI.
 
 ## TODO
 - [x] DBSCAN
