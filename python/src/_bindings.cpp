@@ -73,9 +73,22 @@ kmeans_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> da
   const std::size_t N = data.shape(0);
   const std::size_t D = data.shape(1);
 
-  // Copy numpy data into an owned NDArray<float,2> while GIL is held. Owning the input on the
-  // C++ side decouples the fit from Python's buffer lifetime rules and keeps the solver's
-  // consumer contract (borrow for the lifetime of run) trivially satisfied.
+  if (k == 0) {
+    throw nb::value_error("k must be >= 1");
+  }
+  if (N > 0 && k > N) {
+    throw nb::value_error("k must be <= number of rows");
+  }
+  if (D == 0 && N > 0) {
+    throw nb::value_error("data must have d >= 1");
+  }
+  if (max_iter == 0) {
+    throw nb::value_error("max_iter must be >= 1");
+  }
+  if (!(tol >= 0.0F)) {
+    throw nb::value_error("tol must be >= 0");
+  }
+
   NDArray<float, 2> X({N, D});
   std::memcpy(X.data(), data.data(), N * D * sizeof(float));
 
