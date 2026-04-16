@@ -47,9 +47,16 @@ public:
    *              upward to @c std::thread::hardware_concurrency() so the pool is always
    *              usable by the @ref math::Pool helpers.
    */
-  explicit KMeans(std::size_t k, std::size_t nJobs = std::thread::hardware_concurrency())
-      : m_k(k), m_pool(clampedJobCount(nJobs)) {
+  explicit KMeans(std::size_t k, std::size_t nJobs = std::thread::hardware_concurrency()) : m_k(k) {
     CLUSTERING_ALWAYS_ASSERT(k >= 1);
+    // Skip pool construction when the caller asks for serial execution. The pool ctor spawns
+    // @c nJobs std::thread workers plus a detach/join pair per instance; at the small-n corner
+    // those threads sit idle yet still cost ~20 us per KMeans instance. Leaving @c m_pool empty
+    // lets @ref run pass @c Pool{nullptr} down without the creation/destruction detour.
+    const std::size_t clamped = clampedJobCount(nJobs);
+    if (clamped > 1) {
+      m_pool.emplace(clamped);
+    }
   }
 
   KMeans(const KMeans &) = delete;
@@ -75,7 +82,10 @@ public:
    */
   void run(const NDArray<T, 2> &X, std::size_t maxIter = 300, T tol = T{1e-4},
            std::uint64_t seed = 0) {
-    const math::Pool pool{&m_pool};
+    // Absent @c m_pool the run is strictly serial; the kernels short-circuit every
+    // @c shouldParallelize check via the null @c Pool.pool pointer and skip the per-site
+    // @c BS::submit_blocks dispatch round-trip (futures + move_only_function + queue).
+    const math::Pool pool{m_pool.has_value() ? &*m_pool : nullptr};
     m_solver.fit(X, m_k, maxIter, tol, seed, pool, m_forcedAlgorithm, m_forcedSeeder);
   }
 
@@ -136,7 +146,7 @@ private:
   }
 
   std::size_t m_k;
-  BS::light_thread_pool m_pool;
+  std::optional<BS::light_thread_pool> m_pool;
   kmeans::detail::Solver<T> m_solver{};
   std::optional<kmeans::detail::Algorithm> m_forcedAlgorithm;
   std::optional<kmeans::detail::Seeder> m_forcedSeeder;
