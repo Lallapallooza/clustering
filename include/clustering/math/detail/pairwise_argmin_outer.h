@@ -373,6 +373,96 @@ inline void pairwiseArgminOuterAvx2F32WithScratch(const NDArray<float, 2, Layout
   }
 }
 
+/**
+ * @brief Direct squared-distance argmin for the small-@c d hot path (no GEMM packing).
+ *
+ * At @c d <= a few lanes, the fused argmin-GEMM driver spends a disproportionate share of its
+ * wall time in @c packA: packing an 8x2 A-panel into the microkernel layout costs nearly as
+ * much as the 96-FMA kernel it feeds. This routine collapses the assignment to the direct
+ * @c ||x_i - c_j||^2 formula, iterated 8 rows at a time with AVX2 accumulators and broadcast
+ * centroid components. Writes the true squared distance (no @c ||x||^2 + @c ||c||^2 - 2 x.c
+ * decomposition) so downstream callers consume numerically faithful inertia without a final
+ * @c recomputeMinDistSqDirect pass.
+ *
+ * @param X        Data matrix (n x d), contiguous, 32-byte aligned.
+ * @param C        Centroid matrix (k x d), contiguous.
+ * @param labels   Output labels of length n.
+ * @param outMinSq Output squared distances of length n.
+ * @param pool     Parallelism injection; fans out over 8-row M-tiles.
+ */
+inline void pairwiseArgminDirectSmallDF32(const NDArray<float, 2, Layout::Contig> &X,
+                                          const NDArray<float, 2, Layout::Contig> &C,
+                                          NDArray<std::int32_t, 1> &labels,
+                                          NDArray<float, 1> &outMinSq, Pool pool) noexcept {
+  constexpr std::size_t kMr = 8;
+  const std::size_t n = X.dim(0);
+  const std::size_t k = C.dim(0);
+  const std::size_t d = X.dim(1);
+
+  const float *xData = X.data();
+  const float *cData = C.data();
+  std::int32_t *labelsData = labels.data();
+  float *minSqData = outMinSq.data();
+  const std::size_t mTiles = (n + kMr - 1) / kMr;
+
+  auto runOneTile = [&](std::size_t tileIdx) noexcept {
+    const std::size_t iBase = tileIdx * kMr;
+    const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+
+    // Gather the 8 rows' d coordinates into per-feature YMM registers. At @c d <= 8 the full
+    // tile fits in 8 YMM registers (one per feature lane); each register holds the same feature
+    // for the 8 rows. If @c mc < kMr the tail rows are zero-padded; their @c bestMin/bestArg are
+    // discarded by the write-back below.
+    alignas(32) std::array<float, kMr * 8> xTile{};
+    for (std::size_t r = 0; r < mc; ++r) {
+      const float *src = xData + ((iBase + r) * d);
+      for (std::size_t t = 0; t < d; ++t) {
+        xTile[(t * kMr) + r] = src[t];
+      }
+    }
+
+    __m256 bestMin = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+    __m256i bestArg = _mm256_set1_epi32(-1);
+
+    for (std::size_t j = 0; j < k; ++j) {
+      const float *cRow = cData + (j * d);
+      __m256 acc = _mm256_setzero_ps();
+      for (std::size_t t = 0; t < d; ++t) {
+        const __m256 xv = _mm256_load_ps(xTile.data() + (t * kMr));
+        const __m256 cv = _mm256_set1_ps(cRow[t]);
+        const __m256 diff = _mm256_sub_ps(xv, cv);
+        acc = _mm256_fmadd_ps(diff, diff, acc);
+      }
+      const __m256 mask = _mm256_cmp_ps(acc, bestMin, _CMP_LT_OQ);
+      bestMin = _mm256_blendv_ps(bestMin, acc, mask);
+      const __m256i jVec = _mm256_set1_epi32(static_cast<std::int32_t>(j));
+      bestArg = _mm256_blendv_epi8(bestArg, jVec, _mm256_castps_si256(mask));
+    }
+
+    alignas(32) std::array<float, kMr> minBuf{};
+    alignas(32) std::array<std::int32_t, kMr> argBuf{};
+    _mm256_store_ps(minBuf.data(), bestMin);
+    _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf.data()), bestArg);
+    std::memcpy(minSqData + iBase, minBuf.data(), mc * sizeof(float));
+    std::memcpy(labelsData + iBase, argBuf.data(), mc * sizeof(std::int32_t));
+  };
+
+  if (pool.shouldParallelize(mTiles, 1, 2) && pool.pool != nullptr) {
+    pool.pool
+        ->submit_blocks(std::size_t{0}, mTiles,
+                        [&](std::size_t lo, std::size_t hi) {
+                          for (std::size_t t = lo; t < hi; ++t) {
+                            runOneTile(t);
+                          }
+                        })
+        .wait();
+  } else {
+    for (std::size_t t = 0; t < mTiles; ++t) {
+      runOneTile(t);
+    }
+  }
+}
+
 #endif // CLUSTERING_USE_AVX2
 
 } // namespace clustering::math::detail
