@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import itertools
-import json
 import multiprocessing
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from statistics import median
 from typing import Any, Callable
 
@@ -210,12 +208,3 @@ def run_suite(
                     result = run_one(recipe, size, dims=dim, params=params)
                     results.append(result)
     return results
-
-
-def save_results(results: list[RunResult], path: Path) -> None:
-    """Write results list to JSON file."""
-    from dataclasses import asdict
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        json.dump([asdict(r) for r in results], f, indent=2)
