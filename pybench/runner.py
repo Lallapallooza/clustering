@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import itertools
-import multiprocessing
+import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from statistics import median
 from typing import Any, Callable
 
+import memray
 import numpy as np
 import sklearn.cluster
 from sklearn.datasets import make_blobs
@@ -66,62 +68,32 @@ def expand_param_grid(recipe: Recipe) -> list[dict[str, Any]]:
     return combos
 
 
-def _measure_peak_rss_worker(fn, data, params, pipe):
-    """Worker: run fn in a forked process, report peak RSS via pipe."""
-    import resource
-
-    fn(data, **params)
-    peak_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    pipe.send(peak_kb)
-    pipe.close()
-
-
-def _try_rss_with_context(
-    ctx: multiprocessing.context.BaseContext,
-    fn: Callable,
-    data: np.ndarray,
-    params: dict[str, Any],
-) -> float | None:
-    """Attempt RSS measurement under the given multiprocessing context."""
-    try:
-        parent_conn, child_conn = ctx.Pipe(duplex=False)
-        p = ctx.Process(
-            target=_measure_peak_rss_worker,
-            args=(fn, data, params, child_conn),
-        )
-        p.start()
-        child_conn.close()
-        p.join(timeout=10)
-        if p.is_alive():
-            p.kill()
-            p.join()
-            return None
-        if p.exitcode != 0 or not parent_conn.poll():
-            parent_conn.close()
-            return None
-        peak_kb = parent_conn.recv()
-        parent_conn.close()
-        return round(peak_kb / 1024, 2)
-    except (AttributeError, TypeError, OSError):
-        return None
-
-
 def _measure_peak_rss_mb(
     fn: Callable, data: np.ndarray, params: dict[str, Any]
 ) -> float:
-    """Measure peak RSS via a child process. Tries fork first (accurate
-    baseline), falls back to spawn if fork deadlocks (e.g. C extensions
-    with thread pools).
+    """Capture peak bytes allocated during `fn(data, **params)`.
+
+    memray intercepts libc allocations, so the number reflects both the
+    Python side and C-extension / sklearn worker allocations. follow_fork
+    lets it follow joblib's fork-based workers on Linux; on platforms
+    where sklearn spawns via exec (macOS), only the parent is seen.
     """
-    result = _try_rss_with_context(
-        multiprocessing.get_context("fork"), fn, data, params
-    )
-    if result is not None:
-        return result
-    result = _try_rss_with_context(
-        multiprocessing.get_context("spawn"), fn, data, params
-    )
-    return result if result is not None else 0.0
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        capture = Path(f.name)
+    capture.unlink()
+    try:
+        with memray.Tracker(
+            capture,
+            follow_fork=True,
+            native_traces=False,
+            trace_python_allocators=False,
+        ):
+            fn(data, **params)
+        reader = memray.FileReader(capture)
+        peak_bytes = reader.metadata.peak_memory
+        return round(peak_bytes / (1024 * 1024), 2)
+    finally:
+        capture.unlink(missing_ok=True)
 
 
 def run_one(
