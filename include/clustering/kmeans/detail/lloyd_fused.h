@@ -11,7 +11,6 @@
 #include "clustering/kmeans/detail/convergence.h"
 #include "clustering/kmeans/detail/dispatch.h"
 #include "clustering/kmeans/detail/empty_cluster.h"
-#include "clustering/math/accumulate_by_label.h"
 #include "clustering/math/centroid_shift.h"
 #include "clustering/math/defaults.h"
 #include "clustering/math/detail/gemm_outer_prepacked.h"

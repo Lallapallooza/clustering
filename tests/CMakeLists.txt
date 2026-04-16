@@ -5,7 +5,6 @@ add_executable(
     ndarray_test.cpp
     ndarray_integer_allowlist_test.cpp
     matrix_desc_test.cpp
-    math_accumulate_by_label_test.cpp
     math_centroid_shift_test.cpp
     math_distance_test.cpp
     math_dsu_test.cpp

@@ -11,9 +11,7 @@
 using clustering::NDArray;
 using clustering::math::argmax;
 using clustering::math::argmin;
-using clustering::math::meanVar;
 using clustering::math::sum;
-using clustering::math::sumKahan;
 using clustering::math::topk;
 
 namespace {
@@ -48,102 +46,6 @@ TEST(Sum, StridedInputsWork) {
   // Column 0 is strided (row-major base, stride > 1).
   const auto col = a.col(0);
   EXPECT_DOUBLE_EQ(sum(col), 0.0 + 2.0 + 4.0);
-}
-
-TEST(SumKahan, EmptyReturnsZero) {
-  const NDArray<double, 1> a({0});
-  EXPECT_DOUBLE_EQ(sumKahan(a), 0.0);
-}
-
-TEST(SumKahan, MatchesNaiveOnSmallClean) {
-  const auto a = vec<double, 5>({1.0, 2.0, 3.0, 4.0, 5.0});
-  EXPECT_DOUBLE_EQ(sumKahan(a), sum(a));
-  EXPECT_DOUBLE_EQ(sumKahan(a), 15.0);
-}
-
-TEST(SumKahan, BeatsNaiveOnLargeSignalPlusNoise) {
-  // Pathological pattern: one dominant f64 term 2^53 (the last integer above which f64 ULP = 2)
-  // followed by many 1.0 additions. Each 1.0 added to 2^53 rounds to 2^53 under round-to-even
-  // because the gap becomes 2 ULPs, so naive accumulation silently drops the noise while the
-  // true sum 2^53 + n is exactly representable (it stays an integer above 2^53). Kahan's
-  // compensation scalar recovers the full precision.
-  constexpr std::size_t n = 1'000'001;
-  NDArray<double, 1> a({n});
-  a(0) = 9007199254740992.0; // 2^53
-  for (std::size_t i = 1; i < n; ++i) {
-    a(i) = 1.0;
-  }
-  // n-1 = 1'000'000 ones added to 2^53; 2^53 + 1e6 is even and exactly representable in f64.
-  const double trueSum = 9007199254740992.0 + static_cast<double>(n - 1);
-  const double kahanResult = sumKahan(a);
-  const double naiveResult = sum(a);
-  const double kahanError = std::fabs(kahanResult - trueSum);
-  const double naiveError = std::fabs(naiveResult - trueSum);
-  EXPECT_LT(kahanError, 1.0) << "Kahan off by " << kahanError;
-  EXPECT_GT(naiveError, 1e5) << "Naive should absorb small addends; got error " << naiveError;
-  EXPECT_GT(naiveError, kahanError * 100.0);
-}
-
-TEST(MeanVar, EmptyReturnsZeroes) {
-  const NDArray<double, 1> a({0});
-  const auto [mean, var] = meanVar(a);
-  EXPECT_DOUBLE_EQ(mean, 0.0);
-  EXPECT_DOUBLE_EQ(var, 0.0);
-}
-
-TEST(MeanVar, MatchesExpectedOnFixedVector) {
-  const auto a = vec<double, 5>({1.0, 2.0, 3.0, 4.0, 5.0});
-  const auto [mean, var] = meanVar(a);
-  EXPECT_DOUBLE_EQ(mean, 3.0);
-  // Population variance of {1..5} is 2.0 (sample variance would be 2.5).
-  EXPECT_DOUBLE_EQ(var, 2.0);
-}
-
-TEST(MeanVar, SingleElementReturnsZeroVariance) {
-  const auto a = vec<double, 1>({42.0});
-  const auto [mean, var] = meanVar(a);
-  EXPECT_DOUBLE_EQ(mean, 42.0);
-  EXPECT_DOUBLE_EQ(var, 0.0);
-}
-
-TEST(MeanVar, WelfordBeatsNaiveOnPathologicalCase) {
-  // Classic cancellation trap: v = [1e9+1, 1e9+2, 1e9+3] in f64.
-  // Mean = 1e9 + 2. Population variance = 2/3. The naive E[x^2] - E[x]^2 form collapses to 0
-  // because both expectations land in the same f64 ULP bucket.
-  const std::array<double, 3> raw{1.0e9 + 1.0, 1.0e9 + 2.0, 1.0e9 + 3.0};
-  NDArray<double, 1> a({3});
-  for (std::size_t i = 0; i < 3; ++i) {
-    a(i) = raw[i];
-  }
-  const auto [mean, var] = meanVar(a);
-  EXPECT_NEAR(mean, 1.0e9 + 2.0, 1e-6);
-  EXPECT_NEAR(var, 2.0 / 3.0, 1e-6);
-
-  // Witness: the naive formula collapses on this input.
-  double eX = 0.0;
-  double eX2 = 0.0;
-  for (const double v : raw) {
-    eX += v;
-    eX2 += v * v;
-  }
-  eX /= 3.0;
-  eX2 /= 3.0;
-  const double naiveVar = eX2 - (eX * eX);
-  EXPECT_GT(std::fabs(naiveVar - (2.0 / 3.0)), 0.5)
-      << "naive variance should be wildly wrong on this input; got " << naiveVar;
-}
-
-TEST(MeanVar, StridedInputMatchesContig) {
-  NDArray<double, 2> a({4, 2});
-  for (std::size_t i = 0; i < 4; ++i) {
-    for (std::size_t j = 0; j < 2; ++j) {
-      a[i][j] = static_cast<double>((i * 2) + j);
-    }
-  }
-  const auto col = a.col(1); // values {1, 3, 5, 7}
-  const auto [mean, var] = meanVar(col);
-  EXPECT_DOUBLE_EQ(mean, 4.0);
-  EXPECT_DOUBLE_EQ(var, 5.0);
 }
 
 TEST(ArgMin, ReturnsFirstIndexOfMinimum) {

@@ -15,7 +15,7 @@ namespace clustering::math {
  * @brief Naive single-pass sum of a rank-1 array.
  *
  * Straight accumulation with no compensation. Accurate enough when all magnitudes are close and
- * @c n is modest; use @ref sumKahan when a large offset plus small increments risks absorption.
+ * @c n is modest.
  *
  * @tparam T Element type; @c float or @c double.
  * @tparam L Layout tag; contiguous and strided inputs are both accepted via @c x(i).
@@ -31,68 +31,6 @@ template <class T, Layout L> inline T sum(const NDArray<T, 1, L> &x) noexcept {
     s += x(i);
   }
   return s;
-}
-
-/**
- * @brief Kahan-compensated sum of a rank-1 array.
- *
- * Classical Kahan summation: a running compensation scalar @c c absorbs the low-order bits lost
- * when a small addend is added to a large running total. Recovers full precision on cases where
- * a dominant term (e.g. @c 1e9) is combined with many small ones (e.g. @c 1e-3).
- *
- * @tparam T Element type; @c float or @c double.
- * @tparam L Layout tag.
- * @param x Rank-1 array; empty input returns @c T(0).
- * @return Compensated sum of the elements.
- */
-template <class T, Layout L> inline T sumKahan(const NDArray<T, 1, L> &x) noexcept {
-  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
-                "sumKahan<T> requires T to be float or double");
-  const std::size_t n = x.dim(0);
-  T s = T{0};
-  T c = T{0};
-  for (std::size_t i = 0; i < n; ++i) {
-    const T y = x(i) - c;
-    const T t = s + y;
-    c = (t - s) - y;
-    s = t;
-  }
-  return s;
-}
-
-/**
- * @brief Mean and population variance via Welford's online recurrence.
- *
- * Returns @c (mean, variance) where @c variance = sum((x_i - mean)^2) / n (population form, no
- * Bessel correction). Welford avoids the @c E[x^2] - E[x]^2 cancellation trap that collapses to
- * zero for inputs like @c [1e9+1, 1e9+2, 1e9+3] in f64: the mean update absorbs the offset so
- * the squared-deviation accumulator only ever sees small residuals.
- *
- * Empty input yields @c {T(0), T(0)}: a defined return rather than UB, even though the variance
- * of an empty set is mathematically vacuous.
- *
- * @tparam T Element type; @c float or @c double.
- * @tparam L Layout tag.
- * @param x Rank-1 array.
- * @return @c std::pair<T,T> of (mean, population-variance); @c {0,0} on empty input.
- */
-template <class T, Layout L> inline std::pair<T, T> meanVar(const NDArray<T, 1, L> &x) noexcept {
-  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
-                "meanVar<T> requires T to be float or double");
-  const std::size_t n = x.dim(0);
-  if (n == 0) {
-    return {T{0}, T{0}};
-  }
-  T mean = T{0};
-  T m2 = T{0};
-  for (std::size_t i = 0; i < n; ++i) {
-    const T xi = x(i);
-    const T delta = xi - mean;
-    mean += delta / static_cast<T>(i + 1);
-    const T delta2 = xi - mean;
-    m2 += delta * delta2;
-  }
-  return {mean, m2 / static_cast<T>(n)};
 }
 
 /**
