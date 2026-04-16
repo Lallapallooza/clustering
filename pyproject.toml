@@ -8,9 +8,12 @@ version = "0.3.1"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
+    "scipy>=1.12",
     "scikit-learn",
     "matplotlib",
     "memray>=1.14",
+    "threadpoolctl>=3.0",
+    "kneed>=0.8",
 ]
 
 [project.scripts]
