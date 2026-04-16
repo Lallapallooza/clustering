@@ -18,8 +18,7 @@ namespace clustering {
 /**
  * @brief Lloyd-family k-means with fused-argmin-GEMM Lloyd seeded by greedy k-means++.
  *
- * Default @c run dispatches between Lloyd and Yinyang based on @c k; both produce final
- * labels in @c [0, k) and matching inertia within float tolerance. Seeder dispatch picks
+ * Seeder dispatch picks
  * greedy k-means++ by default and escalates to AFK-MC2 at
  * @c n >= @c kmeans::detail::afkmc2NThreshold AND @c k >= @c kmeans::detail::afkmc2KFloor;
  * forcing AFK-MC2 below either threshold falls through to greedy k-means++ and @ref lastSeeder

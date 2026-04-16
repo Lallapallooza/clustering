@@ -43,6 +43,18 @@ namespace clustering::kmeans::detail {
 }
 
 /**
+ * @brief Round @p L up to the nearest multiple of 8 used by the transposed scoring layout.
+ *
+ * The transposed kernel operates on chunks of 8 candidates; the candidate pack and the
+ * per-(point, candidate) distance cache are padded to this width so the chunked scoring path
+ * can index with a fixed row stride. The commit-step minSq refresh only reads @p L lanes.
+ */
+[[nodiscard]] constexpr std::size_t greedyKmppTransposedWidth(std::size_t L) noexcept {
+  constexpr std::size_t kChunk = 8;
+  return ((L + kChunk - 1) / kChunk) * kChunk;
+}
+
+/**
  * @brief Squared Euclidean distance between two contiguous rows of equal length @p d.
  *
  * Hot helper for the seeder's candidate-distance update; routes to the AVX2-vectorized
@@ -199,6 +211,56 @@ inline void sqEuclideanRowAgainst8Transposed(const float *x, const float *candDa
 }
 
 /**
+ * @brief Compute two 8-way squared distance slabs against a transposed @c (d, 16) candidate
+ *        layout in one streaming pass over the @p x row.
+ *
+ * Unrolls @ref sqEuclideanRowAgainst8Transposed across two adjacent lane groups so each @c x[k]
+ * broadcast folds 16 candidate distances per FMA pair. The row stride of @p candData is 16
+ * elements; lanes @c [0,8) receive the first 8 candidates and @c [8,16) the next 8. At
+ * @c L in @c (8, 16] with @c d <= 8 this shaves half the broadcast + load traffic versus looping
+ * the 8-wide kernel twice, which is the load-bearing envelope for @c k >= 256 seeding where
+ * @c L = 2 + ln(k) lands at 10 or 11.
+ */
+inline void sqEuclideanRowAgainst16Transposed(const float *x, const float *candData, std::size_t d,
+                                              float *out) noexcept {
+  __m256 accLo = _mm256_setzero_ps();
+  __m256 accHi = _mm256_setzero_ps();
+  for (std::size_t k = 0; k < d; ++k) {
+    const __m256 cLo = _mm256_load_ps(candData + (k * 16));
+    const __m256 cHi = _mm256_load_ps(candData + (k * 16) + 8);
+    const __m256 xv = _mm256_set1_ps(x[k]);
+    const __m256 diffLo = _mm256_sub_ps(xv, cLo);
+    const __m256 diffHi = _mm256_sub_ps(xv, cHi);
+    accLo = _mm256_fmadd_ps(diffLo, diffLo, accLo);
+    accHi = _mm256_fmadd_ps(diffHi, diffHi, accHi);
+  }
+  _mm256_storeu_ps(out, accLo);
+  _mm256_storeu_ps(out + 8, accHi);
+}
+
+/**
+ * @brief Compute one 8-way squared distance slab against a transposed @c (d, W) candidate
+ *        layout with an explicit row stride @p W.
+ *
+ * Generalizes @ref sqEuclideanRowAgainst8Transposed to the L > 16 regime where the transposed
+ * pack keeps @c W = ceil(L/8) * 8 columns so chunked scoring can slide an 8-wide window across
+ * it. The row stride differs from the lane count, so the per-k load uses @c k * W rather than
+ * @c k * 8.
+ */
+inline void sqEuclideanRowAgainst8TransposedStrided(const float *x, const float *candData,
+                                                    std::size_t d, std::size_t rowStride,
+                                                    float *out) noexcept {
+  __m256 acc = _mm256_setzero_ps();
+  for (std::size_t k = 0; k < d; ++k) {
+    const __m256 cv = _mm256_loadu_ps(candData + (k * rowStride));
+    const __m256 xv = _mm256_set1_ps(x[k]);
+    const __m256 diff = _mm256_sub_ps(xv, cv);
+    acc = _mm256_fmadd_ps(diff, diff, acc);
+  }
+  _mm256_storeu_ps(out, acc);
+}
+
+/**
  * @brief Compute squared Euclidean distance from one @p x row to @p L candidate rows in
  *        parallel using @p L independent AVX2 accumulators.
  *
@@ -287,22 +349,24 @@ inline void sqEuclideanRowToBatch(const T *x, const T *candData, std::size_t L, 
  * The solver owns one instance across @c run() calls so the candidate-row pack, the per-(point,
  * candidate) score plane and the inverse CDF scratch are not reallocated at the same shape
  * tuple. Sized lazily by @ref ensureGreedyKmppScratchShape; callers outside the solver should
- * size @c candRows to @c (greedyKmppLocalTrials(k), d), @c candRowsT to @c (d, 8),
- * @c candDistSq to @c (n, 8), and @c cumDistSq to length @c n before calling
- * @ref seedGreedyKMeansPlusPlus.
+ * size @c candRows to @c (greedyKmppLocalTrials(k), d), @c candRowsT to
+ * @c (d, greedyKmppTransposedWidth(L)), @c candDistSq to @c (n, greedyKmppTransposedWidth(L)),
+ * and @c cumDistSq to length @c n before calling @ref seedGreedyKMeansPlusPlus.
  */
 template <class T> struct GreedyKmppScratch {
   /// Packed candidate rows for one outer iteration: shape @c (L, d) where
   /// @c L = greedyKmppLocalTrials(k). Reused across all @c k-1 outer picks within one fit.
   NDArray<T, 2, Layout::Contig> candRows;
-  /// Transposed candidate rows: shape @c (d, 8). Padded to a fixed 8-wide YMM lane regardless of
-  /// the true @p L (lanes past L hold infinity so they cannot win the score). Used by the
-  /// transposed scoring kernel on the d < 8 hot path; ignored when the row-batched kernel is
-  /// the better choice.
+  /// Transposed candidate rows: shape @c (d, W) where
+  /// @c W = greedyKmppTransposedWidth(L). Padded to a multiple of the 8-wide YMM lane so the
+  /// transposed kernel iterates over fixed-width chunks; lanes past @p L are zero-filled and
+  /// the scoring loop reads only the first @p L lanes. Used by the transposed scoring kernel
+  /// on the @c d <= kAvx2Lanes hot path; ignored when the row-batched kernel is the better
+  /// choice.
   NDArray<T, 2, Layout::Contig> candRowsT;
-  /// Per-outer-iteration cache of candidate distances: shape @c (n, 8). Lets the commit step
-  /// pick out the winner column without re-scanning x against the winner centroid -- saves an
-  /// O(n*d) pass per outer pick.
+  /// Per-outer-iteration cache of candidate distances: shape @c (n, W) matching the transposed
+  /// pack. Lets the commit step pick out the winner column without re-scanning x against the
+  /// winner centroid -- saves an O(n*d) pass per outer pick.
   NDArray<T, 2, Layout::Contig> candDistSq;
   /// Per-outer-iteration prefix sum of @c minSq, length @c n. Refreshed once per outer pick;
   /// the L candidate draws then run @c log(n) binary search instead of an @c L*n linear scan.
@@ -320,14 +384,15 @@ template <class T> struct GreedyKmppScratch {
 template <class T>
 inline void ensureGreedyKmppScratchShape(GreedyKmppScratch<T> &scratch, std::size_t L,
                                          std::size_t d, std::size_t n) {
+  const std::size_t w = greedyKmppTransposedWidth(L == 0 ? std::size_t{1} : L);
   if (scratch.candRows.dim(0) != L || scratch.candRows.dim(1) != d) {
     scratch.candRows = NDArray<T, 2, Layout::Contig>({L, d});
   }
-  if (scratch.candRowsT.dim(0) != d || scratch.candRowsT.dim(1) != 8) {
-    scratch.candRowsT = NDArray<T, 2, Layout::Contig>({d == 0 ? std::size_t{1} : d, 8});
+  if (scratch.candRowsT.dim(0) != d || scratch.candRowsT.dim(1) != w) {
+    scratch.candRowsT = NDArray<T, 2, Layout::Contig>({d == 0 ? std::size_t{1} : d, w});
   }
-  if (scratch.candDistSq.dim(0) != n || scratch.candDistSq.dim(1) != 8) {
-    scratch.candDistSq = NDArray<T, 2, Layout::Contig>({n == 0 ? std::size_t{1} : n, 8});
+  if (scratch.candDistSq.dim(0) != n || scratch.candDistSq.dim(1) != w) {
+    scratch.candDistSq = NDArray<T, 2, Layout::Contig>({n == 0 ? std::size_t{1} : n, w});
   }
   if (scratch.cumDistSq.dim(0) != n) {
     scratch.cumDistSq = NDArray<T, 1>({n});
@@ -386,10 +451,10 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
   CLUSTERING_ALWAYS_ASSERT(scratch.candRows.dim(1) == d);
   CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.isMutable());
   CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.dim(0) >= d);
-  CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.dim(1) >= 8);
+  CLUSTERING_ALWAYS_ASSERT(scratch.candRowsT.dim(1) >= greedyKmppTransposedWidth(nLocalTrials));
   CLUSTERING_ALWAYS_ASSERT(scratch.candDistSq.isMutable());
   CLUSTERING_ALWAYS_ASSERT(scratch.candDistSq.dim(0) >= n);
-  CLUSTERING_ALWAYS_ASSERT(scratch.candDistSq.dim(1) >= 8);
+  CLUSTERING_ALWAYS_ASSERT(scratch.candDistSq.dim(1) >= greedyKmppTransposedWidth(nLocalTrials));
   CLUSTERING_ALWAYS_ASSERT(scratch.cumDistSq.isMutable());
   CLUSTERING_ALWAYS_ASSERT(scratch.cumDistSq.dim(0) >= n);
   CLUSTERING_ALWAYS_ASSERT(k >= 1);
@@ -488,34 +553,86 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
     std::array<T, kMaxLocalTrials> distRow{};
     CLUSTERING_ALWAYS_ASSERT(nLocalTrials <= distRow.size());
 
+    const std::size_t transposedWidth = greedyKmppTransposedWidth(nLocalTrials);
     bool scoredViaTransposed = false;
 #ifdef CLUSTERING_USE_AVX2
     // Low-d hot path: at d <= kAvx2Lanes the (L, d) row-batched kernel either falls into the
     // scalar K-tail (d < 8) or pays @c L horizontal-sum reductions for one K-iter of work
-    // (d == 8). The transposed (d, 8) layout puts the same-feature components of all 8
-    // candidates in one YMM register, so each broadcast-of-x[k] + FMA folds 8 distances at
-    // once -- @c d SIMD FMAs per row plus a single store, replacing @c L hadd reductions.
+    // (d == 8). The transposed @c (d, W) layout with @c W = ceil(L/8)*8 puts the same-feature
+    // components of every candidate in consecutive 8-lane YMM registers, so each
+    // @c broadcast-of-x[k] + FMA pair folds 8 (or 16, for the 16-lane unroll) distances at
+    // once -- @c d SIMD FMAs per row plus one store per 8-lane chunk, replacing the row-batched
+    // path's @c L horizontal-sum reductions.
     if constexpr (std::is_same_v<T, float>) {
       if (d > 0 && d <= math::detail::kAvx2Lanes<float>) {
-        // Transpose the (L, d) candidate pack into a (d, 8) layout. Lanes past nLocalTrials are
+        // Transpose the (L, d) candidate pack into a (d, W) layout. Lanes past nLocalTrials are
         // zeroed; the score loop only reads the first nLocalTrials lanes so the fill value does
-        // not matter for correctness.
+        // not matter for correctness, but zeroing keeps the padded distances at whatever an
+        // x-to-zero-row squared distance yields -- ignored downstream, still deterministic.
         for (std::size_t kk = 0; kk < d; ++kk) {
-          float *dstK = candRowsTData + (kk * 8);
+          float *dstK = candRowsTData + (kk * transposedWidth);
           for (std::size_t t = 0; t < nLocalTrials; ++t) {
             dstK[t] = candRowsData[(t * d) + kk];
           }
-          for (std::size_t t = nLocalTrials; t < 8; ++t) {
+          for (std::size_t t = nLocalTrials; t < transposedWidth; ++t) {
             dstK[t] = 0.0F;
           }
         }
-        for (std::size_t i = 0; i < n; ++i) {
-          const float *xi = xData + (i * d);
-          const float mi = minSq[i];
-          float *dstRow = candDistSqData + (i * 8);
-          sqEuclideanRowAgainst8Transposed(xi, candRowsTData, d, dstRow);
+        // L in (8, 16] is the common k >= 256 regime (L = 2 + ln(k) in [8.5, 9.2] for
+        // k in [256, 10000]). The 16-lane unroll folds two 8-chunks per x[k] broadcast so the
+        // d <= 8 hot loop bottleneck at the k=512/1000 corners drops to d SIMD-pair FMAs per
+        // row versus two independent 8-chunk passes. Scores accumulate into per-chunk YMM
+        // registers so the per-row @c min(dist, mi) + sum is 2 SIMD ops instead of 16 scalar
+        // branches -- the load-bearing tweak that unblocks seeding at @c k >= 512.
+        if (transposedWidth == 16) {
+          __m256 scoresLoAcc = _mm256_setzero_ps();
+          __m256 scoresHiAcc = _mm256_setzero_ps();
+          for (std::size_t i = 0; i < n; ++i) {
+            const float *xi = xData + (i * d);
+            const __m256 miVec = _mm256_set1_ps(minSq[i]);
+            float *dstRow = candDistSqData + (i * transposedWidth);
+            sqEuclideanRowAgainst16Transposed(xi, candRowsTData, d, dstRow);
+            const __m256 dLo = _mm256_loadu_ps(dstRow);
+            const __m256 dHi = _mm256_loadu_ps(dstRow + 8);
+            scoresLoAcc = _mm256_add_ps(scoresLoAcc, _mm256_min_ps(dLo, miVec));
+            scoresHiAcc = _mm256_add_ps(scoresHiAcc, _mm256_min_ps(dHi, miVec));
+          }
+          std::array<float, 16> tmp{};
+          _mm256_storeu_ps(tmp.data(), scoresLoAcc);
+          _mm256_storeu_ps(tmp.data() + 8, scoresHiAcc);
           for (std::size_t t = 0; t < nLocalTrials; ++t) {
-            scores[t] += (dstRow[t] < mi) ? dstRow[t] : mi;
+            scores[t] = tmp[t];
+          }
+        } else if (transposedWidth == 8) {
+          __m256 scoresAcc = _mm256_setzero_ps();
+          for (std::size_t i = 0; i < n; ++i) {
+            const float *xi = xData + (i * d);
+            const __m256 miVec = _mm256_set1_ps(minSq[i]);
+            float *dstRow = candDistSqData + (i * transposedWidth);
+            sqEuclideanRowAgainst8Transposed(xi, candRowsTData, d, dstRow);
+            const __m256 dv = _mm256_loadu_ps(dstRow);
+            scoresAcc = _mm256_add_ps(scoresAcc, _mm256_min_ps(dv, miVec));
+          }
+          std::array<float, 8> tmp{};
+          _mm256_storeu_ps(tmp.data(), scoresAcc);
+          for (std::size_t t = 0; t < nLocalTrials; ++t) {
+            scores[t] = tmp[t];
+          }
+        } else {
+          // Generic chunked path for L > 16 (very high k). Walk the transposed layout 8 lanes
+          // at a time so each chunk stays on the fully unrolled 8-wide kernel, re-indexing with
+          // the true row stride because the contiguous-row form reads @c k * 8.
+          for (std::size_t i = 0; i < n; ++i) {
+            const float *xi = xData + (i * d);
+            const float mi = minSq[i];
+            float *dstRow = candDistSqData + (i * transposedWidth);
+            for (std::size_t base = 0; base < transposedWidth; base += 8) {
+              sqEuclideanRowAgainst8TransposedStrided(xi, candRowsTData + base, d, transposedWidth,
+                                                      dstRow + base);
+            }
+            for (std::size_t t = 0; t < nLocalTrials; ++t) {
+              scores[t] += (dstRow[t] < mi) ? dstRow[t] : mi;
+            }
           }
         }
         scoredViaTransposed = true;
@@ -533,7 +650,7 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
         const T *xi = xData + (i * d);
         const T mi = minSq[i];
         sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d, distRow.data());
-        T *dstRow = candDistSqData + (i * 8);
+        T *dstRow = candDistSqData + (i * transposedWidth);
         for (std::size_t t = 0; t < nLocalTrials; ++t) {
           dstRow[t] = distRow[t];
           scores[t] += (distRow[t] < mi) ? distRow[t] : mi;
@@ -557,7 +674,7 @@ void seedGreedyKMeansPlusPlus(const NDArray<T, 2, Layout::Contig> &X,
     const T *winnerRow = xData + (bestCandidate * d);
     std::memcpy(centroidsData + (c * d), winnerRow, d * sizeof(T));
     for (std::size_t i = 0; i < n; ++i) {
-      const T cand = candDistSqData[(i * 8) + bestT];
+      const T cand = candDistSqData[(i * transposedWidth) + bestT];
       if (cand < minSq[i]) {
         minSq[i] = cand;
       }

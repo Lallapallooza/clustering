@@ -15,8 +15,6 @@
 #include "clustering/kmeans/detail/lloyd_fused.h"
 #include "clustering/kmeans/detail/seed_afkmc2.h"
 #include "clustering/kmeans/detail/seed_greedy_kmpp.h"
-#include "clustering/kmeans/detail/yinyang.h"
-#include "clustering/kmeans/detail/yinyang_bounds.h"
 #include "clustering/math/defaults.h"
 #include "clustering/math/detail/gemm_outer.h"
 #include "clustering/math/detail/pairwise_argmin_outer.h"
@@ -85,17 +83,13 @@ public:
     // what ran even when the override forced a different path.
     const Algorithm autoAlgo = chooseAlgorithm(n, d, k);
     const Seeder autoSeeder = chooseSeeder(n, k);
-    const Algorithm algo = algoOverride.value_or(autoAlgo);
-    const Seeder seeder = seederOverride.value_or(autoSeeder);
+    Algorithm algo = algoOverride.value_or(autoAlgo);
+    Seeder seeder = seederOverride.value_or(autoSeeder);
 
-    Seeder seeder;
-    if (seederOverride.has_value()) {
-      seeder = *seederOverride;
-      const bool implemented = seeder == Seeder::kGreedyKMeansPlusPlus || seeder == Seeder::kAfkMc2;
-      CLUSTERING_ALWAYS_ASSERT(implemented);
-    } else {
-      seeder = chooseSeeder(n, k);
-    }
+    CLUSTERING_ALWAYS_ASSERT(algo == Algorithm::kLloydFusedGemm);
+    const bool seederImplemented =
+        seeder == Seeder::kGreedyKMeansPlusPlus || seeder == Seeder::kAfkMc2;
+    CLUSTERING_ALWAYS_ASSERT(seederImplemented);
 
     // AFK-MC2's MCMC approximation guarantee degrades at small k; below @c afkmc2KFloor the
     // greedy k-means++ variant is cheaper and higher quality. The fallback is observable via
@@ -107,8 +101,8 @@ public:
     m_lastAlgorithm = algo;
     m_lastSeeder = seeder;
 
-    // Seed. Both seeders populate @c m_centroids; the downstream Lloyd / Yinyang drivers run
-    // their own assignment sweep before reading @c m_minDistSq, so AFK-MC2 deliberately skips
+    // Seed. Both seeders populate @c m_centroids; the downstream Lloyd driver runs its own
+    // assignment sweep before reading @c m_minDistSq, so AFK-MC2 deliberately skips
     // the per-point distance prime that greedy-kmpp produces as a side-effect.
     if (seeder == Seeder::kAfkMc2) {
       ensureAfkMc2ScratchShape<T>(m_afkmc2Scratch, n);
@@ -119,30 +113,13 @@ public:
       seedGreedyKMeansPlusPlus<T>(X, m_centroids, m_minDistSq, m_greedyKmppScratch, seed, pool);
     }
 
-    // Drive the selected solver.
+    // Drive Lloyd.
     const LloydScratch<T> scratch{
         &m_centroids,     &m_centroidsOld, &m_cSqNorms, &m_sums,           &m_counts,
         &m_labels,        &m_minDistSq,    &m_shiftSq,  &m_partialSums,    &m_partialComps,
         &m_partialCounts, &m_foldComp,     &m_packedB,  &m_packedCSqNorms, &m_distsChunk,
         &m_gemmApArena,   &m_xChunkNormsSq};
-
-    std::size_t iter = 0;
-    bool converged = false;
-    m_lastYinyangStats = YinyangRunStats{};
-    if (algo == Algorithm::kYinyang) {
-      const std::size_t t = yinyangGroupCount(k);
-      ensureBoundsShape<T>(m_yinyangBounds, n, k, t);
-      ensurePlanShape<T>(m_yinyangPlan, k, d, t);
-      const YinyangScratch<T> yinyang{&m_yinyangBounds, &m_yinyangPlan};
-      const auto [it, conv] =
-          runYinyang<T>(X, scratch, yinyang, k, maxIter, tol, pool, m_lastYinyangStats);
-      iter = it;
-      converged = conv;
-    } else {
-      const auto [it, conv] = runLloydFused<T>(X, scratch, k, maxIter, tol, pool);
-      iter = it;
-      converged = conv;
-    }
+    const auto [iter, converged] = runLloydFused<T>(X, scratch, k, maxIter, tol, pool);
     m_nIter = iter;
     m_converged = converged;
 
@@ -180,9 +157,6 @@ public:
     m_distsChunk = NDArray<T, 2, Layout::Contig>({0, 0});
     m_gemmApArena = NDArray<T, 1>({0});
     m_xChunkNormsSq = NDArray<T, 1>({0});
-    m_yinyangBounds = YinyangBounds<T>{};
-    m_yinyangPlan = YinyangPlan<T>{};
-    m_lastYinyangStats = YinyangRunStats{};
     m_afkmc2Scratch = AfkMc2Scratch<T>{};
     m_greedyKmppScratch = GreedyKmppScratch<T>{};
     m_n = 0;
@@ -279,9 +253,6 @@ private:
   NDArray<T, 1> m_gemmApArena;
   NDArray<T, 1> m_xChunkNormsSq;
 
-  YinyangBounds<T> m_yinyangBounds;
-  YinyangPlan<T> m_yinyangPlan;
-  YinyangRunStats m_lastYinyangStats{};
   AfkMc2Scratch<T> m_afkmc2Scratch{};
   GreedyKmppScratch<T> m_greedyKmppScratch{};
 
