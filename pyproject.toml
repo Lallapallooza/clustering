@@ -10,6 +10,7 @@ dependencies = [
     "numpy",
     "scikit-learn",
     "matplotlib",
+    "memray>=1.14",
 ]
 
 [project.scripts]
