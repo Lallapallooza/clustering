@@ -23,24 +23,11 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++-13
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-13 -DCLUSTERING_ENABLE_CLANG_TIDY=OFF
-      - name: Build
-        run: cmake --build build
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-
-  tidy:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install toolchain
-        run: |
-          sudo apt-get update
           sudo apt-get install -y cmake ninja-build clang-18 clang-tidy-18 libstdc++-13-dev
           sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-18 -DCLUSTERING_ENABLE_CLANG_TIDY=ON
-      - name: Build (with clang-tidy)
+      - name: Build
         run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
