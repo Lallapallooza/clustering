@@ -24,6 +24,37 @@
 
 namespace clustering::kmeans::detail {
 
+struct BlockPartition {
+  std::size_t first_index = 0;
+  std::size_t block_size = 0;
+  std::size_t remainder = 0;
+  std::size_t num_blocks = 0;
+
+  BlockPartition(std::size_t first, std::size_t n, std::size_t desired) noexcept
+      : first_index(first) {
+    if (n == 0 || desired == 0) {
+      num_blocks = 0;
+      return;
+    }
+    num_blocks = std::min(desired, n);
+    block_size = n / num_blocks;
+    remainder = n % num_blocks;
+    if (block_size == 0) {
+      block_size = 1;
+      num_blocks = n;
+    }
+  }
+
+  [[nodiscard]] std::size_t blockIndexOf(std::size_t lo) const noexcept {
+    const std::size_t rel = lo - first_index;
+    const std::size_t big = remainder * (block_size + 1);
+    if (rel < big) {
+      return rel / (block_size + 1);
+    }
+    return remainder + ((rel - big) / block_size);
+  }
+};
+
 /**
  * @brief Contiguous views over scratch owned by @c Solver<T>.
  *
@@ -266,7 +297,7 @@ void scatterAndFoldPlain(const NDArray<T, 2, Layout::Contig> &X, const LloydScra
 
   const bool willParallelize = pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr;
   const std::size_t desiredBlocks = willParallelize ? pool.workerCount() : std::size_t{1};
-  const math::detail::BlockPartition part(0, n, desiredBlocks);
+  const BlockPartition part(0, n, desiredBlocks);
   const std::size_t numBlocks = part.num_blocks == 0 ? std::size_t{1} : part.num_blocks;
 
   // Zero the per-block tiles we intend to use this pass. The slab is sized at shape-change
@@ -362,7 +393,7 @@ void scatterAndFoldKahan(const NDArray<T, 2, Layout::Contig> &X, const LloydScra
 
   const bool willParallelize = pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr;
   const std::size_t desiredBlocks = willParallelize ? pool.workerCount() : std::size_t{1};
-  const math::detail::BlockPartition part(0, n, desiredBlocks);
+  const BlockPartition part(0, n, desiredBlocks);
   const std::size_t numBlocks = part.num_blocks == 0 ? std::size_t{1} : part.num_blocks;
 
   for (std::size_t b = 0; b < numBlocks; ++b) {

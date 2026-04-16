@@ -83,7 +83,7 @@ public:
     // what ran even when the override forced a different path.
     const Algorithm autoAlgo = chooseAlgorithm(n, d, k);
     const Seeder autoSeeder = chooseSeeder(n, k);
-    Algorithm algo = algoOverride.value_or(autoAlgo);
+    const Algorithm algo = algoOverride.value_or(autoAlgo);
     Seeder seeder = seederOverride.value_or(autoSeeder);
 
     CLUSTERING_ALWAYS_ASSERT(algo == Algorithm::kLloydFusedGemm);
