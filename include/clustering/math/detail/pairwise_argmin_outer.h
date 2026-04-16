@@ -395,9 +395,12 @@ inline void pairwiseArgminDirectSmallDF32(const NDArray<float, 2, Layout::Contig
                                           NDArray<std::int32_t, 1> &labels,
                                           NDArray<float, 1> &outMinSq, Pool pool) noexcept {
   constexpr std::size_t kMr = 8;
+  constexpr std::size_t kMaxD = 8;
   const std::size_t n = X.dim(0);
   const std::size_t k = C.dim(0);
   const std::size_t d = X.dim(1);
+  CLUSTERING_ALWAYS_ASSERT(d >= 1);
+  CLUSTERING_ALWAYS_ASSERT(d <= kMaxD);
 
   const float *xData = X.data();
   const float *cData = C.data();
