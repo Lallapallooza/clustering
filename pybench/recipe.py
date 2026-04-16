@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import numpy as np
 
@@ -13,6 +13,17 @@ class DatasetSpec:
     center_box: tuple[float, float] = (-150.0, 150.0)
     cluster_std: float = 3.0
     random_state: int = 42
+    # Above this dim, switch from isotropic Gaussian blobs to a vMF mixture on
+    # the unit sphere. Real embeddings (SBERT, CLIP, etc.) are unit-normalized
+    # with intrinsic dim << ambient dim, and isotropic blobs at high ambient
+    # dim degenerate to ring-shell noise where DBSCAN with fixed eps finds no
+    # clusters. Switch threshold 16 matches sklearn's NearestNeighbors
+    # auto-brute-force cut-off at n_features > 15.
+    vmf_switch_dim: int = 16
+    vmf_kappa: float = 20.0
+
+
+EpsPolicy = Literal["fixed", "sqrt_d", "knee"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +39,12 @@ class Recipe:
     ari_threshold: float = 0.85
     n_runs: int = 5
     tags: tuple[str, ...] = ()
+    # How to derive the actual eps passed to ours/theirs from default_params.
+    # "fixed" uses default_params["eps"] verbatim; "sqrt_d" scales it by
+    # sqrt(d / 2) so isotropic blob clusters stay connectable at high dim;
+    # "knee" replaces it with the k-distance knee (Ester 1996 + Satopaa
+    # 2011) computed on the generated fixture.
+    eps_policy: EpsPolicy = "fixed"
 
 
 @dataclass(frozen=True)
@@ -45,3 +62,7 @@ class RunResult:
     theirs_noise_frac: float
     speedup: float
     timestamp: str
+    # Params actually passed to ours/theirs after eps policy + data generation
+    # (e.g. computed knee eps). Equal to `params` for fixed-eps recipes.
+    # Optional on legacy JSONs, which hydrate with an empty dict.
+    effective_params: dict[str, Any] = field(default_factory=dict)

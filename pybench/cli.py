@@ -208,11 +208,15 @@ def _run_live(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
                     )
                     result = run_one(recipe, size, dims=dim, params=params)
                     status = "PASS" if result.ari >= recipe.ari_threshold else "FAIL"
+                    eps_info = ""
+                    if "eps" in result.effective_params:
+                        eps_info = f" eps={result.effective_params['eps']:.2f}"
                     print(
                         f"ari={result.ari:.2f} ({status})"
                         f"  {result.speedup:.1f}x"
                         f"  {result.ours_median_ms:.1f}ms vs {result.theirs_median_ms:.1f}ms"
                         f"  mem: {result.ours_peak_mb:.1f}MB vs {result.theirs_peak_mb:.1f}MB"
+                        f"{eps_info}"
                     )
                     all_results.append(result)
 

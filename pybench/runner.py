@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import itertools
+import math
+import os
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -11,14 +13,17 @@ from typing import Any, Callable
 import memray
 import numpy as np
 import sklearn.cluster
+from kneed import KneeLocator
+from scipy.stats import vonmises_fisher
 from sklearn.datasets import make_blobs
 from sklearn.metrics import adjusted_rand_score
+from sklearn.neighbors import NearestNeighbors
+from threadpoolctl import threadpool_limits
 
-from pybench.recipe import DatasetSpec, Recipe, RunResult
+from pybench.recipe import DatasetSpec, EpsPolicy, Recipe, RunResult
 
 
-def make_data(n_samples: int, spec: DatasetSpec) -> np.ndarray:
-    """Generate reproducible float32 dataset from spec."""
+def _make_blobs(n_samples: int, spec: DatasetSpec) -> np.ndarray:
     X, _ = make_blobs(
         n_samples=n_samples,
         n_features=spec.n_features,
@@ -30,8 +35,82 @@ def make_data(n_samples: int, spec: DatasetSpec) -> np.ndarray:
     return X.astype(np.float32)
 
 
+def _make_vmf(n_samples: int, spec: DatasetSpec) -> np.ndarray:
+    rng = np.random.default_rng(spec.random_state)
+    raw = rng.normal(size=(spec.centers, spec.n_features))
+    mus = raw / np.linalg.norm(raw, axis=1, keepdims=True)
+    per = n_samples // spec.centers
+    remainder = n_samples - per * spec.centers
+    sizes = np.full(spec.centers, per, dtype=np.int64)
+    sizes[:remainder] += 1
+    out = np.empty((n_samples, spec.n_features), dtype=np.float32)
+    offset = 0
+    for mu, n_k in zip(mus, sizes, strict=True):
+        dist = vonmises_fisher(mu=mu, kappa=spec.vmf_kappa, seed=rng)
+        out[offset : offset + n_k] = dist.rvs(size=int(n_k)).astype(np.float32)
+        offset += n_k
+    return out
+
+
+def make_data(n_samples: int, spec: DatasetSpec) -> np.ndarray:
+    """Reproducible float32 dataset. Branches to vMF above vmf_switch_dim."""
+    if spec.n_features > spec.vmf_switch_dim:
+        return _make_vmf(n_samples, spec)
+    return _make_blobs(n_samples, spec)
+
+
+def _knee_eps(data: np.ndarray, k: int) -> float:
+    """k-distance knee per Ester 1996 + Satopää 2011 Kneedle."""
+    nn = NearestNeighbors(n_neighbors=max(2, k))
+    nn.fit(data)
+    distances, _ = nn.kneighbors(data)
+    k_dists = np.sort(distances[:, -1])
+    finite = k_dists[np.isfinite(k_dists)]
+    if finite.size < 3:
+        return float(np.median(k_dists)) if k_dists.size else 1.0
+    xs = np.arange(finite.size)
+    knee = KneeLocator(xs, finite, curve="convex", direction="increasing")
+    if knee.knee is None:
+        return float(np.median(finite))
+    return float(finite[int(knee.knee)])
+
+
+def _resolve_eps(
+    policy: EpsPolicy, base_eps: float, data: np.ndarray, min_samples: int
+) -> float:
+    if policy == "fixed":
+        return base_eps
+    if policy == "sqrt_d":
+        d = max(1, data.shape[1])
+        return base_eps * math.sqrt(d / 2.0)
+    if policy == "knee":
+        return _knee_eps(data, min_samples)
+    raise ValueError(f"unknown eps_policy: {policy!r}")
+
+
+def _prepare_params(
+    recipe: Recipe, data: np.ndarray, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply the recipe's eps policy. Returns a new dict; input untouched."""
+    if "eps" not in params or recipe.eps_policy == "fixed":
+        return dict(params)
+    min_samples = int(params.get("min_samples", 5))
+    eps_eff = _resolve_eps(recipe.eps_policy, float(params["eps"]), data, min_samples)
+    return {**params, "eps": eps_eff}
+
+
+def _blas_limit_for(n_jobs: Any) -> int:
+    if n_jobs in (None, -1):
+        return os.cpu_count() or 1
+    try:
+        requested = int(n_jobs)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, requested)
+
+
 def make_sklearn_reference(algo_name: str) -> Callable:
-    """Auto-construct a sklearn reference callable by algorithm name."""
+    """sklearn reference callable with BLAS thread count scoped to n_jobs."""
     class_name = (
         algo_name.upper()
         if algo_name.upper() in ("DBSCAN", "OPTICS")
@@ -44,8 +123,10 @@ def make_sklearn_reference(algo_name: str) -> Callable:
         raise ValueError(f"No sklearn.cluster class found for algorithm '{algo_name}'")
 
     def reference(data: np.ndarray, **params: Any) -> np.ndarray:
-        model = cls(**params)
-        labels = model.fit_predict(data)
+        limit = _blas_limit_for(params.get("n_jobs"))
+        with threadpool_limits(limits=limit, user_api="blas"):
+            model = cls(**params)
+            labels = model.fit_predict(data)
         return labels.astype(np.int32)
 
     return reference
@@ -118,24 +199,25 @@ def run_one(
     if theirs_fn is None:
         theirs_fn = make_sklearn_reference(recipe.name)
 
+    effective = _prepare_params(recipe, data, params)
+
     ours_times: list[float] = []
     theirs_times: list[float] = []
 
     for _ in range(recipe.n_runs):
         t0 = time.perf_counter()
-        result_ours = recipe.ours(data, **params)
+        result_ours = recipe.ours(data, **effective)
         ours_times.append(time.perf_counter() - t0)
 
         t0 = time.perf_counter()
-        result_theirs = theirs_fn(data, **params)
+        result_theirs = theirs_fn(data, **effective)
         theirs_times.append(time.perf_counter() - t0)
 
     ours_labels = result_ours
     theirs_labels = result_theirs
 
-    # Measure peak RSS delta for one run of each (captures C++ allocations too)
-    ours_peak_mb = _measure_peak_rss_mb(recipe.ours, data, params)
-    theirs_peak_mb = _measure_peak_rss_mb(theirs_fn, data, params)
+    ours_peak_mb = _measure_peak_rss_mb(recipe.ours, data, effective)
+    theirs_peak_mb = _measure_peak_rss_mb(theirs_fn, data, effective)
 
     ours_median_ms = median(ours_times) * 1000.0
     theirs_median_ms = median(theirs_times) * 1000.0
@@ -150,6 +232,7 @@ def run_one(
         size=size,
         dims=dataset.n_features,
         params=params,
+        effective_params=effective,
         ours_median_ms=ours_median_ms,
         theirs_median_ms=theirs_median_ms,
         ours_peak_mb=round(ours_peak_mb, 2),
