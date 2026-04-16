@@ -99,7 +99,7 @@ def _prepare_params(
     return {**params, "eps": eps_eff}
 
 
-def _blas_limit_for(n_jobs: Any) -> int:
+def _thread_limit_for(n_jobs: Any) -> int:
     if n_jobs in (None, -1):
         return os.cpu_count() or 1
     try:
@@ -110,7 +110,6 @@ def _blas_limit_for(n_jobs: Any) -> int:
 
 
 def make_sklearn_reference(algo_name: str) -> Callable:
-    """sklearn reference callable with BLAS thread count scoped to n_jobs."""
     class_name = (
         algo_name.upper()
         if algo_name.upper() in ("DBSCAN", "OPTICS")
@@ -123,8 +122,11 @@ def make_sklearn_reference(algo_name: str) -> Callable:
         raise ValueError(f"No sklearn.cluster class found for algorithm '{algo_name}'")
 
     def reference(data: np.ndarray, **params: Any) -> np.ndarray:
-        limit = _blas_limit_for(params.get("n_jobs"))
-        with threadpool_limits(limits=limit, user_api="blas"):
+        # Scope BLAS and OpenMP together. sklearn KMeans uses OpenMP via
+        # Cython; pairwise distance paths at high dim go through BLAS.
+        # Limiting only one leaves the other to grab every core.
+        limit = _thread_limit_for(params.get("n_jobs"))
+        with threadpool_limits(limits=limit):
             model = cls(**params)
             labels = model.fit_predict(data)
         return labels.astype(np.int32)

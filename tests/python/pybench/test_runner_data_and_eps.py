@@ -6,7 +6,7 @@ import numpy as np
 
 from pybench.recipe import DatasetSpec, Recipe
 from pybench.runner import (
-    _blas_limit_for,
+    _thread_limit_for,
     _knee_eps,
     _prepare_params,
     _resolve_eps,
@@ -93,27 +93,27 @@ def test_prepare_params_without_eps_key_is_passthrough() -> None:
     assert _prepare_params(recipe, data, params) == params
 
 
-def test_blas_limit_for_negative_uses_cpu_count() -> None:
+def test_thread_limit_for_negative_uses_cpu_count() -> None:
     import os
 
-    assert _blas_limit_for(-1) == (os.cpu_count() or 1)
-    assert _blas_limit_for(None) == (os.cpu_count() or 1)
+    assert _thread_limit_for(-1) == (os.cpu_count() or 1)
+    assert _thread_limit_for(None) == (os.cpu_count() or 1)
 
 
-def test_blas_limit_for_positive() -> None:
-    assert _blas_limit_for(4) == 4
-    assert _blas_limit_for(1) == 1
-    assert _blas_limit_for(0) == 1
+def test_thread_limit_for_positive() -> None:
+    assert _thread_limit_for(4) == 4
+    assert _thread_limit_for(1) == 1
+    assert _thread_limit_for(0) == 1
 
 
-def test_blas_limit_for_handles_garbage() -> None:
-    assert _blas_limit_for("abc") == 1
+def test_thread_limit_for_handles_garbage() -> None:
+    assert _thread_limit_for("abc") == 1
 
 
 def test_sklearn_reference_honors_blas_limit_in_context() -> None:
     # The reference callable must not crash when invoked with n_jobs; we only
-    # verify it runs and returns integer labels of the right shape -- the
-    # threadpool_limits context manager resets on exit.
+    # verify it runs and returns integer labels of the right shape.
+    # threadpool_limits is a context manager; it resets the limits on exit.
     ref = make_sklearn_reference("dbscan")
     rng = np.random.default_rng(0)
     data = rng.normal(size=(200, 2)).astype(np.float32) * 3.0
