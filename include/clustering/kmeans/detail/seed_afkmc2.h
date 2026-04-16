@@ -63,7 +63,7 @@ template <class T> inline void ensureAfkMc2ScratchShape(AfkMc2Scratch<T> &scratc
  * Degenerate guard: when all points coincide with the first centroid (@c sum_D2 == 0) the
  * proposal collapses to uniform @c q(i) = 1/n so the chain still makes progress.
  *
- * @tparam T Element type (@c float for V1).
+ * @tparam T Element type; @c float only.
  * @param X            Data matrix (n x d), contiguous.
  * @param k            Number of centroids to seed.
  * @param m            Markov chain length per centroid. Default 200 at the solver level.

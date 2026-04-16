@@ -62,6 +62,12 @@ void BM_KMeansAuto_LowDMid(benchmark::State &s) { runKMeans(s, 10000, 4, 16, std
 void BM_KMeansAuto_MidDMid(benchmark::State &s) { runKMeans(s, 10000, 32, 32, std::nullopt); }
 void BM_KMeansAuto_HighKMid(benchmark::State &s) { runKMeans(s, 10000, 32, 256, std::nullopt); }
 void BM_KMeansAuto_HighKHigh(benchmark::State &s) { runKMeans(s, 50000, 32, 512, std::nullopt); }
+void BM_KMeansAuto_TinyLowD(benchmark::State &s) { runKMeans(s, 10000, 2, 8, std::nullopt); }
+void BM_KMeansAuto_TinyLowDK32(benchmark::State &s) { runKMeans(s, 10000, 2, 32, std::nullopt); }
+void BM_KMeansAuto_LowDK64(benchmark::State &s) { runKMeans(s, 10000, 4, 64, std::nullopt); }
+void BM_KMeansAuto_HighK20K(benchmark::State &s) { runKMeans(s, 20000, 8, 256, std::nullopt); }
+void BM_KMeansAuto_HighK30K(benchmark::State &s) { runKMeans(s, 30000, 4, 512, std::nullopt); }
+void BM_KMeansAuto_HighK50K(benchmark::State &s) { runKMeans(s, 50000, 4, 1000, std::nullopt); }
 
 } // namespace
 
@@ -70,5 +76,11 @@ BENCHMARK(BM_KMeansAuto_LowDMid)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_KMeansAuto_MidDMid)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_KMeansAuto_HighKMid)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_KMeansAuto_HighKHigh)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_KMeansAuto_TinyLowD)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_KMeansAuto_TinyLowDK32)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_KMeansAuto_LowDK64)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_KMeansAuto_HighK20K)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_KMeansAuto_HighK30K)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_KMeansAuto_HighK50K)->Unit(benchmark::kMillisecond)->UseRealTime();
 
 BENCHMARK_MAIN();
