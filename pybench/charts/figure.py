@@ -52,11 +52,10 @@ def _format_non_njobs_params(pairs: tuple[tuple[str, Any], ...]) -> str:
     return "+".join(f"{k}={v}" for k, v in pairs)
 
 
-def _meta_line(meta: RunMetadata, dataset_spec: str) -> str:
-    return (
-        f"{dataset_spec}  |  {meta.timestamp_iso}  |  "
-        f"git={meta.git_sha}  |  {meta.machine}"
-    )
+def _meta_lines(meta: RunMetadata, dataset_spec: str) -> tuple[str, str]:
+    top = f"{dataset_spec}  |  {meta.timestamp_iso}"
+    bot = f"git={meta.git_sha}  |  {meta.machine}"
+    return top, bot
 
 
 def _collect_line(
@@ -134,7 +133,7 @@ def _plot_one_axes(
         anchor_x = xs[last_finite_idx] if last_finite_idx is not None else xs[-1]
         anchor_y = ys[last_finite_idx] if last_finite_idx is not None else 1.0
         ax.annotate(
-            last_label,
+            f"n_jobs={nj}  {last_label}",
             xy=(anchor_x, anchor_y),
             xytext=(5, 0),
             textcoords="offset points",
@@ -187,13 +186,9 @@ def build_figure(inputs: BuildFigureInputs) -> Figure:
     param_summary = _format_non_njobs_params(inputs.non_njobs_params)
     suptitle = inputs.algo if not param_summary else f"{inputs.algo}   {param_summary}"
     fig.suptitle(suptitle)
-    fig.text(
-        0.5,
-        0.92,
-        _meta_line(inputs.title_meta, inputs.dataset_spec),
-        fontsize=8,
-        ha="center",
-    )
+    meta_top, meta_bot = _meta_lines(inputs.title_meta, inputs.dataset_spec)
+    fig.text(0.5, 0.935, meta_top, fontsize=7, ha="center")
+    fig.text(0.5, 0.905, meta_bot, fontsize=7, ha="center")
     if inputs.ari_threshold is not None:
         fig.text(
             0.99,
@@ -203,7 +198,7 @@ def build_figure(inputs: BuildFigureInputs) -> Figure:
             ha="right",
             va="bottom",
         )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.88))
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.87))
     return fig
 
 
