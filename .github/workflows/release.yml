@@ -56,7 +56,9 @@ jobs:
 
       - name: Push
         if: steps.bump.outputs.bumped == 'true'
-        run: git push origin main --follow-tags
+        run: |
+          git push origin main
+          git push origin "v$(cz version --project)"
 
       - name: Create GitHub release
         if: steps.bump.outputs.bumped == 'true'
