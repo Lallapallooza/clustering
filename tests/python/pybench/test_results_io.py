@@ -4,7 +4,6 @@ import json
 import math
 import re
 import subprocess
-import warnings
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -218,19 +217,19 @@ def test_save_results_rejects_inf(tmp_path: Path) -> None:
     assert "speedup" in str(exc.value)
 
 
-def test_load_results_legacy_bare_list_emits_warning_and_fills_unknown(
+def test_load_results_legacy_bare_list_prints_warning_and_fills_unknown(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     path = tmp_path / "results.json"
     original = _make_result()
     path.write_text(json.dumps([asdict(original)]), encoding="utf-8")
 
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
-        meta, loaded = load_results(path)
+    meta, loaded = load_results(path)
 
-    deprecations = [w for w in captured if issubclass(w.category, DeprecationWarning)]
-    assert len(deprecations) == 1
+    err = capsys.readouterr().err
+    assert "legacy bare-list" in err
+    assert str(path) in err
 
     assert meta.canonical_encoding_version == 0
     assert meta.timestamp_iso == "unknown"
@@ -251,15 +250,14 @@ def test_load_results_legacy_bare_list_rows_hydrate_without_remap(
     path = tmp_path / "legacy.json"
     path.write_text(json.dumps([asdict(r) for r in originals]), encoding="utf-8")
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        _, loaded = load_results(path)
+    _, loaded = load_results(path)
 
     assert loaded == originals
 
 
 def test_load_results_legacy_bare_list_from_existing_benchmark_file(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     src = Path(__file__).resolve().parents[3] / "benchmark_results" / "results.json"
     if not src.is_file():
@@ -267,12 +265,10 @@ def test_load_results_legacy_bare_list_from_existing_benchmark_file(
     copy = tmp_path / "results.json"
     copy.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
-        meta, loaded = load_results(copy)
+    meta, loaded = load_results(copy)
 
-    deprecations = [w for w in captured if issubclass(w.category, DeprecationWarning)]
-    assert len(deprecations) == 1
+    err = capsys.readouterr().err
+    assert "legacy bare-list" in err
     assert meta.canonical_encoding_version == 0
     assert all(isinstance(r, RunResult) for r in loaded)
     assert len(loaded) > 0

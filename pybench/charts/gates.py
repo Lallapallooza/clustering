@@ -49,6 +49,9 @@ def evaluate_gates(
         elif r.theirs_peak_mb <= 0:
             reasons.append(f"theirs_peak_mb={r.theirs_peak_mb!r} <= 0")
 
+        if not math.isfinite(r.speedup):
+            reasons.append(f"speedup={r.speedup!r} not finite")
+
         if reasons:
             failures.append(
                 GateFailure(

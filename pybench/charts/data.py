@@ -93,44 +93,62 @@ def safe_ratio(num: float, den: float) -> float:
     return num / den
 
 
-def canonical_results_payload(results: Sequence[RunResult]) -> str:
-    """Serialize results to a canonical JSON string.
+CANONICAL_JSON_OPTS = {
+    "sort_keys": True,
+    "indent": 2,
+    "ensure_ascii": True,
+    "allow_nan": False,
+}
 
-    Sorted keys, two-space indent, ASCII-only, rejects NaN/Inf. The
-    output is byte-stable across Python versions and OS platforms, which
-    is what makes hashing the payload a valid content address.
 
-    Raises ``ValueError`` with a clear message naming the first
-    offending field when ``allow_nan=False`` would reject the payload.
+def canonical_dumps(payload: Any, rows_for_error: list[dict[str, Any]] | None) -> str:
+    """Dump `payload` with canonical options; on NaN/Inf, name the offender.
+
+    `rows_for_error` is the sequence to scan for a nicer error -- pass the row
+    list if the payload itself is or contains one; pass None to just re-raise.
     """
-    payload = [asdict(r) for r in results]
     try:
-        return json.dumps(
-            payload,
-            sort_keys=True,
-            indent=2,
-            ensure_ascii=True,
-            allow_nan=False,
-        )
+        return json.dumps(payload, **CANONICAL_JSON_OPTS)
     except ValueError as exc:
-        offender = _find_non_finite(payload)
-        if offender is not None:
-            row_idx, field_name, value = offender
-            raise ValueError(
-                f"non-finite value {value!r} in results[{row_idx}]"
-                f".{field_name}; canonical payload forbids NaN/Inf"
-            ) from exc
-        raise
+        if rows_for_error is None:
+            raise
+        offender = _find_non_finite(rows_for_error)
+        if offender is None:
+            raise
+        row_idx, field_path, value = offender
+        raise ValueError(
+            f"non-finite value {value!r} in results[{row_idx}].{field_path}; "
+            "canonical payload forbids NaN/Inf"
+        ) from exc
+
+
+def canonical_results_payload(results: Sequence[RunResult]) -> str:
+    rows = [asdict(r) for r in results]
+    return canonical_dumps(rows, rows_for_error=rows)
 
 
 def _find_non_finite(
-    payload: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
 ) -> tuple[int, str, Any] | None:
-    """Locate the first non-finite float so the error message can name it."""
-    for idx, row in enumerate(payload):
-        for field_name, value in row.items():
-            if isinstance(value, float) and not math.isfinite(value):
-                return (idx, field_name, value)
+    for idx, row in enumerate(rows):
+        hit = _find_non_finite_in_mapping(row)
+        if hit is not None:
+            field_path, value = hit
+            return (idx, field_path, value)
+    return None
+
+
+def _find_non_finite_in_mapping(
+    mapping: dict[str, Any], prefix: str = ""
+) -> tuple[str, Any] | None:
+    for key, value in mapping.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, float) and not math.isfinite(value):
+            return (path, value)
+        if isinstance(value, dict):
+            hit = _find_non_finite_in_mapping(value, prefix=f"{path}.")
+            if hit is not None:
+                return hit
     return None
 
 
