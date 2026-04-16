@@ -30,7 +30,12 @@ recipe = Recipe(
     param_grid={"n_jobs": [1, 4, 16]},
     default_sizes=(5000, 10000, 50000, 100000),
     default_dims=(2, 8, 32, 128),
-    dataset=DatasetSpec(n_features=2, centers=16, cluster_std=3.0),
+    # KMeans' assumption is isotropic Euclidean Gaussians, so keep blobs at
+    # every dim. vMF-on-sphere collapses all pairwise distances into a narrow
+    # band, which is exactly the regime KMeans cannot resolve.
+    dataset=DatasetSpec(
+        n_features=2, centers=16, cluster_std=3.0, vmf_switch_dim=1_000_000
+    ),
     ari_threshold=0.85,
     n_runs=3,
     tags=("centroid", "kmeans"),

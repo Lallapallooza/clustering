@@ -20,6 +20,10 @@ class DatasetSpec:
     # clusters. Switch threshold 16 matches sklearn's NearestNeighbors
     # auto-brute-force cut-off at n_features > 15.
     vmf_switch_dim: int = 16
+    # vMF concentration on the sphere. kappa=20 is borderline at d=32 and
+    # unclusterable at d>=64 (intra/inter separation -> 1.0). Recipes that
+    # care about high-dim separation should scale kappa with dim; DBSCAN's
+    # Kneedle-gated eps absorbs the weak signal.
     vmf_kappa: float = 20.0
 
 
