@@ -164,12 +164,22 @@ void runChunkedMaterializedAssignment(const NDArray<T, 2, Layout::Contig> &X,
 }
 
 /**
+ * @brief Maximum @c d for the direct-compute argmin hot path.
+ *
+ * At @c d <= this threshold the fused argmin-GEMM driver's @c packA + packB overhead dominates
+ * the handful of FMAs the microkernel performs, so the direct @c ||x - c||^2 formula with 8-row
+ * SIMD accumulators beats the packed-GEMM path. Measured on Zen5: crossover sits near
+ * @c d == 8 where the two paths tie; below that the direct path wins by the pack cost.
+ */
+inline constexpr std::size_t kDirectArgminMaxD = 8;
+
+/**
  * @brief Run the assignment step against caller-owned scratch, splitting on @c d.
  *
- * Routes to the AVX2 fused outer with pre-packed scratch when the precondition set matches
- * (@c T == float, contiguous + 32-byte aligned, @c d <= @c pairwiseArgminMaxD). Otherwise
- * forwards to @ref runChunkedMaterializedAssignment which consumes the solver's chunked
- * distance tile, @c packedB, and GEMM A-pack arena to keep the iteration loop alloc-free.
+ * Three dispatch tiers:
+ *   - @c d <= @ref kDirectArgminMaxD : direct small-@c d argmin (no GEMM packing).
+ *   - @c d <= @c pairwiseArgminMaxD  : fused argmin-GEMM with pre-packed scratch.
+ *   - otherwise                      : chunked materialized fallback.
  */
 template <class T>
 void runAssignment(const NDArray<T, 2, Layout::Contig> &X, const LloydScratch<T> &scratch,
@@ -178,16 +188,51 @@ void runAssignment(const NDArray<T, 2, Layout::Contig> &X, const LloydScratch<T>
   if constexpr (std::is_same_v<T, float>) {
     const auto &centroids = *scratch.centroids;
     const auto &cSqNorms = *scratch.cSqNorms;
-    if (X.template isAligned<32>() && centroids.template isAligned<32>() && X.dim(1) != 0 &&
-        X.dim(1) <= math::defaults::pairwiseArgminMaxD) {
-      math::detail::pairwiseArgminOuterAvx2F32WithScratch(
-          X, centroids, cSqNorms, *scratch.labels, *scratch.minDistSq, scratch.packedB->data(),
-          scratch.packedCSqNorms->data(), pool);
-      return;
+    const std::size_t d = X.dim(1);
+    if (X.template isAligned<32>() && centroids.template isAligned<32>() && d != 0) {
+      if (d <= kDirectArgminMaxD) {
+        math::detail::pairwiseArgminDirectSmallDF32(X, centroids, *scratch.labels,
+                                                    *scratch.minDistSq, pool);
+        return;
+      }
+      if (d <= math::defaults::pairwiseArgminMaxD) {
+        math::detail::pairwiseArgminOuterAvx2F32WithScratch(
+            X, centroids, cSqNorms, *scratch.labels, *scratch.minDistSq, scratch.packedB->data(),
+            scratch.packedCSqNorms->data(), pool);
+        return;
+      }
     }
   }
 #endif
   runChunkedMaterializedAssignment<T>(X, scratch, pool);
+}
+
+/**
+ * @brief Whether @ref runAssignment's direct small-@c d path will fire for this shape.
+ *
+ * Returns @c true iff the direct path handles @p d (no GEMM decomposition, so @c minDistSq
+ * carries the true squared distance and downstream callers can skip the final
+ * @ref recomputeMinDistSqDirect pass).
+ */
+template <class T>
+[[nodiscard]] bool
+assignmentProducesDirectMinDistSq(const NDArray<T, 2, Layout::Contig> &X,
+                                  const NDArray<T, 2, Layout::Contig> &C) noexcept {
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float>) {
+    const std::size_t d = X.dim(1);
+    return X.template isAligned<32>() && C.template isAligned<32>() && d != 0 &&
+           d <= kDirectArgminMaxD;
+  } else {
+    (void)X;
+    (void)C;
+    return false;
+  }
+#else
+  (void)X;
+  (void)C;
+  return false;
+#endif
 }
 
 /**
@@ -555,10 +600,13 @@ std::pair<std::size_t, bool> runLloydFused(const NDArray<T, 2, Layout::Contig> &
   }
 
   // Re-assign labels against the final centroids so the exposed assignment matches the
-  // centroid matrix callers see, then refresh minDistSq directly so the caller-facing inertia
-  // sums true squared distances rather than the cancellation-prone decomposed residual.
+  // centroid matrix callers see. The direct small-@c d path already writes true squared
+  // distances into @c minDistSq, so the recompute-direct pass is only needed when the
+  // decomposed @c ||c||^2 - 2 x.c + ||x||^2 formula could carry cancellation noise.
   runAssignment<T>(X, scratch, pool);
-  recomputeMinDistSqDirect<T>(X, centroids, *scratch.labels, minDistSq, pool);
+  if (!assignmentProducesDirectMinDistSq<T>(X, centroids)) {
+    recomputeMinDistSqDirect<T>(X, centroids, *scratch.labels, minDistSq, pool);
+  }
 
   return {iter, converged};
 }
