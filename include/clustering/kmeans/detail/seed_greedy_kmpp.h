@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "clustering/always_assert.h"
-#include "clustering/math/pairwise.h"
+#include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/rng.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
@@ -54,58 +54,9 @@ namespace clustering::kmeans::detail {
   return ((L + kChunk - 1) / kChunk) * kChunk;
 }
 
-/**
- * @brief Squared Euclidean distance between two contiguous rows of equal length @p d.
- *
- * Hot helper for the seeder's candidate-distance update; routes to the AVX2-vectorized
- * @c math::detail::sqEuclideanRowAvx2 when the build is AVX2-enabled and @p d clears one
- * lane width, otherwise the scalar fallback. The seeder calls this kernel @c O(n*k*L) times
- * at @c (n=1e5, d=32, k=64, L=8); the AVX2 dispatch is load-bearing for the seeding wall-time
- * envelope.
- */
-template <class T>
-[[nodiscard]] inline T sqEuclideanRowPtr(const T *a, const T *b, std::size_t d) noexcept {
-#ifdef CLUSTERING_USE_AVX2
-  if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-    if (d >= math::detail::kAvx2Lanes<T>) {
-      return math::detail::sqEuclideanRowAvx2(a, b, d);
-    }
-  }
-#endif
-  T s = T{0};
-  for (std::size_t t = 0; t < d; ++t) {
-    const T diff = a[t] - b[t];
-    s += diff * diff;
-  }
-  return s;
-}
+using math::detail::sqEuclideanRowPtr;
 
 #ifdef CLUSTERING_USE_AVX2
-
-/**
- * @brief Faster horizontal sum over an AVX2 single-precision register.
- *
- * Replaces the @c hadd_ps pair with a shuffle-and-add ladder. @c hadd_ps is microcoded on
- * Skylake/Zen and adds ~6 cycles per pair; the explicit shuffle path stays on the FP add port
- * and pipelines per-lane reductions inside the candidate-scoring loop where eight reductions
- * fire per x row.
- */
-inline float horizontalSumFastAvx2(__m256 v) noexcept {
-  const __m128 hi = _mm256_extractf128_ps(v, 1);
-  const __m128 lo = _mm256_castps256_ps128(v);
-  __m128 sum = _mm_add_ps(lo, hi);
-  sum = _mm_add_ps(sum, _mm_movehl_ps(sum, sum));
-  sum = _mm_add_ss(sum, _mm_shuffle_ps(sum, sum, 1));
-  return _mm_cvtss_f32(sum);
-}
-
-inline double horizontalSumFastAvx2(__m256d v) noexcept {
-  const __m128d hi = _mm256_extractf128_pd(v, 1);
-  const __m128d lo = _mm256_castpd256_pd128(v);
-  __m128d sum = _mm_add_pd(lo, hi);
-  sum = _mm_add_sd(sum, _mm_unpackhi_pd(sum, sum));
-  return _mm_cvtsd_f64(sum);
-}
 
 /**
  * @brief Compile-time batched scoring kernel: stream @p x once across @c B parallel AVX2
@@ -145,7 +96,7 @@ inline void sqEuclideanRowToBatchAvx2Fixed(const float *x, const float *candData
     }
   }
   for (std::size_t t = 0; t < B; ++t) {
-    out[t] = horizontalSumFastAvx2(acc[t]) + tail[t];
+    out[t] = math::detail::horizontalSumAvx2(acc[t]) + tail[t];
   }
 }
 
@@ -178,7 +129,7 @@ inline void sqEuclideanRowToBatchAvx2Fixed(const double *x, const double *candDa
     }
   }
   for (std::size_t t = 0; t < B; ++t) {
-    out[t] = horizontalSumFastAvx2(acc[t]) + tail[t];
+    out[t] = math::detail::horizontalSumAvx2(acc[t]) + tail[t];
   }
 }
 
