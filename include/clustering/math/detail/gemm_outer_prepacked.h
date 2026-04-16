@@ -93,7 +93,7 @@ void gemmRunPrepacked(::clustering::detail::MatrixDescC<T> Ad, const T *prepacke
   // The pre-packed buffer stores jc-blocks back-to-back. Within a jc-block, the pc-sub-blocks
   // are laid out in pc order with element count kc * roundedNc per pc-block; the kc values sum
   // to K, so each jc-block's total size is K * roundedNc(jcIdx). Walk the offset alongside the
-  // outer-loop iteration rather than precomputing a jc-offset table — keeps state local.
+  // outer-loop iteration rather than precomputing a jc-offset table -- keeps state local.
   std::size_t jcBase = 0;
   for (std::size_t jc = 0; jc < N; jc += kNcVal) {
     const std::size_t nc = (jc + kNcVal <= N) ? kNcVal : (N - jc);
@@ -108,7 +108,7 @@ void gemmRunPrepacked(::clustering::detail::MatrixDescC<T> Ad, const T *prepacke
 
       const T *bpArena = prepackedBp + jcBase + pcOffInJc;
 
-      // Same Mc-tile parallel dispatch shape as gemmRunReference — each task gets its own
+      // Same Mc-tile parallel dispatch shape as gemmRunReference -- each task gets its own
       // apArena slice. The serial path falls through to slice 0 because Pool::workerIndex()
       // returns 0 outside a pool task body.
       auto runOneMcBlock = [&](std::size_t mcIdx, T *apSlice) noexcept {

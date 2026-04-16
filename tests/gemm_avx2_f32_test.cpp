@@ -85,7 +85,7 @@ template <class T> NDArray<T, 2> cloneArray(const NDArray<T, 2> &src) {
 
 // Drives the scalar kernel path directly so the "AVX2 vs scalar" oracle does not depend on an
 // external re-implementation. Feeds the same packed layouts the AVX2 kernel consumes, i.e.
-// column-major tile and the outer loop's Mc/Kc/Nc structure — by swapping the kernel fn
+// column-major tile and the outer loop's Mc/Kc/Nc structure -- by swapping the kernel fn
 // pointer to the scalar clone via a wrapper outer-loop call.
 template <class T, Layout LA, Layout LB>
 void runGemmScalarOnly(const NDArray<T, 2, LA> &A, const NDArray<T, 2, LB> &B, NDArray<T, 2> &C,

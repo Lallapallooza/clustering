@@ -24,7 +24,7 @@ namespace clustering {
  * @brief Release-active assertion: evaluates @p cond in every build configuration.
  *
  * Unlike @c assert, this check survives @c -DNDEBUG. Use it at public API entry points whose
- * failure would corrupt memory or trigger undefined behavior past the debug boundary — writes
+ * failure would corrupt memory or trigger undefined behavior past the debug boundary -- writes
  * through a read-only borrow, null output buffers, etc.
  */
 #define CLUSTERING_ALWAYS_ASSERT(cond)                                                             \

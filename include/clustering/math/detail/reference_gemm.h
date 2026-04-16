@@ -17,7 +17,7 @@ namespace clustering::math::detail {
  * Concrete backends are expected to expose a static @c run template with the same signature;
  * swapping in (for example) an @c OpenBlasGemm adapter is a one-word change at the call site.
  *
- * @c GemmPlan does not route through @c Backend::run — it owns the pre-packed B buffer and
+ * @c GemmPlan does not route through @c Backend::run -- it owns the pre-packed B buffer and
  * calls @c gemmRunPrepacked directly. The shim is used only by the one-shot entry.
  */
 struct ReferenceGemm {
@@ -42,7 +42,7 @@ struct ReferenceGemm {
     if (C.dim(0) == 0 || C.dim(1) == 0) {
       return;
     }
-    // One Ap slice per worker — gemmRunReference slices this pool at Pool::workerIndex() * kMc*kKc
+    // One Ap slice per worker -- gemmRunReference slices this pool at Pool::workerIndex() * kMc*kKc
     // from inside its parallel Mc dispatch. On the serial path workerIndex() is 0, so slice 0 is
     // used naturally.
     const std::size_t workerCount = pool.workerCount();

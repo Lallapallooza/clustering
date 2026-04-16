@@ -19,7 +19,7 @@ namespace clustering::math::detail {
  *
  * Computes a column-by-column inner product of an 8-row A-panel against a 6-column B-panel.
  * After the @c K-loop, folds @c +cSqNorms[j] into each column's accumulator (giving
- * @c ||c_j||^2 - 2*x_i.c_j, which is @c ||x_i - c_j||^2 - ||x_i||^2 — shifting every column
+ * @c ||c_j||^2 - 2*x_i.c_j, which is @c ||x_i - c_j||^2 - ||x_i||^2 -- shifting every column
  * by the same constant per row is safe for the running argmin comparison) and updates a pair
  * of @c (bestMin, bestArg) YMM registers via @c _mm256_cmp_ps + @c _mm256_blendv_ps with
  * @c _CMP_LT_OQ. Strict less-than mirrors @c math::argmin's earliest-index-on-tie semantics.

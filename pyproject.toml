@@ -20,7 +20,14 @@ dev = [
     "pre-commit>=4.0",
     "ruff>=0.15",
     "commitizen>=4.0",
+    "pytest>=8",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+# importlib avoids a package-name collision between the source `pybench`
+# package and the `tests/python/pybench/` test subpackage.
+addopts = "--import-mode=importlib"
 
 [tool.commitizen]
 name = "cz_conventional_commits"

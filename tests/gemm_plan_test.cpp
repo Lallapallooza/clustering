@@ -81,7 +81,7 @@ TEST(GemmPlanF32, BpAlignedTo32Bytes) {
   fillRandom(B, 2U);
   const GemmPlan<float> plan(B, Pool{nullptr});
   const auto addr = reinterpret_cast<std::uintptr_t>(plan.debugBpData());
-  // Empty Bp reports 0 from aligned_alloc normalization — but this B is non-empty, so addr must
+  // Empty Bp reports 0 from aligned_alloc normalization -- but this B is non-empty, so addr must
   // be a real aligned allocation.
   ASSERT_NE(addr, 0u);
   EXPECT_EQ(addr % 32u, 0u);
@@ -261,7 +261,7 @@ TEST(GemmPlanF32, MultipleKcBlocksPlanReuse) {
 }
 
 TEST(GemmPlanF32, TailShapeReuse) {
-  // M=9, N=7 — Mr=8 and Nr=6 tails on both output axes; pre-packed Bp stores one roundedNc=12
+  // M=9, N=7 -- Mr=8 and Nr=6 tails on both output axes; pre-packed Bp stores one roundedNc=12
   // column panel even though nc=7.
   constexpr std::size_t M = 9;
   constexpr std::size_t K = 64;
@@ -325,7 +325,7 @@ TEST(GemmPlanF32, EmptyKBetaScalesC) {
 
 TEST(GemmPlanF32, PoolPlanExecuteMatchesSerial) {
   // Construct on an 8-worker pool. execute() calls workerIndex() from the caller thread
-  // (outside any pool task body), which must report 0 — slicing into arena 0, identical
+  // (outside any pool task body), which must report 0 -- slicing into arena 0, identical
   // storage regardless of pool size. Output must match the serial-pool plan.
   constexpr std::size_t M = 40;
   constexpr std::size_t K = 48;

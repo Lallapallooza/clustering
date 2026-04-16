@@ -49,7 +49,7 @@ def _plot_size_scaling(
         label = f"n_jobs={nj}" if nj > 0 else "n_jobs=all"
 
         ax1.plot(xs, [r.ours_median_ms for r in subset], "o-", label=f"C++ {label}")
-    # sklearn (single line — doesn't vary with our n_jobs)
+    # sklearn (single line -- doesn't vary with our n_jobs)
     sklearn_by_size = {}
     for r in results:
         if r.size not in sklearn_by_size:
@@ -65,7 +65,7 @@ def _plot_size_scaling(
 
     ax1.set_xlabel("Dataset size")
     ax1.set_ylabel("Median time (ms)")
-    ax1.set_title(f"{algo} {dims}D — time vs size")
+    ax1.set_title(f"{algo} {dims}D -- time vs size")
     ax1.legend(fontsize=8)
     ax1.set_xscale("log")
     ax1.set_yscale("log")
@@ -89,7 +89,7 @@ def _plot_size_scaling(
     ax2.axhline(1.0, color="gray", linestyle="--", linewidth=1)
     ax2.set_xlabel("Dataset size")
     ax2.set_ylabel("Speedup (sklearn / C++)")
-    ax2.set_title(f"{algo} {dims}D — speedup vs size")
+    ax2.set_title(f"{algo} {dims}D -- speedup vs size")
     ax2.legend(fontsize=8)
     ax2.set_xscale("log")
     ax2.grid(True, alpha=0.3)
@@ -133,7 +133,7 @@ def _plot_thread_scaling(
 
     ax1.set_xlabel("Threads")
     ax1.set_ylabel("C++ median time (ms)")
-    ax1.set_title(f"{algo} {dims}D — thread scaling")
+    ax1.set_title(f"{algo} {dims}D -- thread scaling")
     ax1.legend(fontsize=8)
     ax1.set_yscale("log")
     ax1.grid(True, alpha=0.3)
@@ -141,7 +141,7 @@ def _plot_thread_scaling(
     ax2.axhline(1.0, color="gray", linestyle="--", linewidth=1)
     ax2.set_xlabel("Threads")
     ax2.set_ylabel("Speedup (sklearn / C++)")
-    ax2.set_title(f"{algo} {dims}D — speedup vs threads")
+    ax2.set_title(f"{algo} {dims}D -- speedup vs threads")
     ax2.legend(fontsize=8)
     ax2.grid(True, alpha=0.3)
 
@@ -181,7 +181,7 @@ def _plot_memory(algo: str, dims: int, results: list[RunResult], out_dir: Path) 
 
     ax.set_xlabel("Dataset size")
     ax.set_ylabel("Peak memory (MB)")
-    ax.set_title(f"{algo} {dims}D — memory usage")
+    ax.set_title(f"{algo} {dims}D -- memory usage")
     ax.legend()
     ax.set_xscale("log")
     ax.grid(True, alpha=0.3)
@@ -217,7 +217,7 @@ def _plot_ari(algo: str, dims: int, results: list[RunResult], out_dir: Path) -> 
         ax.set_ylim(0, 1.05)
         ax.set_xlabel("Dataset size")
         ax.set_ylabel("ARI")
-        ax.set_title(f"{algo} {dims}D — correctness")
+        ax.set_title(f"{algo} {dims}D -- correctness")
         ax.legend()
     else:
         # Grouped bars: one group per size, one bar per n_jobs
@@ -247,7 +247,7 @@ def _plot_ari(algo: str, dims: int, results: list[RunResult], out_dir: Path) -> 
         ax.set_ylim(0, 1.05)
         ax.set_xlabel("Dataset size")
         ax.set_ylabel("ARI")
-        ax.set_title(f"{algo} {dims}D — correctness across threads")
+        ax.set_title(f"{algo} {dims}D -- correctness across threads")
         ax.legend(fontsize=8)
 
     fig.tight_layout()

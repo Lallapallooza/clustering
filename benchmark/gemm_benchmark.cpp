@@ -31,7 +31,7 @@ namespace {
 // Fixed worker count: OpenBLAS is pinned to the same value below so comparisons are fair.
 constexpr std::size_t kWorkerCount = 8;
 
-// Seeded deterministically — benchmarks must not tax the RNG for reproducibility across runs.
+// Seeded deterministically -- benchmarks must not tax the RNG for reproducibility across runs.
 template <class T> void fillRandom(NDArray<T, 2> &a, std::uint32_t seed) {
   std::mt19937 gen(seed);
   std::uniform_real_distribution<T> dist(static_cast<T>(-1.0), static_cast<T>(1.0));
@@ -130,7 +130,7 @@ void reportOpenblasAbsent(benchmark::State &state) {
     // One-shot: Google Benchmark still needs to enter the state loop to produce a row.
     break;
   }
-  state.SkipWithMessage("OpenBLAS not linked — gate skipped");
+  state.SkipWithMessage("OpenBLAS not linked -- gate skipped");
 }
 void BM_OpenBLAS_Canonical(benchmark::State &state) { reportOpenblasAbsent(state); }
 #endif

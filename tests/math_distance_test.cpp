@@ -63,7 +63,7 @@ TEST(MathDistanceSqEuclidean, IdenticalOperandsReturnsZero) {
 
 TEST(MathDistanceSqEuclidean, StridedOperandMatchesContig) {
   // src.t().row(0) walks column 0 of src with stride equal to src's row-stride (4),
-  // so the view is length-3 stride-4 — truly non-unit stride. Sentinel values in the
+  // so the view is length-3 stride-4 -- truly non-unit stride. Sentinel values in the
   // other columns would be visited by a buggy stride-1 walk.
   NDArray<float, 2> src({3, 4});
   src[0][0] = 1.0F;
@@ -188,7 +188,7 @@ TEST(MathDistanceCosine, IdenticalOperandsReturnsZero) {
 
 TEST(MathDistanceCosine, ZeroNormReturnsOneByConvention) {
   // Cosine is undefined when either operand has zero magnitude. The overload's documented
-  // convention — return T{1} instead of NaN — is what downstream neighbor-search code relies on
+  // convention -- return T{1} instead of NaN -- is what downstream neighbor-search code relies on
   // to stay finite, so this pin is load-bearing, not cosmetic.
   NDArray<float, 1> a({2});
   NDArray<float, 1> b({2});
@@ -247,8 +247,8 @@ namespace {
 
 // Fills with values whose squared differences are small non-negative integers. With D up to 256
 // the partial sums stay well under 2^24 (the largest contiguous integer range in f32), so every
-// accumulation order — scalar head-to-tail, 8-lane parallel with horizontal reduction, or any
-// intermediate — yields the same bits. This is what makes bit-identity between the scalar and
+// accumulation order -- scalar head-to-tail, 8-lane parallel with horizontal reduction, or any
+// intermediate -- yields the same bits. This is what makes bit-identity between the scalar and
 // AVX2 paths enforceable without ULP tolerance on these inputs.
 void fillIntegerValued(NDArray<float, 1> &a, NDArray<float, 1> &b) {
   const std::size_t n = a.dim(0);
@@ -329,7 +329,7 @@ TEST(SqEuclideanAvx2, DispatchStaysScalarBelowEightDims) {
 }
 
 TEST(SqEuclideanAvx2, StridedViewFallsBackToScalarAndStaysCorrect) {
-  // col(0) of a (16, 3) source is a length-16 stride-3 view — long enough to clear the D=8 gate
+  // col(0) of a (16, 3) source is a length-16 stride-3 view -- long enough to clear the D=8 gate
   // if the contiguity check failed. The AVX2 kernel cannot walk a non-contiguous view (it issues
   // contiguous 8-lane loads), so the CPO must fall back to scalar. Sentinel 99s in the off-column
   // cells turn a buggy stride-1 walk into a loud failure.

@@ -33,7 +33,7 @@ namespace clustering::math {
  *
  * @tparam T Element type (@c float or @c double).
  * @tparam Backend Backend tag; defaulted to @c detail::ReferenceGemm. @c GemmPlan does NOT route
- *         through the backend — it calls @c gemmRunPrepacked directly with its owned @c m_Bp.
+ *         through the backend -- it calls @c gemmRunPrepacked directly with its owned @c m_Bp.
  *         The template parameter exists so @c GemmPlan is selected at the same
  *         @c <T, Backend> call site as the one-shot @c gemm entry.
  */
@@ -112,7 +112,7 @@ public:
       return;
     }
 
-    // Pass the full scratch base — gemmRunPrepacked slices per-worker inside its Mc dispatch via
+    // Pass the full scratch base -- gemmRunPrepacked slices per-worker inside its Mc dispatch via
     // Pool::workerIndex(). On the serial path workerIndex() returns 0, so slice 0 is used.
     auto Ad = ::clustering::detail::describeMatrix(A);
     auto Cd = ::clustering::detail::describeMatrixMut(C);

@@ -142,7 +142,7 @@ TEST(GemmPublicF32, TransposedRhsViaCtad) {
   fillConst(Cgemm, 0.0F);
   fillConst(Cnaive, 0.0F);
 
-  // CTAD resolves LB = Layout::MaybeStrided from Y.t()'s type — no explicit template args.
+  // CTAD resolves LB = Layout::MaybeStrided from Y.t()'s type -- no explicit template args.
   gemm(A, Y.t(), Cgemm, Pool{nullptr}, 1.0F, 0.0F);
   naiveGemmStrided<float, Layout::MaybeStrided>(A, Y.t(), Cnaive, 1.0F, 0.0F);
 

@@ -111,7 +111,7 @@ void gemmRunReference(::clustering::detail::MatrixDescC<T> Ad,
       packB<T>(Bd, pc, kc, jc, nc, bpArena);
 
       // Dispatch one Mc-row-slab per task, each task indexing its own slice of apArena. The
-      // lambda is identical between the serial-fallback path and the submit_blocks path — the
+      // lambda is identical between the serial-fallback path and the submit_blocks path -- the
       // only difference is which worker slice it sees (serial always gets slice 0 because
       // Pool::workerIndex() returns 0 outside a pool task).
       auto runOneMcBlock = [&](std::size_t mcIdx, T *apSlice) noexcept {
@@ -178,7 +178,7 @@ void gemmRunReference(::clustering::detail::MatrixDescC<T> Ad,
                             })
             .wait();
       } else {
-        // Serial path — single worker slice; workerIndex() == 0 outside any pool task.
+        // Serial path -- single worker slice; workerIndex() == 0 outside any pool task.
         for (std::size_t mcIdx = 0; mcIdx < mcBlockCount; ++mcIdx) {
           runOneMcBlock(mcIdx, apArena);
         }

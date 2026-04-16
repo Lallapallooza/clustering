@@ -45,7 +45,7 @@ TEST(GemmBackendDispatch, ExplicitBackendOverrideRoutes) {
   gemm<float, Layout::Contig, Layout::Contig, FakeBackend>(A, B, C, Pool{nullptr}, 1.0F, 0.0F);
 
   // Reference backend over (1·A·B + 0·C) would yield 4.0F per cell (4 lanes of K=4, all ones);
-  // FakeBackend writes the 42 sentinel. Finding 42 — not 4 — proves the override took effect.
+  // FakeBackend writes the 42 sentinel. Finding 42 -- not 4 -- proves the override took effect.
   for (std::size_t i = 0; i < 4; ++i) {
     for (std::size_t j = 0; j < 4; ++j) {
       EXPECT_FLOAT_EQ(C(i, j), 42.0F);
