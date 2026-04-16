@@ -4,8 +4,9 @@ import argparse
 import sys
 from pathlib import Path
 
+from pybench.charts.results_io import capture_metadata, save_results
 from pybench.recipes import all_recipes
-from pybench.runner import expand_param_grid, run_one, save_results
+from pybench.runner import expand_param_grid, run_one
 
 
 def _list_recipes(recipes: dict) -> None:
@@ -121,7 +122,8 @@ def main() -> None:
                     all_results.append(result)
 
     json_path = out_dir / "results.json"
-    save_results(all_results, json_path)
+    meta = capture_metadata()
+    save_results(json_path, meta, all_results)
     print(f"\nResults saved to {json_path}")
 
     from pybench.plot import plot_results
