@@ -1,16 +1,15 @@
-#  C++ Clustering Library
+# C++ Clustering Library
 
-This library offers a highly efficient implementation of the DBSCAN
-(Density-Based Spatial Clustering of Applications with Noise) clustering algorithm (more algorithms will be added later) in C++.
-Designed for high-performance applications,
-it efficiently handles large datasets,
-making it ideal for machine learning, data mining, and complex data analysis tasks.
+Header-only C++20 clustering library with KD-Tree acceleration, AVX2
+hot paths, and a thread pool for parallel workloads. Ships DBSCAN and
+k-means with a nanobind Python binding.
 
 ## Features
 - Header-only C++20, no runtime deps.
 - Any point dimension; AVX2 fast path at >= 8 dims.
-- KD-Tree-accelerated region queries.
-- Parallel DBSCAN via a thread pool.
+- **DBSCAN** -- KD-Tree-accelerated region queries, parallel via thread pool.
+- **k-means** -- fused argmin-GEMM Lloyd with greedy k-means++ and AFK-MC2 seeders, direct small-d kernel, chunked materialized fallback.
+- Python binding via nanobind (zero-copy output).
 
 ## Installation
 **C++ 20 compiler is required.**
@@ -40,7 +39,8 @@ target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
 ```
 
 ## Examples
-The API is simple and intuitive. Here's how to cluster a set of points:
+
+### DBSCAN
 
 ```cpp
 #include "clustering/dbscan.h"
@@ -54,24 +54,55 @@ int main() {
 
   std::cout << "Labels size: " << dbscan.labels().size() << std::endl;
   std::cout << "Number of clusters: " << dbscan.nClusters() << std::endl;
-
-  return 0;
 }
 ```
 
-## Performance
-The graphics below show the performance compared to the scikit-learn implementation using the KD-Tree.
-The CPU time results are generally several times better,
-but this can vary based on data configuration and number of jobs.
-For memory efficiency, this library significantly outperforms scikit-learn.
+### k-means
 
-To run your own benchmark:
+```cpp
+#include "clustering/kmeans.h"
+
+int main() {
+  NDArray<float, 2> X({n, d});
+  fillData(X);
+
+  clustering::KMeans<float> km(k, nJobs);
+  km.run(X, /*maxIter=*/300, /*tol=*/1e-4f, /*seed=*/42);
+
+  const auto &labels = km.labels();       // NDArray<int32_t, 1>
+  const auto &centroids = km.centroids(); // NDArray<float, 2>
+  std::cout << "Inertia: " << km.inertia() << std::endl;
+  std::cout << "Iterations: " << km.nIter() << std::endl;
+}
+```
+
+### Python
+
+```python
+import numpy as np
+from _clustering import dbscan, kmeans
+
+X = np.random.rand(10000, 4).astype(np.float32)
+
+# DBSCAN
+labels = dbscan(X, eps=0.5, min_pts=5, n_jobs=4)
+
+# k-means
+labels, centroids, inertia, n_iter, converged = kmeans(X, k=16, n_jobs=4)
+```
+
+## Performance
+
+Benchmark against scikit-learn:
+
 ```bash
 uv venv && uv pip install -e .
 uv run benchmark                                    # full suite
 uv run benchmark --algo dbscan --sizes 1000 10000   # quick run
+uv run benchmark --algo kmeans --sizes 5000 50000   # quick run
 uv run benchmark --list                             # show available recipes
 ```
+
 CPU Performance with 1 Job
 ![CPU1](resources/results_1job.png)
 CPU Performance with 24 Job
@@ -120,9 +151,8 @@ After `install`, hooks run automatically on `git commit`. The configured hooks a
 clang-tidy is **not** a pre-commit hook (too slow, needs a compile database). It runs as part of the build whenever `CLUSTERING_ENABLE_CLANG_TIDY` is on, and in the `tidy` CI job.
 
 ## TODO
-- [ ] Add more benchmarks for comprehensive performance analysis.
-- [ ] Support pairwise matrix query model.
-- [ ] KMeans
+- [x] DBSCAN
+- [x] KMeans
 - [ ] HDBSCAN
 - [ ] EM
 - [ ] Spectral Clustering
