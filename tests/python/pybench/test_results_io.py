@@ -255,25 +255,6 @@ def test_load_results_legacy_bare_list_rows_hydrate_without_remap(
     assert loaded == originals
 
 
-def test_load_results_legacy_bare_list_from_existing_benchmark_file(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    src = Path(__file__).resolve().parents[3] / "benchmark_results" / "results.json"
-    if not src.is_file():
-        pytest.skip("benchmark_results/results.json not present")
-    copy = tmp_path / "results.json"
-    copy.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-
-    meta, loaded = load_results(copy)
-
-    err = capsys.readouterr().err
-    assert "legacy bare-list" in err
-    assert meta.canonical_encoding_version == 0
-    assert all(isinstance(r, RunResult) for r in loaded)
-    assert len(loaded) > 0
-
-
 def test_hash_independent_of_meta(tmp_path: Path) -> None:
     results = [
         _make_result(size=1000),

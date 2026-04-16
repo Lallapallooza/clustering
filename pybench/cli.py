@@ -161,7 +161,7 @@ def _write_charts(
         hash6 = payload_hash6(partition_results)
         filename = chart_filename(algo, dict(key[1]), hash6)
         out_path = out_dir / filename
-        fig.savefig(out_path, dpi=120)
+        fig.savefig(out_path, dpi=200)
         written.append(out_path)
     return written
 
