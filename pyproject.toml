@@ -28,6 +28,9 @@ version = "0.3.0"
 tag_format = "v$version"
 version_scheme = "semver"
 update_changelog_on_bump = false
+version_files = [
+    "pyproject.toml:^version",
+]
 
 [tool.scikit-build]
 cmake.source-dir = "python"
