@@ -85,6 +85,14 @@ def test_gate_fail_when_theirs_peak_mb_zero() -> None:
     assert "theirs_peak_mb" in reason
 
 
+def test_gate_fail_when_speedup_is_infinite() -> None:
+    r = _make_result(speedup=math.inf)
+    failures = evaluate_gates([r], _THRESHOLDS)
+    assert len(failures) == 1
+    (reason,) = failures[0].reasons
+    assert "speedup" in reason
+
+
 def test_gate_fail_when_ours_peak_mb_nan() -> None:
     r = _make_result(ours_peak_mb=math.nan)
     failures = evaluate_gates([r], _THRESHOLDS)
