@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  # Manual tag push -> create release (fallback / first-time bootstrap)
+  push:
+    tags: ["v*"]
+  # CI passed on main -> auto-bump if bumpable commits exist
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  # Auto-bump after CI passes on main.
+  # Commitizen inspects conventional commits since the last tag:
+  # feat -> minor, fix -> patch, BREAKING CHANGE -> major.
+  # Docs / refactor / chore / etc. -> no bump, job exits cleanly.
+  #
+  # The bump commit + tag are pushed with GITHUB_TOKEN, which does NOT
+  # re-trigger workflows -- no infinite loop.
+  bump-and-release:
+    if: >-
+      github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install commitizen
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        id: bump
+        run: |
+          set -o pipefail
+          if cz bump --yes --check-consistency 2>&1 | tee /tmp/cz.log; then
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+            echo "tag=v$(cz version --project)" >> "$GITHUB_OUTPUT"
+          else
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push
+        if: steps.bump.outputs.bumped == 'true'
+        run: git push origin main --follow-tags
+
+      - name: Create GitHub release
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.bump.outputs.tag }}"
+          PREV=$(git tag -l 'v*' --sort=-version:refname | sed -n '2p')
+          {
+            echo "## What's Changed"
+            echo ""
+            if [ -n "$PREV" ]; then
+              git log "${PREV}..${TAG}^" --pretty=format:'- %s' --no-merges
+            else
+              git log "${TAG}^" --pretty=format:'- %s' --no-merges --max-count=50
+            fi
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "**Full diff**: https://github.com/${{ github.repository }}/compare/${PREV}...${TAG}"
+            fi
+          } > /tmp/notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md
+
+  # Manual tag release: local `cz bump` + `git push --follow-tags`,
+  # or any hand-pushed v* tag.  Tags pushed by bump-and-release use
+  # GITHUB_TOKEN so they do NOT trigger this job (no double release).
+  release-on-tag:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          PREV=$(git tag -l 'v*' --sort=-version:refname | sed -n '2p')
+          {
+            echo "## What's Changed"
+            echo ""
+            if [ -n "$PREV" ]; then
+              git log "${PREV}..${TAG}" --pretty=format:'- %s' --no-merges
+            else
+              git log "${TAG}" --pretty=format:'- %s' --no-merges --max-count=50
+            fi
+            echo ""
+            if [ -n "$PREV" ]; then
+              echo "**Full diff**: https://github.com/${{ github.repository }}/compare/${PREV}...${TAG}"
+            fi
+          } > /tmp/notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md
