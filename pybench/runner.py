@@ -78,28 +78,52 @@ def _measure_peak_rss_worker(fn, data, params, pipe):
     pipe.close()
 
 
+def _try_rss_with_context(
+    ctx: multiprocessing.context.BaseContext,
+    fn: Callable,
+    data: np.ndarray,
+    params: dict[str, Any],
+) -> float | None:
+    """Attempt RSS measurement under the given multiprocessing context."""
+    try:
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
+        p = ctx.Process(
+            target=_measure_peak_rss_worker,
+            args=(fn, data, params, child_conn),
+        )
+        p.start()
+        child_conn.close()
+        p.join(timeout=10)
+        if p.is_alive():
+            p.kill()
+            p.join()
+            return None
+        if p.exitcode != 0 or not parent_conn.poll():
+            parent_conn.close()
+            return None
+        peak_kb = parent_conn.recv()
+        parent_conn.close()
+        return round(peak_kb / 1024, 2)
+    except (AttributeError, TypeError, OSError):
+        return None
+
+
 def _measure_peak_rss_mb(
     fn: Callable, data: np.ndarray, params: dict[str, Any]
 ) -> float:
-    """Fork a child process, run fn, return its peak RSS in MB.
-
-    Forked child inherits the Python baseline but ru_maxrss is reset to
-    the fork-time RSS, so the delta from baseline is meaningful.
+    """Measure peak RSS via a child process. Tries fork first (accurate
+    baseline), falls back to spawn if fork deadlocks (e.g. C extensions
+    with thread pools).
     """
-    parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
-    p = multiprocessing.Process(
-        target=_measure_peak_rss_worker,
-        args=(fn, data, params, child_conn),
+    result = _try_rss_with_context(
+        multiprocessing.get_context("fork"), fn, data, params
     )
-    p.start()
-    child_conn.close()
-    p.join(timeout=300)
-    if p.exitcode != 0 or not parent_conn.poll():
-        parent_conn.close()
-        return 0.0
-    peak_kb = parent_conn.recv()
-    parent_conn.close()
-    return round(peak_kb / 1024, 2)
+    if result is not None:
+        return result
+    result = _try_rss_with_context(
+        multiprocessing.get_context("spawn"), fn, data, params
+    )
+    return result if result is not None else 0.0
 
 
 def run_one(
