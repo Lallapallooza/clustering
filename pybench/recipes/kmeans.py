@@ -27,7 +27,7 @@ recipe = Recipe(
     ours=_ours,
     theirs=_theirs,
     default_params={"n_clusters": 16},
-    param_grid={"n_jobs": [1, 2, 4, 8, 16, 32]},
+    param_grid={"n_jobs": [1, 4, 16]},
     default_sizes=(5000, 10000, 50000, 100000),
     default_dims=(2, 8, 32, 128),
     dataset=DatasetSpec(n_features=2, centers=16, cluster_std=3.0),
