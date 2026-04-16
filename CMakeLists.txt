@@ -41,6 +41,7 @@ if(CLUSTERING_IS_TOP_LEVEL)
         clustering_warnings
         INTERFACE
             $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>,$<CXX_COMPILER_ID:AppleClang>>:-Wall;-Wextra;-Werror>
+            $<$<CXX_COMPILER_ID:GNU>:-Wno-ignored-attributes>
     )
 endif()
 
