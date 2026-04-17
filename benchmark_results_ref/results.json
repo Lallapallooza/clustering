@@ -1,0 +1,694 @@
+{
+  "meta": {
+    "canonical_encoding_version": 1,
+    "git_sha": "b1ac5e1",
+    "machine": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "timestamp_iso": "2026-04-16T22:38:56+00:00"
+  },
+  "results": [
+    {
+      "ari": 1.0,
+      "dims": 2,
+      "ours_median_ms": 35.75845600062166,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 0.62,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 1.2536918260414163,
+      "theirs_median_ms": 44.83008399984101,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 45.6,
+      "timestamp": "2026-04-16T22:38:56.766421+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 2,
+      "ours_median_ms": 13.631957001052797,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 0.66,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 2.404223325838931,
+      "theirs_median_ms": 32.774268998764455,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 45.57,
+      "timestamp": "2026-04-16T22:38:57.090117+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 2,
+      "ours_median_ms": 8.716140000615269,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 0.73,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 2.7293103371131755,
+      "theirs_median_ms": 23.789051003404893,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 45.76,
+      "timestamp": "2026-04-16T22:38:57.416900+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 2,
+      "ours_median_ms": 691.6608819992689,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 3.13,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 0.9495371244661692,
+      "theirs_median_ms": 656.7576849993202,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 1177.39,
+      "timestamp": "2026-04-16T22:39:03.093770+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 2,
+      "ours_median_ms": 221.0403419994691,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 3.31,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 1.8701817698168304,
+      "theirs_median_ms": 413.38561800148454,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 1176.39,
+      "timestamp": "2026-04-16T22:39:06.062837+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 2,
+      "ours_median_ms": 112.16810099722352,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 3.79,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 3.8476538085533374,
+      "theirs_median_ms": 431.58402100016247,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 1175.49,
+      "timestamp": "2026-04-16T22:39:09.169449+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 2,
+      "ours_median_ms": 2867.2865760017885,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 6.26,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 0.7393572929698422,
+      "theirs_median_ms": 2119.94924100145,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 4689.23,
+      "timestamp": "2026-04-16T22:39:29.910114+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 2,
+      "ours_median_ms": 913.2795610021276,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 6.58,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 1.4469272831955402,
+      "theirs_median_ms": 1321.449113998824,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 4686.23,
+      "timestamp": "2026-04-16T22:39:39.815348+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 2,
+      "ours_median_ms": 409.47240500099724,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 7.36,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 3.1055868197000724,
+      "theirs_median_ms": 1271.652104001987,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 4687.38,
+      "timestamp": "2026-04-16T22:39:48.680322+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 8,
+      "ours_median_ms": 51.56855600216659,
+      "ours_noise_frac": 0.0005,
+      "ours_peak_mb": 0.83,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 1.8879186377617165,
+      "theirs_median_ms": 97.35723799894913,
+      "theirs_noise_frac": 0.0005,
+      "theirs_peak_mb": 13.51,
+      "timestamp": "2026-04-16T22:39:49.341380+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 8,
+      "ours_median_ms": 22.285263999947347,
+      "ours_noise_frac": 0.0005,
+      "ours_peak_mb": 0.85,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 1.9149571214205539,
+      "theirs_median_ms": 42.67532499943627,
+      "theirs_noise_frac": 0.0005,
+      "theirs_peak_mb": 13.8,
+      "timestamp": "2026-04-16T22:39:49.741179+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 8,
+      "ours_median_ms": 14.805816001171479,
+      "ours_noise_frac": 0.0005,
+      "ours_peak_mb": 0.89,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 2.830497690632061,
+      "theirs_median_ms": 41.90782799923909,
+      "theirs_noise_frac": 0.0005,
+      "theirs_peak_mb": 14.33,
+      "timestamp": "2026-04-16T22:39:50.192328+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 8,
+      "ours_median_ms": 1056.5721769999072,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 4.15,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 1.5602002682687506,
+      "theirs_median_ms": 1648.464194000553,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 308.21,
+      "timestamp": "2026-04-16T22:40:01.169179+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 8,
+      "ours_median_ms": 310.0173970015021,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 4.2,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 2.122531010720647,
+      "theirs_median_ms": 658.0215389985824,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 307.21,
+      "timestamp": "2026-04-16T22:40:05.428081+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 8,
+      "ours_median_ms": 122.7430489998369,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 4.32,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 5.296927119671185,
+      "theirs_median_ms": 650.1609849983652,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 308.35,
+      "timestamp": "2026-04-16T22:40:09.463262+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 8,
+      "ours_median_ms": 3936.477659997763,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 8.31,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 1.609048756548696,
+      "theirs_median_ms": 6333.984484001121,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 1220.05,
+      "timestamp": "2026-04-16T22:40:50.712982+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 8,
+      "ours_median_ms": 1135.6642089995148,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 8.39,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 2.088627110201701,
+      "theirs_median_ms": 2371.979055002157,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 1219.05,
+      "timestamp": "2026-04-16T22:41:05.385713+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 8,
+      "ours_median_ms": 445.9512680004991,
+      "ours_noise_frac": 0.0,
+      "ours_peak_mb": 8.62,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 5.084250526217436,
+      "theirs_median_ms": 2267.3279689988703,
+      "theirs_noise_frac": 0.0,
+      "theirs_peak_mb": 1218.17,
+      "timestamp": "2026-04-16T22:41:17.594988+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 32,
+      "ours_median_ms": 34.54447400145,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 1.73,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 0.7588381863163237,
+      "theirs_median_ms": 26.213665998511715,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 18.4,
+      "timestamp": "2026-04-16T22:41:17.919063+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 32,
+      "ours_median_ms": 10.945866997644771,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 1.74,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 1.8653450662334063,
+      "theirs_median_ms": 20.41781899970374,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 18.4,
+      "timestamp": "2026-04-16T22:41:18.104066+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 32,
+      "ours_median_ms": 5.655237997416407,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 1.76,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 3.9329985776313783,
+      "theirs_median_ms": 22.24204300000565,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 18.4,
+      "timestamp": "2026-04-16T22:41:18.297602+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 32,
+      "ours_median_ms": 903.9883639998152,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 8.63,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 0.28975647411986805,
+      "theirs_median_ms": 261.9364809979743,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 15.58,
+      "timestamp": "2026-04-16T22:41:22.977289+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 32,
+      "ours_median_ms": 242.285771000752,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 8.64,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 1.2302085292478733,
+      "theirs_median_ms": 298.0620220005221,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 15.58,
+      "timestamp": "2026-04-16T22:41:25.205447+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 32,
+      "ours_median_ms": 92.47542700177291,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 8.67,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 2.6817296014908107,
+      "theirs_median_ms": 247.99409000115702,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 15.58,
+      "timestamp": "2026-04-16T22:41:26.740630+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 32,
+      "ours_median_ms": 3415.021454999078,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 17.26,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 0.2713577874135689,
+      "theirs_median_ms": 926.6926659984165,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 27.16,
+      "timestamp": "2026-04-16T22:41:44.461517+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 32,
+      "ours_median_ms": 913.3794789995591,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 17.27,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 0.9833099578565568,
+      "theirs_median_ms": 898.1351370021002,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 27.16,
+      "timestamp": "2026-04-16T22:41:51.992661+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 32,
+      "ours_median_ms": 295.30829599752906,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 17.3,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 3.1220520469459543,
+      "theirs_median_ms": 921.9678699992073,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 27.16,
+      "timestamp": "2026-04-16T22:41:57.136847+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 128,
+      "ours_median_ms": 74.19418900099117,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 5.39,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 0.5442730427342642,
+      "theirs_median_ms": 40.38189700077055,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 24.4,
+      "timestamp": "2026-04-16T22:41:57.665723+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 128,
+      "ours_median_ms": 20.98667099926388,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 5.4,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 1.7888505043720917,
+      "theirs_median_ms": 37.54201700212434,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 24.4,
+      "timestamp": "2026-04-16T22:41:57.988303+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 128,
+      "ours_median_ms": 10.318091000954155,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 5.43,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 10000,
+      "speedup": 3.5034797616197015,
+      "theirs_median_ms": 36.14922300039325,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 24.4,
+      "timestamp": "2026-04-16T22:41:58.282176+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 128,
+      "ours_median_ms": 1668.217539001489,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 26.94,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 0.3469388592722302,
+      "theirs_median_ms": 578.7694899991038,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 20.58,
+      "timestamp": "2026-04-16T22:42:07.410236+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 128,
+      "ours_median_ms": 429.8592880004435,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 26.95,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 1.3830257658614635,
+      "theirs_median_ms": 594.5064709994767,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 21.58,
+      "timestamp": "2026-04-16T22:42:11.681645+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 128,
+      "ours_median_ms": 184.23748200075352,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 26.98,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 50000,
+      "speedup": 3.180032491975632,
+      "theirs_median_ms": 585.8811790021718,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 21.58,
+      "timestamp": "2026-04-16T22:42:15.010479+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 128,
+      "ours_median_ms": 27131.658964000962,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 53.89,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 1
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 0.08469530123644553,
+      "theirs_median_ms": 2297.924029000569,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 33.16,
+      "timestamp": "2026-04-16T22:44:13.819718+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 128,
+      "ours_median_ms": 7344.649721999303,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 53.89,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 4
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 0.309229070951506,
+      "theirs_median_ms": 2271.179209998081,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 32.16,
+      "timestamp": "2026-04-16T22:44:52.603401+00:00"
+    },
+    {
+      "ari": 1.0,
+      "dims": 128,
+      "ours_median_ms": 2274.91904800263,
+      "ours_noise_frac": 1.0,
+      "ours_peak_mb": 53.93,
+      "params": {
+        "eps": 10.0,
+        "min_samples": 5,
+        "n_jobs": 16
+      },
+      "recipe_name": "dbscan",
+      "size": 100000,
+      "speedup": 0.9999862179695556,
+      "theirs_median_ms": 2274.8876949990517,
+      "theirs_noise_frac": 1.0,
+      "theirs_peak_mb": 31.16,
+      "timestamp": "2026-04-16T22:45:11.035036+00:00"
+    }
+  ]
+}

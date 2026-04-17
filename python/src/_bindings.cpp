@@ -2,6 +2,7 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/tuple.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <thread>
@@ -41,18 +42,14 @@ dbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> da
   int32_t *out = new int32_t[N];
 
   {
-    // Release GIL for the C++ computation.
     nb::gil_scoped_release release;
 
     DBSCAN<float> algo(points, eps, static_cast<size_t>(min_pts), jobs);
     algo.run();
 
     const auto &labels = algo.labels();
-    for (size_t i = 0; i < N; ++i) {
-      out[i] = labels[i].load(std::memory_order_relaxed);
-    }
+    std::copy(labels.begin(), labels.end(), out);
   }
-  // GIL re-acquired here.
 
   nb::capsule owner(out, [](void *p) noexcept { delete[] static_cast<int32_t *>(p); });
 
