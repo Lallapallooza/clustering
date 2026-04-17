@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <numeric>
 #include <stack>
+#include <vector>
 
 #include "clustering/math/distance.h"
 #include "clustering/memory/linear_alloc.h"
@@ -96,9 +97,9 @@ public:
    * @return Vector of indices of points within the search radius.
    */
   std::vector<std::size_t> query(const NDArray<T, 1> &query_point, T radius,
-                                 int64_t limit = -1) const {
+                                 std::int64_t limit = -1) const {
     std::vector<std::size_t> indices;
-    T radius_sq = radius * radius;
+    const T radius_sq = radius * radius;
     query(m_root, query_point, radius_sq, indices, limit);
     return indices;
   }

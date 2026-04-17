@@ -12,8 +12,8 @@ namespace clustering::math::distance::detail {
  *
  * Processes 8 lanes per iteration with @c _mm256_load_ps, accumulates lane-parallel squared
  * differences into one @c __m256, and finishes any remainder in a scalar tail. The horizontal
- * reduction uses @c permute2f128 + two @c hadd_ps, matching the epilogue in @c kdtree.h so the
- * summation order is preserved for downstream bit-identity callers.
+ * reduction uses @c permute2f128 + two @c hadd_ps, matching the epilogue in @c index/kdtree.h so
+ * the summation order is preserved for downstream bit-identity callers.
  *
  * Precondition: @p a and @p b must be 32-byte aligned. @c _mm256_load_ps on a misaligned pointer
  * is undefined behavior. The intended caller path is a pointer lifted from

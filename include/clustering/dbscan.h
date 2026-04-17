@@ -6,7 +6,8 @@
 #include <cstdint>
 #include <vector>
 
-#include "clustering/kdtree.h"
+#include "clustering/index/kdtree.h"
+#include "clustering/index/range_query.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define CLUSTERING_UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -24,8 +25,12 @@ namespace clustering {
  * any such region are labeled as noise.
  *
  * @tparam T The data type of the points. It must support basic arithmetic operations.
+ * @tparam QueryModel Spatial index satisfying @ref clustering::index::RangeQuery. Defaults to
+ *         @c KDTree<T, KDTreeDistanceType::kEucledian>.
  */
-template <class T, class QueryModel = KDTree<T, KDTreeDistanceType::kEucledian>> class DBSCAN {
+template <class T, class QueryModel = KDTree<T, KDTreeDistanceType::kEucledian>>
+  requires index::RangeQuery<QueryModel, T>
+class DBSCAN {
 public:
   static constexpr int UNCLASSIFIED = -2; ///< Constant to represent an unclassified point.
   static constexpr int NOISY = -1;        ///< Constant to represent a noisy point (outlier).
@@ -108,7 +113,7 @@ private:
   std::vector<std::atomic<uint32_t>>
       m_seen_wave;                     ///< Per-point epoch marker for BFS-frontier dedup.
   uint32_t m_current_wave = 0;         ///< Monotonic counter; bumped before each frontier wave.
-  QueryModel m_query_model;            ///< Query model  built from m_points for efficient querying.
+  QueryModel m_query_model;            ///< Query model built from m_points for efficient querying.
   BS::light_thread_pool m_thread_pool; ///< ThreadPool for parallel execution.
 
   /**
@@ -120,7 +125,8 @@ private:
    */
   [[nodiscard]] bool isCorePoint(size_t idx) const {
     const NDArray<T, 1> queryPoint = extractPoint(idx);
-    auto neighbors = m_query_model.query(queryPoint, m_eps, m_minPts);
+    const auto neighbors =
+        m_query_model.query(queryPoint, m_eps, static_cast<std::int64_t>(m_minPts));
     return neighbors.size() == m_minPts;
   }
 
@@ -166,8 +172,8 @@ private:
                 continue;
               }
 
-              const NDArray<T, 1> query = extractPoint(point);
-              auto neighbors = m_query_model.query(query, m_eps);
+              const NDArray<T, 1> queryPoint = extractPoint(point);
+              const auto neighbors = m_query_model.query(queryPoint, m_eps);
 
               for (const size_t neighbor_id : neighbors) {
                 if (m_labels[neighbor_id] != UNCLASSIFIED) {
