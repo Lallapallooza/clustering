@@ -14,6 +14,7 @@ Checks: >
   -bugprone-unchecked-optional-access,
   -modernize-use-trailing-return-type,
   -modernize-use-nodiscard,
+  -modernize-use-ranges,
   -readability-identifier-naming,
   -readability-identifier-length,
   -readability-magic-numbers,

@@ -114,8 +114,8 @@ double referenceLloydInertia(const NDArray<float, 2> &X, std::size_t k, std::uin
       labels[i] = best;
     }
 
-    std::ranges::fill(sums, 0.0F);
-    std::ranges::fill(counts, 0U);
+    std::fill(sums.begin(), sums.end(), 0.0F);
+    std::fill(counts.begin(), counts.end(), 0U);
     for (std::size_t i = 0; i < n; ++i) {
       const std::size_t c = labels[i];
       ++counts[c];

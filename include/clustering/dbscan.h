@@ -47,7 +47,7 @@ public:
       : m_points(points), m_points_dim0(m_points.dim(0)), m_points_dim1(m_points.dim(1)),
         m_eps(eps), m_minPts(minPts), m_labels(m_points_dim0), m_seen_wave(m_points_dim0),
         m_query_model(m_points), m_thread_pool(n_jobs) {
-    std::ranges::fill(m_labels, UNCLASSIFIED);
+    std::fill(m_labels.begin(), m_labels.end(), UNCLASSIFIED);
   }
 
   /**
