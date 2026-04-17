@@ -61,39 +61,6 @@ static_assert(clustering::kmeans::LloydStrategy<LloydFusedGemm<float>, float>);
 static_assert(clustering::kmeans::SeederStrategy<GreedyKmppSeeder<float>, float>);
 static_assert(clustering::kmeans::SeederStrategy<AfkMc2Seeder<float>, float>);
 
-// Below the AFK-MC2 k-floor, a pinned @c AfkMc2Seeder must silently delegate to greedy so the
-// output matches a pinned @c GreedyKmppSeeder at the same seed + data. This pins the HEAD-era
-// public contract under which forcing AFK-MC2 at low @c k produced greedy output.
-TEST(AfkMc2, LowKFallsThroughToGreedyOutput) {
-  constexpr std::size_t n = 1200;
-  constexpr std::size_t d = 4;
-  constexpr std::size_t k = 8;
-  ASSERT_LT(k, AfkMc2Seeder<float>::kFloor);
-  const Blobs b = makeBlobs(n, d, k, 1.0F, 7U);
-
-  KMeans<float, LloydFusedGemm<float>, AfkMc2Seeder<float>> kmAfk(k, 1);
-  kmAfk.run(b.X, 100, 1e-4F, 42U);
-
-  KMeans<float, LloydFusedGemm<float>, GreedyKmppSeeder<float>> kmG(k, 1);
-  kmG.run(b.X, 100, 1e-4F, 42U);
-
-  ASSERT_EQ(kmAfk.labels().dim(0), kmG.labels().dim(0));
-  for (std::size_t i = 0; i < n; ++i) {
-    EXPECT_EQ(kmAfk.labels()(i), kmG.labels()(i)) << "label " << i << " diverges";
-  }
-  ASSERT_EQ(kmAfk.centroids().dim(0), k);
-  ASSERT_EQ(kmAfk.centroids().dim(1), d);
-  for (std::size_t c = 0; c < k; ++c) {
-    for (std::size_t t = 0; t < d; ++t) {
-      EXPECT_EQ(std::bit_cast<std::uint32_t>(kmAfk.centroids()(c, t)),
-                std::bit_cast<std::uint32_t>(kmG.centroids()(c, t)))
-          << "centroid (" << c << ", " << t << ") diverges";
-    }
-  }
-  EXPECT_EQ(std::bit_cast<std::uint64_t>(kmAfk.inertia()),
-            std::bit_cast<std::uint64_t>(kmG.inertia()));
-}
-
 // At @c k >= kFloor, AFK-MC2's log-k guarantee tracks greedy best-of-3 within 5% on
 // well-separated blobs. A wider gap would signal the Markov chain is stalling.
 TEST(AfkMc2, InertiaWithinRelaxedBoundVsGreedy) {

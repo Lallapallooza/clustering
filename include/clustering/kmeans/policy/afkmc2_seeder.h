@@ -6,12 +6,14 @@
 #include <type_traits>
 
 #include "clustering/always_assert.h"
-#include "clustering/kmeans/policy/greedy_kmpp_seeder.h"
+#include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/rng.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
 namespace clustering::kmeans {
+
+using math::detail::sqEuclideanRowPtr;
 
 /**
  * @brief AFK-MC2 seeder (Bachem, Lucic, Hassani, Krause, NeurIPS 2016).
@@ -30,10 +32,8 @@ namespace clustering::kmeans {
  * proposal collapses to uniform @c q(i) = 1/n so the chain remains ergodic.
  *
  * The chain's log-k approximation bound degrades at small @c k: below @c k = @ref kFloor the
- * AFK-MC2 selection is cheaper and higher-quality when delegated to @ref GreedyKmppSeeder.
- * This policy carries a nested greedy seeder and forwards to it on the low-@c k path so a
- * caller who pins @c AfkMc2Seeder via template parameter still gets a sensible centroid set at
- * any @c (n, k) shape.
+ * bound is too loose to beat greedy k-means++, and callers at that regime should pin
+ * @ref GreedyKmppSeeder (directly or via @ref AutoSeeder, which picks it by shape).
  *
  * @tparam T Element type; @c float or @c double.
  */
@@ -45,7 +45,8 @@ public:
 #ifdef CLUSTERING_KMEANS_AFKMC2_K_FLOOR
   /**
    * @brief Minimum @c k below which the AFK-MC2 chain's log-k approximation bound is too loose
-   *        to beat @ref GreedyKmppSeeder; low-@c k runs forward to the nested greedy path.
+   *        to beat @ref GreedyKmppSeeder. Exposed as a shape threshold for @ref AutoSeeder's
+   *        dispatcher; not checked inside @ref run.
    *
    * Override with @c -DCLUSTERING_KMEANS_AFKMC2_K_FLOOR=<value>.
    */
@@ -81,10 +82,6 @@ public:
    */
   void run(const NDArray<T, 2, Layout::Contig> &X, std::size_t k, std::uint64_t seed,
            math::Pool pool, NDArray<T, 2, Layout::Contig> &outCentroids) {
-    if (k < kFloor) {
-      m_greedy.run(X, k, seed, pool, outCentroids);
-      return;
-    }
     runChain(X, k, chainLengthDefault, seed, pool, outCentroids);
   }
 
@@ -126,7 +123,7 @@ private:
     const T *firstRow = centroidsData;
     T sumD2 = T{0};
     for (std::size_t i = 0; i < n; ++i) {
-      const T d2 = detail::sqEuclideanRowPtr(xData + (i * d), firstRow, d);
+      const T d2 = sqEuclideanRowPtr(xData + (i * d), firstRow, d);
       qData[i] = d2;
       sumD2 += d2;
     }
@@ -175,9 +172,9 @@ private:
     // c is the count of already-placed centroids.
     auto distToChosen = [&](std::size_t pointIdx, std::size_t chosenCount) noexcept -> T {
       const T *row = xData + (pointIdx * d);
-      T best = detail::sqEuclideanRowPtr(row, centroidsData, d);
+      T best = sqEuclideanRowPtr(row, centroidsData, d);
       for (std::size_t c = 1; c < chosenCount; ++c) {
-        const T cand = detail::sqEuclideanRowPtr(row, centroidsData + (c * d), d);
+        const T cand = sqEuclideanRowPtr(row, centroidsData + (c * d), d);
         if (cand < best) {
           best = cand;
         }
@@ -226,7 +223,6 @@ private:
     }
   }
 
-  GreedyKmppSeeder<T> m_greedy;
   NDArray<T, 1> m_q;
   NDArray<T, 1> m_qCum;
 };
