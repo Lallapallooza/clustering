@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <numeric>
 #include <stack>
 #include <vector>
 
 #include "clustering/math/distance.h"
+#include "clustering/math/thread.h"
 #include "clustering/memory/linear_alloc.h"
 #include "clustering/ndarray.h"
 
@@ -102,6 +104,55 @@ public:
     const T radius_sq = radius * radius;
     query(m_root, query_point, radius_sq, indices, limit);
     return indices;
+  }
+
+  /**
+   * @brief Returns the full radius-neighborhood adjacency over the indexed point cloud.
+   *
+   * Walks the tree once per row, fanning the outer loop out over @p pool. Lets DBSCAN consume
+   * the whole neighbor graph in one call rather than threading a per-point query loop through
+   * the caller.
+   *
+   * @param radius Non-negative neighbourhood radius; comparison runs on the squared distance.
+   * @param pool   Parallelism injection used to fan the outer row loop out across workers.
+   * @return Length-@c n vector where element @c i lists every @c j with
+   *         @c ||x_i - x_j||^2 <= radius^2.
+   */
+  [[nodiscard]] std::vector<std::vector<std::int32_t>> query(T radius, math::Pool pool) const {
+    const std::size_t n = m_points.dim(0);
+    std::vector<std::vector<std::int32_t>> adj(n);
+    if (n == 0) {
+      return adj;
+    }
+
+    const std::size_t d = m_points.dim(1);
+    const T radius_sq = radius * radius;
+
+    auto runRange = [&](std::size_t lo, std::size_t hi) {
+      NDArray<T, 1> q({d});
+      std::vector<std::size_t> hits;
+      for (std::size_t i = lo; i < hi; ++i) {
+        for (std::size_t k = 0; k < d; ++k) {
+          q[k] = m_points[i][k];
+        }
+        hits.clear();
+        query(m_root, q, radius_sq, hits, /*limit=*/-1);
+        adj[i].reserve(hits.size());
+        for (const std::size_t h : hits) {
+          adj[i].push_back(static_cast<std::int32_t>(h));
+        }
+      }
+    };
+
+    if (pool.shouldParallelize(n, 4, 2) && pool.pool != nullptr) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, n,
+                          [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); })
+          .wait();
+    } else {
+      runRange(0, n);
+    }
+    return adj;
   }
 
   /**

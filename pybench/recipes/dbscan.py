@@ -19,7 +19,7 @@ recipe = Recipe(
     default_params={"eps": 10.0, "min_samples": 5},
     param_grid={"n_jobs": [1, 4, 16]},
     default_sizes=(10000, 50000, 100000),
-    default_dims=(2, 8, 32, 128),
+    default_dims=(2, 8, 32, 64, 128),
     dataset=DatasetSpec(n_features=2, centers=20, cluster_std=3.0),
     ari_threshold=0.85,
     n_runs=3,

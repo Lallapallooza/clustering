@@ -1,12 +1,14 @@
 #pragma once
 
 #include <algorithm>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
 #include "clustering/always_assert.h"
 #include "clustering/math/defaults.h"
+#include "clustering/math/detail/pairwise_threshold_outer.h"
 #include "clustering/math/gemm.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
@@ -415,6 +417,143 @@ PairwisePath pairwiseSqEuclideanWithDispatchInfo(const NDArray<T, 2, LX> &X,
   return PairwisePath::Simd;
 }
 
+/**
+ * @brief Runtime predicate: true when the fused AVX2 threshold path is eligible.
+ *
+ * Dispatch criteria (all must hold):
+ *   - @c CLUSTERING_USE_AVX2 is defined and @c T is @c float.
+ *   - @p X and @p Y are @c Layout::Contig.
+ *   - @p X and @p Y are runtime 32-byte aligned (the AVX2 microkernel issues aligned loads).
+ *   - @p d is non-zero, at most @ref detail::kThresholdMaxD, and at least @c 8 (one AVX2
+ *     lane's worth of features, below which the blocked packer is net-negative).
+ *   - @p n and @p m are non-zero.
+ */
+template <class T, Layout LX, Layout LY>
+bool canUseFusedThreshold(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y) noexcept {
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float> && LX == Layout::Contig && LY == Layout::Contig) {
+    const std::size_t n = X.dim(0);
+    const std::size_t m = Y.dim(0);
+    const std::size_t d = X.dim(1);
+    if (n == 0 || m == 0 || d == 0) {
+      return false;
+    }
+    if (d < 8 || d > kThresholdMaxD) {
+      return false;
+    }
+    if (!X.template isAligned<32>() || !Y.template isAligned<32>()) {
+      return false;
+    }
+    return true;
+  } else {
+    (void)X;
+    (void)Y;
+    return false;
+  }
+#else
+  (void)X;
+  (void)Y;
+  return false;
+#endif
+}
+
+/**
+ * @brief Materialized fallback for the thresholded-emit API: compute each pair's squared
+ *        distance via @ref sqEuclideanRow and walk survivors.
+ *
+ * Used when the fused-path eligibility check rejects (strided view, wrong type, tiny d,
+ * AVX2 off). Iterates in global @c (row, col) ascending order so @p emit fires row-major --
+ * a tighter guarantee than the fused path gives. No intermediate @c (n x m) tile is
+ * materialized: callers with small @p n (e.g. single-seed range queries) avoid per-call heap
+ * traffic that a materialized-then-mask path would incur.
+ */
+template <class T, Layout LX, Layout LY, class Emit>
+  requires std::invocable<Emit &, std::size_t, std::size_t>
+void pairwiseSqEuclideanThresholdedMaterialized(const NDArray<T, 2, LX> &X,
+                                                const NDArray<T, 2, LY> &Y, T radiusSq, Pool pool,
+                                                Emit &&emit) {
+  const std::size_t n = X.dim(0);
+  const std::size_t m = Y.dim(0);
+  if (n == 0 || m == 0) {
+    return;
+  }
+
+  auto runRowRange = [&](std::size_t lo, std::size_t hi) {
+    for (std::size_t i = lo; i < hi; ++i) {
+      for (std::size_t j = 0; j < m; ++j) {
+        const T distSq = sqEuclideanRow<T, LX, LY>(X, i, Y, j);
+        if (distSq <= radiusSq) {
+          emit(i, j);
+        }
+      }
+    }
+  };
+
+  // Only fan out across rows: column emit within a row is order-sensitive and consumers rely
+  // on the per-row contract. Parallelism at the seed (row) level is safe because each row's
+  // emits land in a distinct key space, but the caller owns thread-safety of @p emit.
+  if (pool.shouldParallelize(n * m, 64, 2) && pool.pool != nullptr) {
+    pool.pool
+        ->submit_blocks(std::size_t{0}, n,
+                        [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
+        .wait();
+  } else {
+    runRowRange(0, n);
+  }
+}
+
 } // namespace detail
+
+/**
+ * @brief Emit every row pair (i, j) whose squared Euclidean distance is at most @p radiusSq.
+ *
+ * Dispatches between a fused AVX2 tile kernel that streams survivors directly out of the
+ * microkernel epilogue (no materialized @c (n x m) tile) and a materialized fallback
+ * (@ref pairwiseSqEuclidean plus a scalar survivor scan). The fused path fires @p emit in
+ * row-major order within each tile; the materialized path fires globally row-major. Both
+ * paths invoke @p emit exactly once per surviving cell.
+ *
+ * @tparam T    Element type (@c float or @c double).
+ * @tparam LX   Layout tag of @p X.
+ * @tparam LY   Layout tag of @p Y.
+ * @tparam Emit @c std::invocable<std::size_t, std::size_t> callable.
+ * @param X        Left operand (n x d).
+ * @param Y        Right operand (m x d).
+ * @param radiusSq Non-negative squared radius; interpreted as @c r*r so callers already
+ *                 squaring the radius avoid a redundant multiplication.
+ * @param pool     Parallelism injection forwarded to the selected path.
+ * @param emit     Callback invoked for each surviving @c (row, col) pair; row indexes into
+ *                 @p X, col indexes into @p Y. The caller owns thread-safety of @p emit if
+ *                 @p pool is non-serial.
+ */
+template <class T, Layout LX = Layout::Contig, Layout LY = Layout::Contig, class Emit>
+  requires std::invocable<Emit &, std::size_t, std::size_t>
+void pairwiseSqEuclideanThresholded(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y,
+                                    T radiusSq, Pool pool, Emit &&emit) {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "pairwiseSqEuclideanThresholded<T> requires T to be float or double");
+  CLUSTERING_ALWAYS_ASSERT(X.dim(1) == Y.dim(1));
+
+  const std::size_t n = X.dim(0);
+  const std::size_t m = Y.dim(0);
+  if (n == 0 || m == 0) {
+    return;
+  }
+
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float> && LX == Layout::Contig && LY == Layout::Contig) {
+    if (detail::canUseFusedThreshold(X, Y)) {
+      NDArray<T, 1> xNorms({n});
+      NDArray<T, 1> yNorms({m});
+      detail::rowNormsSq(X, xNorms, pool);
+      detail::rowNormsSq(Y, yNorms, pool);
+      detail::pairwiseThresholdOuterAvx2F32(X, Y, xNorms, yNorms, radiusSq, pool, emit);
+      return;
+    }
+  }
+#endif
+
+  detail::pairwiseSqEuclideanThresholdedMaterialized(X, Y, radiusSq, pool, emit);
+}
 
 } // namespace clustering::math
