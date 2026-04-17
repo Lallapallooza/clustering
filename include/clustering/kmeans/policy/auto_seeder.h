@@ -47,7 +47,7 @@ public:
   }
 
 private:
-  void ensureShape(std::size_t n, std::size_t d, std::size_t k) noexcept {
+  void ensureShape(std::size_t n, std::size_t d, std::size_t k) {
     if (n == m_lastN && d == m_lastD && k == m_lastK) {
       return;
     }
