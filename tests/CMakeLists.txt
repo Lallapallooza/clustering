@@ -22,7 +22,8 @@ add_executable(
     gemm_mutability_death_test.cpp
     gemm_backend_dispatch_test.cpp
     gemm_threading_test.cpp
-    kmeans_test.cpp
+    kmeans_lloyd_test.cpp
+    kmeans_seeder_dispatch_test.cpp
     kmeans_alloc_counter_test.cpp
     kmeans_determinism_test.cpp
     kmeans_seeder_test.cpp

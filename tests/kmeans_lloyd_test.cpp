@@ -2,16 +2,16 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <random>
 #include <vector>
 
 #include "clustering/kmeans.h"
+#include "clustering/kmeans/policy/lloyd_fused_gemm.h"
+#include "clustering/math/defaults.h"
 #include "clustering/ndarray.h"
 
 using clustering::KMeans;
@@ -70,8 +70,8 @@ double purity(const NDArray<std::int32_t, 1> &pred, const std::vector<std::int32
   return static_cast<double>(majority) / static_cast<double>(n);
 }
 
-// Reference Lloyd: textbook assignment / update with uniform-random init. Used to gate
-// inertia within 1% of the best of 3 independent seeds.
+// Reference Lloyd: textbook assignment / update with uniform-random init. Used to gate inertia
+// within 1% of the best of 3 independent seeds.
 double referenceLloydInertia(const NDArray<float, 2> &X, std::size_t k, std::uint64_t seed,
                              std::size_t maxIter) {
   const std::size_t n = X.dim(0);
@@ -189,9 +189,6 @@ TEST(KMeansEndToEnd, InertiaWithinOnePercentOfReferenceBestOfThree) {
     refBest = std::min(refBest, referenceLloydInertia(b.X, k, s, 300));
   }
 
-  // Within 1% of the relaxed gate: min(ours_best_of_3, ref_best_of_3). Here we only fit once;
-  // run additional seeds through our solver and keep the best to satisfy the "our own best-of-3"
-  // clause when our single seed happens to land in a shallow minimum.
   double oursBest = ours;
   for (const std::uint64_t s : {101ULL, 202ULL, 303ULL}) {
     KMeans<float> km2(k, 2);
@@ -286,7 +283,6 @@ TEST(KMeansEndToEnd, ReuseAcrossCallsDifferentSeeds) {
   // should differ (with three reasonable blobs all three usually land on the same optimum, so
   // assert that at least the internal labels vector differs across runs).
   EXPECT_FALSE(l1 == l2 && i1 == i2 && i2 == i3);
-  // Still all produce finite, positive inertia and valid labels.
   EXPECT_TRUE(std::isfinite(i1));
   EXPECT_TRUE(std::isfinite(i2));
   EXPECT_TRUE(std::isfinite(i3));
@@ -294,7 +290,7 @@ TEST(KMeansEndToEnd, ReuseAcrossCallsDifferentSeeds) {
 
 TEST(KMeansEndToEnd, AdversarialEmptyClusterReseed) {
   // n=16, k=12 with near-duplicated points forces multiple clusters to collapse; the reseed
-  // policy must redistribute without looping indefinitely. We stage four clusters worth of
+  // policy must redistribute without looping indefinitely. Stage four clusters worth of
   // coincident rows plus 12 slightly perturbed ones so at least k distinct donors exist.
   constexpr std::size_t n = 16;
   constexpr std::size_t d = 3;
@@ -311,7 +307,6 @@ TEST(KMeansEndToEnd, AdversarialEmptyClusterReseed) {
   KMeans<float> km(k, 1);
   km.run(X, 50, 1e-4F, 0U);
   EXPECT_LE(km.nIter(), 50U);
-  // Every cluster must have at least one assigned point after convergence.
   std::vector<std::int32_t> counts(k, 0);
   for (std::size_t i = 0; i < n; ++i) {
     ++counts[static_cast<std::size_t>(km.labels()(i))];
@@ -337,148 +332,14 @@ TEST(KMeansEndToEnd, ResetReleasesThenReruns) {
   EXPECT_GT(km.nIter(), 0U);
 }
 
-TEST(KMeansEndToEnd, LastAlgorithmAndSeederReportLloydAndGreedy) {
-  NDArray<float, 2> X({64, 4});
-  for (std::size_t i = 0; i < 64; ++i) {
-    for (std::size_t t = 0; t < 4; ++t) {
-      X(i, t) = static_cast<float>((i * 7) + t);
-    }
-  }
-  KMeans<float> km(4, 1);
-  km.run(X, 50, 1e-4F, 0U);
-  EXPECT_EQ(km.lastAlgorithm(), clustering::kmeans::detail::Algorithm::kLloydFusedGemm);
-  EXPECT_EQ(km.lastSeeder(), clustering::kmeans::detail::Seeder::kGreedyKMeansPlusPlus);
-}
-
-TEST(AfkMc2, AutoDispatchAboveNThresholdSelectsAfkMc2) {
-  // Auto-dispatch routes through AFK-MC2 when n >= afkmc2NThreshold AND k >= afkmc2KFloor. The
-  // low-d shape keeps runtime acceptable; only the assertion on lastSeeder is load-bearing.
-  constexpr std::size_t n = 600000;
-  constexpr std::size_t d = 4;
-  constexpr std::size_t k = 128;
-  ASSERT_GE(n, clustering::kmeans::detail::afkmc2NThreshold);
-  ASSERT_GE(k, clustering::kmeans::detail::afkmc2KFloor);
-  const Blobs b = makeBlobs(n, d, k, 0.8F, 17U);
-
-  KMeans<float> km(k, 1);
-  km.run(b.X, 20, 1e-3F, 42U);
-  EXPECT_EQ(km.lastSeeder(), clustering::kmeans::detail::Seeder::kAfkMc2);
-  EXPECT_GT(km.nIter(), 0U);
-}
-
-TEST(AfkMc2, InertiaWithinRelaxedBoundVsGreedy) {
-  // At (n=5e5, k=100) AFK-MC2's inertia must track greedy-kmpp's best-of-3 within 5%: Bachem
-  // 2016's log-k approximation guarantee translates into a small post-Lloyd inertia gap on
-  // well-separated blobs. A wider gap would signal the chain is stalling.
-  constexpr std::size_t n = 500000;
-  constexpr std::size_t d = 4;
-  constexpr std::size_t k = 100;
-  const Blobs b = makeBlobs(n, d, k, 0.8F, 99U);
-
-  KMeans<float> kmAfk(k, 1);
-  kmAfk.forceSeeder(clustering::kmeans::detail::Seeder::kAfkMc2);
-  kmAfk.run(b.X, 30, 1e-3F, 42U);
-  ASSERT_EQ(kmAfk.lastSeeder(), clustering::kmeans::detail::Seeder::kAfkMc2);
-  const double afkInertia = kmAfk.inertia();
-
-  double greedyBest = std::numeric_limits<double>::infinity();
-  for (const std::uint64_t s : {1ULL, 2ULL, 3ULL}) {
-    KMeans<float> kmG(k, 1);
-    kmG.forceSeeder(clustering::kmeans::detail::Seeder::kGreedyKMeansPlusPlus);
-    kmG.run(b.X, 30, 1e-3F, s);
-    greedyBest = std::min(greedyBest, kmG.inertia());
-  }
-
-  const double rel = (afkInertia - greedyBest) / std::max(1.0, greedyBest);
-  EXPECT_LT(rel, 0.05) << "afk=" << afkInertia << " greedyBest=" << greedyBest << " rel=" << rel;
-}
-
-TEST(AfkMc2, FallsBackToGreedyBelowKThreshold) {
-  // Forcing AFK-MC2 below afkmc2KFloor still runs to completion; lastSeeder reports the seeder
-  // that actually ran, which is the greedy fallback.
-  constexpr std::size_t n = 500000;
-  constexpr std::size_t d = 4;
-  constexpr std::size_t k = 50;
-  ASSERT_LT(k, clustering::kmeans::detail::afkmc2KFloor);
-  const Blobs b = makeBlobs(n, d, k, 1.0F, 7U);
-
-  KMeans<float> km(k, 1);
-  km.forceSeeder(clustering::kmeans::detail::Seeder::kAfkMc2);
-  km.run(b.X, 20, 1e-3F, 42U);
-  EXPECT_EQ(km.lastSeeder(), clustering::kmeans::detail::Seeder::kGreedyKMeansPlusPlus);
-}
-
-TEST(AfkMc2, DeterministicAcrossRepeatedRuns) {
-  // Same seed + nJobs -> bit-identical centroids + labels + inertia across five fits. The chain
-  // must draw from the PRNG in a fixed order regardless of acceptance-branch outcomes.
-  constexpr std::size_t n = 600000;
-  constexpr std::size_t d = 4;
-  constexpr std::size_t k = 128;
-  const Blobs b = makeBlobs(n, d, k, 0.8F, 31U);
-
-  constexpr std::size_t nJobs = 4;
-  constexpr std::uint64_t seed = 2025U;
-  constexpr std::size_t maxIter = 15;
-  constexpr float tol = 1e-3F;
-
-  KMeans<float> km0(k, nJobs);
-  km0.run(b.X, maxIter, tol, seed);
-  ASSERT_EQ(km0.lastSeeder(), clustering::kmeans::detail::Seeder::kAfkMc2);
-  const std::vector<std::int32_t> refLabels(km0.labels().data(), km0.labels().data() + n);
-  const std::vector<float> refCentroids(km0.centroids().data(), km0.centroids().data() + (k * d));
-  const double refInertia = km0.inertia();
-
-  for (int rep = 1; rep < 5; ++rep) {
-    KMeans<float> km(k, nJobs);
-    km.run(b.X, maxIter, tol, seed);
-    const std::vector<std::int32_t> labels(km.labels().data(), km.labels().data() + n);
-    ASSERT_EQ(refLabels, labels) << "afkmc2 labels diverge at repetition " << rep;
-    for (std::size_t j = 0; j < refCentroids.size(); ++j) {
-      ASSERT_EQ(std::bit_cast<std::uint32_t>(refCentroids[j]),
-                std::bit_cast<std::uint32_t>(km.centroids().data()[j]))
-          << "afkmc2 centroid[" << j << "] diverges at repetition " << rep;
-    }
-    ASSERT_EQ(std::bit_cast<std::uint64_t>(refInertia), std::bit_cast<std::uint64_t>(km.inertia()));
-  }
-}
-
-TEST(AfkMc2, AtK1ProducesOneCentroid) {
-  // k=1 is below afkmc2KFloor so forcing AFK-MC2 falls through to greedy; the result is the
-  // data mean per the k=1 Lloyd contract.
-  constexpr std::size_t n = 100;
-  constexpr std::size_t d = 4;
-  NDArray<float, 2> X({n, d});
-  std::mt19937 gen(17U);
-  std::normal_distribution<float> dist(0.0F, 1.0F);
-  std::array<double, d> sum{};
-  for (std::size_t i = 0; i < n; ++i) {
-    for (std::size_t t = 0; t < d; ++t) {
-      const float v = dist(gen);
-      X(i, t) = v;
-      sum[t] += static_cast<double>(v);
-    }
-  }
-  KMeans<float> km(1, 1);
-  km.forceSeeder(clustering::kmeans::detail::Seeder::kAfkMc2);
-  km.run(X, 50, 1e-4F, 99U);
-  EXPECT_EQ(km.lastSeeder(), clustering::kmeans::detail::Seeder::kGreedyKMeansPlusPlus);
-  for (std::size_t i = 0; i < n; ++i) {
-    EXPECT_EQ(km.labels()(i), 0);
-  }
-  for (std::size_t t = 0; t < d; ++t) {
-    const auto expected = static_cast<float>(sum[t] / static_cast<double>(n));
-    EXPECT_NEAR(km.centroids()(0, t), expected, 1e-4F);
-  }
-}
-
 TEST(KMeansEndToEnd, LabelsMatchBruteForceArgminAtMidDim) {
   // d > pairwiseArgminMaxD routes the Lloyd assignment step through the internal chunked
-  // materialized path (packB + gemmRunPrepacked over solver-owned scratch). Shape is chosen so
-  // n exceeds one pairwiseArgminChunkRows boundary -- exercising both a whole chunk and a tail
-  // pass -- and so k is well inside the [1, kNc<float>] envelope the single-call packB supports.
-  // The test pins label correctness by comparing against scalar brute-force argmin over the
-  // final centroids, so any divergence between the chunked driver and the textbook
-  // argmin_c ||x - c||^2 surfaces as a labels[i] mismatch.
+  // materialized path. Shape is chosen so n exceeds one pairwiseArgminChunkRows boundary --
+  // exercising both a whole chunk and a tail pass -- and so k is well inside the
+  // [1, kNc<float>] envelope the single-call packB supports. The test pins label correctness
+  // by comparing against scalar brute-force argmin over the final centroids, so any divergence
+  // between the chunked driver and the textbook argmin_c ||x - c||^2 surfaces as a labels[i]
+  // mismatch.
   constexpr std::size_t n = 600;
   constexpr std::size_t d = 96;
   constexpr std::size_t k = 16;
@@ -487,7 +348,6 @@ TEST(KMeansEndToEnd, LabelsMatchBruteForceArgminAtMidDim) {
 
   KMeans<float> km(k, 1);
   km.run(b.X, 100, 1e-4F, 42U);
-  ASSERT_EQ(km.lastAlgorithm(), clustering::kmeans::detail::Algorithm::kLloydFusedGemm);
 
   const auto &centroids = km.centroids();
   const auto &labels = km.labels();

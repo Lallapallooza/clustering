@@ -8,32 +8,37 @@
 #include <type_traits>
 
 #include "clustering/always_assert.h"
-#include "clustering/kmeans/detail/dispatch.h"
-#include "clustering/kmeans/detail/solver.h"
+#include "clustering/kmeans/policy/auto_seeder.h"
+#include "clustering/kmeans/policy/lloyd.h"
+#include "clustering/kmeans/policy/lloyd_fused_gemm.h"
+#include "clustering/kmeans/policy/seeder.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
 namespace clustering {
 
 /**
- * @brief Lloyd-family k-means with fused-argmin-GEMM Lloyd seeded by greedy k-means++.
+ * @brief Lloyd-family k-means.
  *
- * Seeder dispatch picks
- * greedy k-means++ by default and escalates to AFK-MC2 at
- * @c n >= @c kmeans::detail::afkmc2NThreshold AND @c k >= @c kmeans::detail::afkmc2KFloor;
- * forcing AFK-MC2 below either threshold falls through to greedy k-means++ and @ref lastSeeder
- * reports the seeder that actually ran.
+ * The algorithm and seeder are template parameters with concept constraints. The default
+ * instantiation carries @c LloydFusedGemm<T> and @c AutoSeeder<T>, the latter picking between
+ * greedy k-means++ and AFK-MC2 against workload shape at @c run time. Callers who want to pin
+ * a specific combination spell it out, e.g.
+ * @c KMeans<float, LloydFusedGemm<float>, AfkMc2Seeder<float>>.
  *
- * @note @c KMeans does NOT own @p X. The caller must keep the @c NDArray alive for the
- *       lifetime of every @ref run call on this instance. An @c n_init > 1 harness
- *       constructs @c KMeans once and calls @c run repeatedly against the same @p X so the
- *       solver's scratch amortizes across runs at a fixed @c (n, d, k, nJobs) tuple.
- *       Mirrors @c DBSCAN and @c KDTree consumption semantics.
+ * @note @c KMeans does NOT own @p X. The caller must keep the @c NDArray alive for the lifetime
+ *       of every @ref run call on this instance. An @c n_init > 1 harness constructs @c KMeans
+ *       once and calls @c run repeatedly against the same @p X so policy scratch amortizes
+ *       across runs at a fixed @c (n, d, k, nJobs) tuple.
  *
- * @tparam T Element type. Only @c float is supported; add a @c double specialization to
- *           extend.
+ * @tparam T      Element type. Only @c float is supported; add a @c double specialization to
+ *                extend.
+ * @tparam Algo   Lloyd driver satisfying @ref kmeans::LloydStrategy<Algo, T>.
+ * @tparam Seeder Seeder satisfying @ref kmeans::SeederStrategy<Seeder, T>.
  */
-template <class T> class KMeans {
+template <class T, class Algo = kmeans::LloydFusedGemm<T>, class Seeder = kmeans::AutoSeeder<T>>
+  requires kmeans::LloydStrategy<Algo, T> && kmeans::SeederStrategy<Seeder, T>
+class KMeans {
   static_assert(std::is_same_v<T, float>,
                 "KMeans<T> supports only float; add a double specialization to extend.");
 
@@ -42,16 +47,17 @@ public:
    * @brief Construct a reusable k-means fitter.
    *
    * @param k     Number of clusters (>= 1).
-   * @param nJobs Worker count for the internal thread pool. A value of @c 0 is clamped
-   *              upward to @c std::thread::hardware_concurrency() so the pool is always
-   *              usable by the @ref math::Pool helpers.
+   * @param nJobs Worker count for the internal thread pool. A value of @c 0 is clamped upward
+   *              to @c std::thread::hardware_concurrency() so the pool is always usable by the
+   *              @ref math::Pool helpers.
    */
-  explicit KMeans(std::size_t k, std::size_t nJobs = std::thread::hardware_concurrency()) : m_k(k) {
+  explicit KMeans(std::size_t k, std::size_t nJobs = std::thread::hardware_concurrency())
+      : m_k(k), m_centroids({0, 0}), m_labels({0}) {
     CLUSTERING_ALWAYS_ASSERT(k >= 1);
     // Skip pool construction when the caller asks for serial execution. The pool ctor spawns
-    // @c nJobs std::thread workers plus a detach/join pair per instance; at the small-n corner
-    // those threads sit idle yet still cost ~20 us per KMeans instance. Leaving @c m_pool empty
-    // lets @ref run pass @c Pool{nullptr} down without the creation/destruction detour.
+    // nJobs std::thread workers plus a detach/join pair per instance; at the small-n corner
+    // those threads sit idle yet still cost ~20 us per KMeans instance. Leaving m_pool empty
+    // lets run() pass Pool{nullptr} down without the creation/destruction detour.
     const std::size_t clamped = clampedJobCount(nJobs);
     if (clamped > 1) {
       m_pool.emplace(clamped);
@@ -65,75 +71,63 @@ public:
   ~KMeans() = default;
 
   /**
-   * @brief Fit to @p X. No allocation fires inside the iteration loop; solver scratch is
-   *        sized at the first @c run call and lazily resized when the @c (n, d, k, nJobs)
-   *        shape tuple changes between calls.
+   * @brief Fit to @p X.
    *
    * @param X       Contiguous n x d dataset. The caller retains ownership; @p X must outlive
    *                this @c run call and every subsequent call that intends to reuse scratch.
    * @param maxIter Iteration cap on the inner Lloyd loop.
-   * @param tol     Convergence tolerance on the L2 centroid shift (linear). Internally
-   *                compared as @c tol*tol against the Kahan-summed per-centroid shift-squared.
-   * @param seed    PRNG seed. Identical @c (seed, nJobs, X, maxIter, tol) produces
-   *                bit-identical labels, centroids, and inertia.
+   * @param tol     Convergence tolerance on the L2 centroid shift (linear). Internally compared
+   *                as @c tol*tol against the Kahan-summed per-centroid shift-squared.
+   * @param seed    PRNG seed. Identical @c (seed, nJobs, X, maxIter, tol) produces bit-identical
+   *                labels, centroids, and inertia at @c nJobs=1.
    *
    * @warning @p X must remain alive and unchanged for the full duration of this call.
    */
   void run(const NDArray<T, 2> &X, std::size_t maxIter = 300, T tol = T{1e-4},
            std::uint64_t seed = 0) {
-    // Absent @c m_pool the run is strictly serial; the kernels short-circuit every
-    // @c shouldParallelize check via the null @c Pool.pool pointer and skip the per-site
-    // @c BS::submit_blocks dispatch round-trip (futures + move_only_function + queue).
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+
+    CLUSTERING_ALWAYS_ASSERT(m_k >= 1);
+    CLUSTERING_ALWAYS_ASSERT(n >= m_k);
+
+    ensureOutputShape(n, d);
+
+    if (n == 0 || d == 0) {
+      m_nIter = 0;
+      m_converged = true;
+      m_inertia = 0.0;
+      return;
+    }
+
     const math::Pool pool{m_pool.has_value() ? &*m_pool : nullptr};
-    m_solver.fit(X, m_k, maxIter, tol, seed, pool, m_forcedAlgorithm, m_forcedSeeder);
+    m_seeder.run(X, m_k, seed, pool, m_centroids);
+    m_lloyd.run(X, m_centroids, m_k, maxIter, tol, pool, m_labels, m_inertia, m_nIter, m_converged);
   }
 
   /// Length-n assignment; each entry is in @c [0, k).
-  [[nodiscard]] const NDArray<std::int32_t, 1> &labels() const noexcept {
-    return m_solver.labels();
-  }
+  [[nodiscard]] const NDArray<std::int32_t, 1> &labels() const noexcept { return m_labels; }
   /// k x d fitted centroids.
-  [[nodiscard]] const NDArray<T, 2> &centroids() const noexcept { return m_solver.centroids(); }
-  /// Final inertia: Kahan-summed @c f64 total of per-point squared distance to assignment.
-  [[nodiscard]] double inertia() const noexcept { return m_solver.inertia(); }
-  /// Iterations executed before @c tol or @c maxIter fired.
-  [[nodiscard]] std::size_t nIter() const noexcept { return m_solver.nIter(); }
-  /// True iff the last run stopped because centroid shift fell at or below @c tol.
-  [[nodiscard]] bool converged() const noexcept { return m_solver.converged(); }
-
-  /**
-   * @brief Diagnostic: which inner algorithm fired on the last run. Non-stable API; the
-   *        @c detail::Algorithm enumerators are reserved across releases and must not be
-   *        branched on in production code.
-   */
-  [[nodiscard]] kmeans::detail::Algorithm lastAlgorithm() const noexcept {
-    return m_solver.lastAlgorithm();
+  [[nodiscard]] const NDArray<T, 2, Layout::Contig> &centroids() const noexcept {
+    return m_centroids;
   }
-  /**
-   * @brief Diagnostic: which seeder fired on the last run. Same non-contractual status as
-   *        @ref lastAlgorithm.
-   */
-  [[nodiscard]] kmeans::detail::Seeder lastSeeder() const noexcept { return m_solver.lastSeeder(); }
+  /// Final inertia: Kahan-summed @c f64 total of per-point squared distance to assignment.
+  [[nodiscard]] double inertia() const noexcept { return m_inertia; }
+  /// Iterations executed before @c tol or @c maxIter fired.
+  [[nodiscard]] std::size_t nIter() const noexcept { return m_nIter; }
+  /// True iff the last run stopped because centroid shift fell at or below @c tol.
+  [[nodiscard]] bool converged() const noexcept { return m_converged; }
 
   /// Release every scratch buffer. The next @ref run call reallocates against its shape.
-  void reset() { m_solver.reset(); }
-
-  /**
-   * @brief Pin the dispatched algorithm across subsequent @ref run calls.
-   *
-   * @warning The enumerator values in @c kmeans::detail::Algorithm are not a stable API;
-   *          new variants land between releases. Use @ref clearForcedAlgorithm to return
-   *          the instance to auto-dispatch.
-   */
-  void forceAlgorithm(kmeans::detail::Algorithm alg) noexcept { m_forcedAlgorithm = alg; }
-  void clearForcedAlgorithm() noexcept { m_forcedAlgorithm.reset(); }
-
-  /**
-   * @brief Pin the dispatched seeder across subsequent @ref run calls. Same non-stable
-   *        status as @ref forceAlgorithm.
-   */
-  void forceSeeder(kmeans::detail::Seeder s) noexcept { m_forcedSeeder = s; }
-  void clearForcedSeeder() noexcept { m_forcedSeeder.reset(); }
+  void reset() {
+    m_centroids = NDArray<T, 2, Layout::Contig>({0, 0});
+    m_labels = NDArray<std::int32_t, 1>({0});
+    m_inertia = 0.0;
+    m_nIter = 0;
+    m_converged = false;
+    m_lloyd = Algo{};
+    m_seeder = Seeder{};
+  }
 
 private:
   static std::size_t clampedJobCount(std::size_t nJobs) noexcept {
@@ -144,11 +138,25 @@ private:
     return nJobs;
   }
 
+  void ensureOutputShape(std::size_t n, std::size_t d) {
+    if (m_centroids.dim(0) != m_k || m_centroids.dim(1) != d) {
+      m_centroids = NDArray<T, 2, Layout::Contig>({m_k, d});
+    }
+    if (m_labels.dim(0) != n) {
+      m_labels = NDArray<std::int32_t, 1>({n});
+    }
+  }
+
   std::size_t m_k;
   std::optional<BS::light_thread_pool> m_pool;
-  kmeans::detail::Solver<T> m_solver{};
-  std::optional<kmeans::detail::Algorithm> m_forcedAlgorithm;
-  std::optional<kmeans::detail::Seeder> m_forcedSeeder;
+  NDArray<T, 2, Layout::Contig> m_centroids;
+  NDArray<std::int32_t, 1> m_labels;
+  double m_inertia = 0.0;
+  std::size_t m_nIter = 0;
+  bool m_converged = false;
+
+  Algo m_lloyd{};
+  Seeder m_seeder{};
 };
 
 } // namespace clustering
