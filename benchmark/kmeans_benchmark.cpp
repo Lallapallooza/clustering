@@ -2,11 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <random>
 
 #include "clustering/kmeans.h"
-#include "clustering/kmeans/detail/dispatch.h"
 #include "clustering/ndarray.h"
 
 using clustering::KMeans;
@@ -34,17 +32,13 @@ NDArray<float, 2> makeBlobs(std::size_t n, std::size_t d, std::size_t k, std::ui
   return X;
 }
 
-void runKMeans(benchmark::State &state, std::size_t n, std::size_t d, std::size_t k,
-               std::optional<clustering::kmeans::detail::Algorithm> forced) {
+void runKMeans(benchmark::State &state, std::size_t n, std::size_t d, std::size_t k) {
   auto X = makeBlobs(n, d, k, /*seed=*/1234U);
 
   // Fresh fitter per iteration so scratch allocation is amortized into the measured cost, the
   // same way a Python caller pays it per fit().
   for (auto _ : state) {
     KMeans<float> km(k, /*nJobs=*/1);
-    if (forced.has_value()) {
-      km.forceAlgorithm(*forced);
-    }
     km.run(X, /*maxIter=*/300, /*tol=*/1e-4F, /*seed=*/42U);
     benchmark::DoNotOptimize(km.inertia());
     benchmark::ClobberMemory();
@@ -57,17 +51,17 @@ void runKMeans(benchmark::State &state, std::size_t n, std::size_t d, std::size_
 
 // Auto-dispatch sweep across the envelope corners so the benchmark surfaces the shape-vs-runtime
 // map the Python-facing dispatch will drive.
-void BM_KMeansAuto_LowDSmall(benchmark::State &s) { runKMeans(s, 1000, 2, 8, std::nullopt); }
-void BM_KMeansAuto_LowDMid(benchmark::State &s) { runKMeans(s, 10000, 4, 16, std::nullopt); }
-void BM_KMeansAuto_MidDMid(benchmark::State &s) { runKMeans(s, 10000, 32, 32, std::nullopt); }
-void BM_KMeansAuto_HighKMid(benchmark::State &s) { runKMeans(s, 10000, 32, 256, std::nullopt); }
-void BM_KMeansAuto_HighKHigh(benchmark::State &s) { runKMeans(s, 50000, 32, 512, std::nullopt); }
-void BM_KMeansAuto_TinyLowD(benchmark::State &s) { runKMeans(s, 10000, 2, 8, std::nullopt); }
-void BM_KMeansAuto_TinyLowDK32(benchmark::State &s) { runKMeans(s, 10000, 2, 32, std::nullopt); }
-void BM_KMeansAuto_LowDK64(benchmark::State &s) { runKMeans(s, 10000, 4, 64, std::nullopt); }
-void BM_KMeansAuto_HighK20K(benchmark::State &s) { runKMeans(s, 20000, 8, 256, std::nullopt); }
-void BM_KMeansAuto_HighK30K(benchmark::State &s) { runKMeans(s, 30000, 4, 512, std::nullopt); }
-void BM_KMeansAuto_HighK50K(benchmark::State &s) { runKMeans(s, 50000, 4, 1000, std::nullopt); }
+void BM_KMeansAuto_LowDSmall(benchmark::State &s) { runKMeans(s, 1000, 2, 8); }
+void BM_KMeansAuto_LowDMid(benchmark::State &s) { runKMeans(s, 10000, 4, 16); }
+void BM_KMeansAuto_MidDMid(benchmark::State &s) { runKMeans(s, 10000, 32, 32); }
+void BM_KMeansAuto_HighKMid(benchmark::State &s) { runKMeans(s, 10000, 32, 256); }
+void BM_KMeansAuto_HighKHigh(benchmark::State &s) { runKMeans(s, 50000, 32, 512); }
+void BM_KMeansAuto_TinyLowD(benchmark::State &s) { runKMeans(s, 10000, 2, 8); }
+void BM_KMeansAuto_TinyLowDK32(benchmark::State &s) { runKMeans(s, 10000, 2, 32); }
+void BM_KMeansAuto_LowDK64(benchmark::State &s) { runKMeans(s, 10000, 4, 64); }
+void BM_KMeansAuto_HighK20K(benchmark::State &s) { runKMeans(s, 20000, 8, 256); }
+void BM_KMeansAuto_HighK30K(benchmark::State &s) { runKMeans(s, 30000, 4, 512); }
+void BM_KMeansAuto_HighK50K(benchmark::State &s) { runKMeans(s, 50000, 4, 1000); }
 
 } // namespace
 
