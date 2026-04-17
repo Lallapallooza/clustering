@@ -77,7 +77,7 @@ inline constexpr detail::PointwiseSqFn pointwiseSq{};
  *
  * When @c CLUSTERING_USE_AVX2 is defined, @c T is @c float, @p n is at least 8, and both
  * operands are 32-byte aligned, dispatches to @c detail::sqEuclideanAvx2F32. The 8-lane gate
- * mirrors @c kdtree.h: below 8 dims the horizontal-sum epilogue is pure tax. The alignment
+ * mirrors @c index/kdtree.h: below 8 dims the horizontal-sum epilogue is pure tax. The alignment
  * check guards against unaligned Borrowed / strided views reaching @c _mm256_load_ps, which is
  * undefined behavior on misaligned inputs.
  *

@@ -3,7 +3,7 @@
 #include <new>
 #include <random>
 
-#include "clustering/kdtree.h"
+#include "clustering/index/kdtree.h"
 #include "clustering/memory/new_alloc.h"
 
 using clustering::KDTree;

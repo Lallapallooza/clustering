@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "clustering/kdtree.h"
+#include "clustering/index/kdtree.h"
 
 using clustering::KDTree;
 using clustering::NDArray;
