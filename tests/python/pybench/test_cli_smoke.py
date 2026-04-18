@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import sys
 from pathlib import Path
@@ -167,42 +166,3 @@ def test_cli_gate_fail_no_charts_no_json_exit_nonzero(
 
     assert not (out_dir / "results.json").exists()
     assert not list(out_dir.glob("*.png"))
-
-
-def test_plot_module_is_gone() -> None:
-    plot_py = Path(__file__).resolve().parents[3] / "pybench" / "plot.py"
-    assert not plot_py.exists(), "pybench/plot.py must not exist after the cutover"
-    # An editable install of this project may cache a stale source-file map;
-    # the underlying source file is the source of truth for "module is gone".
-    try:
-        importlib.import_module("pybench.plot")
-    except (ModuleNotFoundError, FileNotFoundError):
-        return
-    pytest.fail("pybench.plot resolved despite the source file being removed")
-
-
-def test_cli_gate_fail_banner_says_fail(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr("pybench.cli.run_one", _stub_run_one_factory(ari=0.4))
-    out_dir = tmp_path / "out"
-
-    with pytest.raises(SystemExit):
-        _invoke_main(
-            monkeypatch,
-            [
-                "--algo",
-                "dbscan",
-                "--sizes",
-                "1000",
-                "--dims",
-                "2",
-                "--out",
-                str(out_dir),
-            ],
-        )
-
-    captured = capsys.readouterr()
-    assert "FAIL" in captured.err

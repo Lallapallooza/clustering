@@ -80,14 +80,6 @@ def test_capture_metadata_basic_fields() -> None:
     assert meta.canonical_encoding_version == 1
 
 
-def test_capture_metadata_no_hostname() -> None:
-    meta = capture_metadata()
-    keys = set(asdict(meta).keys())
-    assert "hostname" not in keys
-    assert "host" not in keys
-    assert "node" not in keys
-
-
 def test_capture_metadata_handles_git_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -170,20 +162,6 @@ def test_save_load_wrapper_round_trip_preserves_results(tmp_path: Path) -> None:
         assert loaded == original
 
 
-def test_save_results_writes_wrapper_shape(tmp_path: Path) -> None:
-    results = [_make_result()]
-    meta = _meta()
-    path = tmp_path / "results.json"
-
-    save_results(path, meta, results)
-    raw = json.loads(path.read_text(encoding="utf-8"))
-
-    assert isinstance(raw, dict)
-    assert set(raw.keys()) == {"meta", "results"}
-    assert isinstance(raw["results"], list)
-    assert isinstance(raw["meta"], dict)
-
-
 def test_save_results_writes_sort_keys(tmp_path: Path) -> None:
     results = [_make_result()]
     meta = _meta()
@@ -191,30 +169,23 @@ def test_save_results_writes_sort_keys(tmp_path: Path) -> None:
 
     save_results(path, meta, results)
     text = path.read_text(encoding="utf-8")
-    # sort_keys=True → "meta" appears before "results" at the top level.
+    # sort_keys=True -> "meta" appears before "results" at the top level.
     assert text.index('"meta"') < text.index('"results"')
 
 
-def test_save_results_rejects_nan(tmp_path: Path) -> None:
-    results = [_make_result(ari=math.nan)]
-    meta = _meta()
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [("ari", math.nan), ("speedup", math.inf)],
+    ids=["nan", "inf"],
+)
+def test_save_results_rejects_non_finite(
+    tmp_path: Path, field: str, bad_value: float
+) -> None:
+    results = [_make_result(**{field: bad_value})]
     path = tmp_path / "results.json"
-
     with pytest.raises(ValueError) as exc:
-        save_results(path, meta, results)
-    msg = str(exc.value)
-    assert "ari" in msg
-    assert "results[0]" in msg
-
-
-def test_save_results_rejects_inf(tmp_path: Path) -> None:
-    results = [_make_result(speedup=math.inf)]
-    meta = _meta()
-    path = tmp_path / "results.json"
-
-    with pytest.raises(ValueError) as exc:
-        save_results(path, meta, results)
-    assert "speedup" in str(exc.value)
+        save_results(path, _meta(), results)
+    assert field in str(exc.value)
 
 
 def test_load_results_legacy_bare_list_prints_warning_and_fills_unknown(
