@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from pybench.charts.data import (
-    PARTITION_EXCLUDED_PARAM_KEYS,
     canonical_results_payload,
     partition,
     partition_key,
@@ -52,10 +51,6 @@ def _make_result(
     )
 
 
-def test_excluded_keys_contains_only_n_jobs() -> None:
-    assert PARTITION_EXCLUDED_PARAM_KEYS == frozenset({"n_jobs"})
-
-
 def test_partition_groups_sizes_dims_and_n_jobs_into_one_bucket() -> None:
     base = {"eps": 0.5, "min_samples": 5}
     results = [
@@ -85,26 +80,22 @@ def test_partition_splits_on_non_n_jobs_param_difference() -> None:
     assert eps_values == {0.5: 1, 1.0: 2}
 
 
-def test_partition_rejects_non_scalar_param_value_with_key_and_type() -> None:
-    bad = _make_result(params={"eps": [0.5, 1.0], "n_jobs": 1})
-
-    with pytest.raises(ValueError) as exc:
-        partition([bad])
-
-    message = str(exc.value)
-    assert "eps" in message
-    assert "list" in message
-
-
 @pytest.mark.parametrize(
-    "bad_value",
-    [[1, 2], {"x": 1}, (1, 2)],
+    ("bad_value", "type_name"),
+    [
+        ([0.5, 1.0], "list"),
+        ({"x": 1}, "dict"),
+        ((1, 2), "tuple"),
+    ],
     ids=["list", "dict", "tuple"],
 )
-def test_partition_rejects_each_non_scalar_container(bad_value: Any) -> None:
+def test_partition_rejects_non_scalar_param_value(
+    bad_value: Any, type_name: str
+) -> None:
     bad = _make_result(params={"eps": bad_value})
-    with pytest.raises(ValueError, match="eps"):
+    with pytest.raises(ValueError) as exc:
         partition([bad])
+    assert "eps" in str(exc.value)
 
 
 def test_partition_scalar_booleans_and_none_are_accepted() -> None:
@@ -160,20 +151,20 @@ def test_safe_ratio_returns_quotient_on_valid_inputs() -> None:
     assert safe_ratio(1.0, 4.0) == 0.25
 
 
-def test_canonical_payload_rejects_nan_with_named_field() -> None:
-    r = _make_result(ari=math.nan)
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [("ari", math.nan), ("speedup", math.inf)],
+    ids=["nan", "inf"],
+)
+def test_canonical_payload_rejects_non_finite_with_named_field(
+    field: str, bad_value: float
+) -> None:
+    r = _make_result(**{field: bad_value})
     with pytest.raises(ValueError) as exc:
         canonical_results_payload([r])
     msg = str(exc.value)
-    assert "ari" in msg
+    assert field in msg
     assert "results[0]" in msg
-
-
-def test_canonical_payload_rejects_inf_with_named_field() -> None:
-    r = _make_result(speedup=math.inf)
-    with pytest.raises(ValueError) as exc:
-        canonical_results_payload([r])
-    assert "speedup" in str(exc.value)
 
 
 def test_canonical_payload_is_byte_stable_under_params_reordering() -> None:

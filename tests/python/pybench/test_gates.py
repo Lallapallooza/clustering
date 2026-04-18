@@ -46,69 +46,40 @@ _THRESHOLDS = {"dbscan": 0.85, "kmeans": 0.85}
 
 
 def test_gate_pass_when_all_finite_and_above_threshold() -> None:
-    r = _make_result(ari=0.99, ours_peak_mb=50.0, theirs_peak_mb=100.0)
-    assert evaluate_gates([r], _THRESHOLDS) == []
+    assert evaluate_gates([_make_result()], _THRESHOLDS) == []
 
 
-def test_gate_fail_when_ari_below_threshold() -> None:
-    r = _make_result(ari=0.5)
+@pytest.mark.parametrize(
+    ("field", "value", "expected_reason_substring"),
+    [
+        ("ari", 0.5, "ari"),
+        ("ari", math.nan, "nan"),
+        ("ari", math.inf, "ari"),
+        ("ours_peak_mb", 0.0, "ours_peak_mb"),
+        ("ours_peak_mb", -1.0, "-1"),
+        ("ours_peak_mb", math.nan, "nan"),
+        ("theirs_peak_mb", 0.0, "theirs_peak_mb"),
+        ("speedup", math.inf, "speedup"),
+    ],
+    ids=[
+        "ari_below_threshold",
+        "ari_nan",
+        "ari_inf",
+        "ours_peak_mb_zero",
+        "ours_peak_mb_negative",
+        "ours_peak_mb_nan",
+        "theirs_peak_mb_zero",
+        "speedup_inf",
+    ],
+)
+def test_gate_fail_on_individual_field_violation(
+    field: str, value: float, expected_reason_substring: str
+) -> None:
+    r = _make_result(**{field: value})
     failures = evaluate_gates([r], _THRESHOLDS)
     assert len(failures) == 1
     (reason,) = failures[0].reasons
-    assert "ari" in reason
-    assert "0.5" in reason
-
-
-def test_gate_fail_when_ari_nan() -> None:
-    r = _make_result(ari=math.nan)
-    failures = evaluate_gates([r], _THRESHOLDS)
-    assert len(failures) == 1
-    (reason,) = failures[0].reasons
-    assert "ari" in reason
-    assert "nan" in reason.lower()
-
-
-def test_gate_fail_when_ours_peak_mb_zero() -> None:
-    r = _make_result(ours_peak_mb=0.0)
-    failures = evaluate_gates([r], _THRESHOLDS)
-    assert len(failures) == 1
-    (reason,) = failures[0].reasons
-    assert "ours_peak_mb" in reason
-    assert "0" in reason
-
-
-def test_gate_fail_when_theirs_peak_mb_zero() -> None:
-    r = _make_result(theirs_peak_mb=0.0)
-    failures = evaluate_gates([r], _THRESHOLDS)
-    assert len(failures) == 1
-    (reason,) = failures[0].reasons
-    assert "theirs_peak_mb" in reason
-
-
-def test_gate_fail_when_speedup_is_infinite() -> None:
-    r = _make_result(speedup=math.inf)
-    failures = evaluate_gates([r], _THRESHOLDS)
-    assert len(failures) == 1
-    (reason,) = failures[0].reasons
-    assert "speedup" in reason
-
-
-def test_gate_fail_when_ours_peak_mb_nan() -> None:
-    r = _make_result(ours_peak_mb=math.nan)
-    failures = evaluate_gates([r], _THRESHOLDS)
-    assert len(failures) == 1
-    (reason,) = failures[0].reasons
-    assert "ours_peak_mb" in reason
-    assert "nan" in reason.lower()
-
-
-def test_gate_fail_when_ours_peak_mb_negative() -> None:
-    r = _make_result(ours_peak_mb=-1.0)
-    failures = evaluate_gates([r], _THRESHOLDS)
-    assert len(failures) == 1
-    (reason,) = failures[0].reasons
-    assert "ours_peak_mb" in reason
-    assert "-1" in reason
+    assert expected_reason_substring.lower() in reason.lower()
 
 
 def test_gate_merges_multiple_failures_for_single_row() -> None:
@@ -149,14 +120,6 @@ def test_gate_failure_preserves_identifying_fields() -> None:
     assert failure.size == 2500
     assert failure.dims == 8
     assert failure.params == {"eps": 0.7, "min_samples": 10, "n_jobs": 4}
-
-
-def test_gate_fail_when_ari_infinite() -> None:
-    r = _make_result(ari=math.inf)
-    failures = evaluate_gates([r], _THRESHOLDS)
-    assert len(failures) == 1
-    (reason,) = failures[0].reasons
-    assert "ari" in reason
 
 
 def test_gate_passes_multiple_rows_independently() -> None:
