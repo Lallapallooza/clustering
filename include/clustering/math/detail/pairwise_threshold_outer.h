@@ -146,18 +146,20 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
         (iChunkBase + kThresholdChunkRows <= n) ? kThresholdChunkRows : (n - iChunkBase);
     const std::size_t mTilesInChunk = (chunkRows + kMr - 1) / kMr;
 
+    // packA scratch and row-norms tile live across all tiles in the chunk; packA overwrites the
+    // first kMr*d floats before the kernel reads them, so no zero-init is needed and the stack
+    // alloc happens once per chunk rather than per tile.
+    alignas(32) std::array<float, kMr * kThresholdMaxD> apScratch;
+    alignas(32) std::array<float, kMr> xNormsTile;
+    const auto xDesc = ::clustering::detail::describeMatrix(X);
+
     for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
       const std::size_t iBase = iChunkBase + (tileIdx * kMr);
       const std::size_t mc =
           (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
 
-      // packA on the fly from @p X; stack scratch is sized to the compile-time d ceiling so the
-      // driver stays allocation-free once the packed Y is materialized.
-      alignas(32) std::array<float, kMr * kThresholdMaxD> apScratch{};
-      const auto xDesc = ::clustering::detail::describeMatrix(X);
       packA<float>(xDesc, iBase, mc, 0, d, apScratch.data());
 
-      alignas(32) std::array<float, kMr> xNormsTile{};
       for (std::size_t r = 0; r < mc; ++r) {
         xNormsTile[r] = xRowNormsSq(iBase + r);
       }
