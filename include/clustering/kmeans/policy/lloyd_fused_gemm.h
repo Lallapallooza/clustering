@@ -13,6 +13,7 @@
 #include "clustering/kmeans/detail/empty_cluster.h"
 #include "clustering/math/centroid_shift.h"
 #include "clustering/math/defaults.h"
+#include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/detail/gemm_outer_prepacked.h"
 #include "clustering/math/detail/gemm_pack.h"
 #include "clustering/math/detail/matrix_desc.h"
@@ -99,7 +100,7 @@ public:
       : m_centroidsOld({0, 0}), m_cSqNorms({0}), m_sums({0, 0}), m_counts({0}), m_minDistSq({0}),
         m_shiftSq({0}), m_partialSums({0}), m_partialComps({0}), m_partialCounts({0}),
         m_foldComp({0}), m_packedB({0}), m_packedCSqNorms({0}), m_distsChunk({0, 0}),
-        m_gemmApArena({0}) {}
+        m_gemmApArena({0}), m_xNormsSq({0}) {}
 
 #ifdef CLUSTERING_KMEANS_KAHAN_N_THRESHOLD
   /**
@@ -158,6 +159,13 @@ public:
 
     const T tolSq = tol * tol;
     const bool useKahan = n >= kahanNThreshold;
+
+    // X is input-only; its squared-row-norms are reused across every Lloyd iteration's
+    // argmin post-pass. Compute once per run() so the iteration budget doesn't eat an
+    // O(n*d) pass for every assignment.
+    for (std::size_t i = 0; i < n; ++i) {
+      m_xNormsSq(i) = math::detail::sqNormRow<T, Layout::Contig>(X, i);
+    }
 
     refreshCentroidSqNorms(centroids);
 
@@ -243,6 +251,7 @@ private:
       m_sums = NDArray<T, 2, Layout::Contig>({k, d});
       m_counts = NDArray<std::int32_t, 1>({k});
       m_minDistSq = NDArray<T, 1>({n});
+      m_xNormsSq = NDArray<T, 1>({n});
       m_shiftSq = NDArray<T, 1>({k});
       m_foldComp = NDArray<T, 1>({k * d});
       // Packed-B sizing: the fused fast path at d<=pairwiseArgminMaxD uses the flat
@@ -444,9 +453,9 @@ private:
       math::detail::gemmRunPrepacked<T>(xDesc, bp, d, k, distsDesc, T{-2}, T{0}, apSlice,
                                         math::Pool{});
 
-      // xNorms computed here so each chunk's X rows are still hot in L2 from the GEMM pack step.
+      const T *xNormsChunk = m_xNormsSq.data() + iBase;
       for (std::size_t i = 0; i < chunkRows; ++i) {
-        const T xn = math::detail::sqNormRow<T, Layout::Contig>(xChunk, i);
+        const T xn = xNormsChunk[i];
         const T *row = distsChunk + (i * k);
         T bestVal = std::numeric_limits<T>::infinity();
         std::int32_t bestIdx = 0;
@@ -675,12 +684,7 @@ private:
         }
         const T *xRow = X.data() + (i * d);
         const T *cRow = centroids.data() + (static_cast<std::size_t>(lbl) * d);
-        T sum = T{0};
-        for (std::size_t t = 0; t < d; ++t) {
-          const T diff = xRow[t] - cRow[t];
-          sum += diff * diff;
-        }
-        m_minDistSq(i) = sum;
+        m_minDistSq(i) = math::detail::sqEuclideanRowPtr<T>(xRow, cRow, d);
       }
     };
 
@@ -708,6 +712,7 @@ private:
   NDArray<T, 1> m_packedCSqNorms;
   NDArray<T, 2, Layout::Contig> m_distsChunk;
   NDArray<T, 1> m_gemmApArena;
+  NDArray<T, 1> m_xNormsSq;
 
   std::size_t m_n = 0;
   std::size_t m_d = 0;

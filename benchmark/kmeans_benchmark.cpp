@@ -18,13 +18,14 @@ NDArray<float, 2> makeBlobs(std::size_t n, std::size_t d, std::size_t k, std::ui
   NDArray<float, 2> X({n, d});
   std::mt19937 gen(seed);
   std::uniform_int_distribution<std::size_t> pickCluster(0, k - 1);
-  std::normal_distribution<float> noise(0.0F, 0.5F);
+  // Uniform noise over [-0.5, 0.5] keeps inter-center distance >> noise width and lets
+  // setup cost stay negligible next to the measured fit -- a normal_distribution pulls in
+  // Box-Muller's log, which can overshadow a sub-second fit under perf sampling.
+  std::uniform_real_distribution<float> noise(-0.5F, 0.5F);
 
   for (std::size_t i = 0; i < n; ++i) {
     const std::size_t c = pickCluster(gen);
     for (std::size_t t = 0; t < d; ++t) {
-      // Spread centers along axis 0 so sigma << inter-center distance keeps the blobs cleanly
-      // separable.
       const float center = (t == 0) ? static_cast<float>(c * 50U) : 0.0F;
       X(i, t) = center + noise(gen);
     }
@@ -32,13 +33,14 @@ NDArray<float, 2> makeBlobs(std::size_t n, std::size_t d, std::size_t k, std::ui
   return X;
 }
 
-void runKMeans(benchmark::State &state, std::size_t n, std::size_t d, std::size_t k) {
+void runKMeans(benchmark::State &state, std::size_t n, std::size_t d, std::size_t k,
+               std::size_t nJobs = 1) {
   auto X = makeBlobs(n, d, k, /*seed=*/1234U);
 
   // Fresh fitter per iteration so scratch allocation is amortized into the measured cost, the
   // same way a Python caller pays it per fit().
   for (auto _ : state) {
-    KMeans<float> km(k, /*nJobs=*/1);
+    KMeans<float> km(k, nJobs);
     km.run(X, /*maxIter=*/300, /*tol=*/1e-4F, /*seed=*/42U);
     benchmark::DoNotOptimize(km.inertia());
     benchmark::ClobberMemory();
@@ -47,6 +49,7 @@ void runKMeans(benchmark::State &state, std::size_t n, std::size_t d, std::size_
   state.counters["n"] = static_cast<double>(n);
   state.counters["d"] = static_cast<double>(d);
   state.counters["k"] = static_cast<double>(k);
+  state.counters["n_jobs"] = static_cast<double>(nJobs);
 }
 
 // Auto-dispatch sweep across the envelope corners so the benchmark surfaces the shape-vs-runtime
@@ -63,6 +66,14 @@ void BM_KMeansAuto_HighK20K(benchmark::State &s) { runKMeans(s, 20000, 8, 256); 
 void BM_KMeansAuto_HighK30K(benchmark::State &s) { runKMeans(s, 30000, 4, 512); }
 void BM_KMeansAuto_HighK50K(benchmark::State &s) { runKMeans(s, 50000, 4, 1000); }
 
+// Perf cells that mirror the pybench losing cells (k=16 matches the recipe default,
+// n_jobs=1 to attribute serial compute). Used as single-PID perf record targets.
+void BM_Perf_2D_250k_j1(benchmark::State &s) { runKMeans(s, 250000, 2, 16, 1); }
+void BM_Perf_128D_250k_j1(benchmark::State &s) { runKMeans(s, 250000, 128, 16, 1); }
+void BM_Perf_256D_100k_j1(benchmark::State &s) { runKMeans(s, 100000, 256, 16, 1); }
+void BM_Perf_128D_100k_j1(benchmark::State &s) { runKMeans(s, 100000, 128, 16, 1); }
+void BM_Perf_512D_250k_j1(benchmark::State &s) { runKMeans(s, 250000, 512, 16, 1); }
+
 } // namespace
 
 BENCHMARK(BM_KMeansAuto_LowDSmall)->Unit(benchmark::kMillisecond)->UseRealTime();
@@ -76,5 +87,11 @@ BENCHMARK(BM_KMeansAuto_LowDK64)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_KMeansAuto_HighK20K)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_KMeansAuto_HighK30K)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_KMeansAuto_HighK50K)->Unit(benchmark::kMillisecond)->UseRealTime();
+
+BENCHMARK(BM_Perf_2D_250k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_128D_250k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_256D_100k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_128D_100k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_512D_250k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
 
 BENCHMARK_MAIN();
