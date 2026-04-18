@@ -11,6 +11,9 @@
 
 #include "clustering/always_assert.h"
 #include "clustering/math/detail/avx2_helpers.h"
+#include "clustering/math/detail/gemm_outer.h"
+#include "clustering/math/detail/matrix_desc.h"
+#include "clustering/math/pairwise.h"
 #include "clustering/math/rng.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
@@ -66,23 +69,44 @@ using math::detail::sqEuclideanRowPtr;
  * @c L=8 case (k in [16, 31]) and to other compile-time @c B values for adjacent batches.
  */
 template <std::size_t B>
-inline void sqEuclideanRowToBatchAvx2Fixed(const float *x, const float *candData, std::size_t d,
-                                           float *out) noexcept {
+[[gnu::always_inline]] inline void
+sqEuclideanRowToBatchAvx2Fixed(const float *x, const float *candData, std::size_t d,
+                               float *out) noexcept {
   static_assert(B >= 1 && B <= 8, "B must lie in [1, 8] -- 8 ymm regs hold the batch");
-  std::array<__m256, B> acc{};
+  // Double accumulator set (2 * B YMMs) over a 2x-unrolled K loop. Halves the per-iter fmadd
+  // dependency chain so Zen5's 4-FMA-per-cycle throughput isn't latency-bound on the 4-cycle
+  // fmadd round-trip; also gives the register allocator enough explicit live ranges to keep
+  // accumulators in YMM registers rather than spilling to the stack (measured: 8 GFLOPS with
+  // the original 1x loop, ~2x post-unroll on the seeder's B=4 hot path).
+  __m256 acc0[B];
+  __m256 acc1[B];
   for (std::size_t t = 0; t < B; ++t) {
-    acc[t] = _mm256_setzero_ps();
+    acc0[t] = _mm256_setzero_ps();
+    acc1[t] = _mm256_setzero_ps();
   }
   std::size_t k = 0;
+  for (; k + 16 <= d; k += 16) {
+    const __m256 vx0 = _mm256_loadu_ps(x + k);
+    const __m256 vx1 = _mm256_loadu_ps(x + k + 8);
+    for (std::size_t t = 0; t < B; ++t) {
+      const __m256 vc0 = _mm256_loadu_ps(candData + (t * d) + k);
+      const __m256 vc1 = _mm256_loadu_ps(candData + (t * d) + k + 8);
+      const __m256 diff0 = _mm256_sub_ps(vx0, vc0);
+      const __m256 diff1 = _mm256_sub_ps(vx1, vc1);
+      acc0[t] = _mm256_fmadd_ps(diff0, diff0, acc0[t]);
+      acc1[t] = _mm256_fmadd_ps(diff1, diff1, acc1[t]);
+    }
+  }
+  // 8-lane tail.
   for (; k + 8 <= d; k += 8) {
     const __m256 vx = _mm256_loadu_ps(x + k);
     for (std::size_t t = 0; t < B; ++t) {
       const __m256 vc = _mm256_loadu_ps(candData + (t * d) + k);
       const __m256 diff = _mm256_sub_ps(vx, vc);
-      acc[t] = _mm256_fmadd_ps(diff, diff, acc[t]);
+      acc0[t] = _mm256_fmadd_ps(diff, diff, acc0[t]);
     }
   }
-  std::array<float, B> tail{};
+  float tail[B];
   for (std::size_t t = 0; t < B; ++t) {
     tail[t] = 0.0F;
   }
@@ -94,7 +118,8 @@ inline void sqEuclideanRowToBatchAvx2Fixed(const float *x, const float *candData
     }
   }
   for (std::size_t t = 0; t < B; ++t) {
-    out[t] = math::detail::horizontalSumAvx2(acc[t]) + tail[t];
+    const __m256 sum = _mm256_add_ps(acc0[t], acc1[t]);
+    out[t] = math::detail::horizontalSumAvx2(sum) + tail[t];
   }
 }
 
@@ -294,7 +319,8 @@ public:
 
   GreedyKmppSeeder()
       : m_candRows({0, 0}), m_candRowsT({0, 0}), m_candDistSq({0, 0}), m_cumDistSq({0}),
-        m_minSq({0}) {}
+        m_minSq({0}), m_distsFlat({0, 0}), m_xNormsSq({0}), m_candNormsSq({0}), m_gemmApArena({0}),
+        m_gemmBpArena({0}), m_localScores({0}) {}
 
   /**
    * @brief Seed @c k centroids from @p X into @p outCentroids.
@@ -320,7 +346,7 @@ public:
     (void)pool;
 
     const std::size_t nLocalTrials = detail::greedyKmppLocalTrials(k);
-    ensureShape(n, d, nLocalTrials);
+    ensureShape(n, d, nLocalTrials, pool.workerCount());
 
     math::pcg64 rng;
     rng.seed(seed);
@@ -334,6 +360,18 @@ public:
 #ifdef CLUSTERING_USE_AVX2
     T *candRowsTData = m_candRowsT.data();
 #endif
+
+    // GEMM scoring wins only when the candidate width L is >= one kNr panel (6). Below that
+    // the 8x6 kernel's fixed 48-FMA body over-computes the 8xL useful tile; the per-row
+    // streaming kernel with L parallel accumulators is tighter. Gate on L >= kNr<float>.
+    constexpr std::size_t kNrF = math::detail::kKernelNr<float>;
+    const bool useGemmScoring = (d >= 32) && (nLocalTrials >= kNrF);
+    if (useGemmScoring) {
+      T *xNormsData = m_xNormsSq.data();
+      for (std::size_t i = 0; i < n; ++i) {
+        xNormsData[i] = math::detail::sqNormRow<T, Layout::Contig>(X, i);
+      }
+    }
 
     // Step 1: first centroid uniformly. randUniformU64 is the deterministic primitive; the
     // modulo map carries a tiny bias for very large n but is the standard sklearn convention.
@@ -476,18 +514,88 @@ public:
 #endif
 
       if (!scoredViaTransposed) {
-        // Fused scoring: for each x row, compute L distances against the candidate pack and
-        // update L parallel running sums in one pass. The single-x-stream path is the load-
-        // bearing win at envelope shapes where n*d far exceeds L2 -- one stream is the
-        // difference between bandwidth-bound and bandwidth-bound times L.
-        for (std::size_t i = 0; i < n; ++i) {
-          const T *xi = xData + (i * d);
-          const T mi = minSq[i];
-          detail::sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d, distRow.data());
-          T *dstRow = candDistSqData + (i * transposedWidth);
+        // GEMM-based batch distance for moderate-to-high d: compute X * cand^T via the core
+        // GEMM (alpha=-2, beta=0), then add pre-computed per-row ||x||^2 and per-candidate
+        // ||c||^2 in one min+sum fold. BLAS-style GEMM is the decisive win at d >= ~16 where
+        // the per-row streaming kernel bottlenecks on L1/L2 bandwidth.
+        if (useGemmScoring) {
+          auto candView = NDArray<T, 2, Layout::Contig>::borrow(candRowsData, {nLocalTrials, d});
+          auto xView = NDArray<T, 2, Layout::Contig>::borrow(const_cast<T *>(xData), {n, d});
+          auto distsView = NDArray<T, 2>::borrow(m_distsFlat.data(), {n, nLocalTrials});
+          auto candT = candView.t();
+          // Direct gemmRunReference with caller-owned scratch so the seeder's per-pick GEMM
+          // leaves the shape-stable allocation footprint in place (no per-call arena alloc).
+          const auto xDesc = ::clustering::detail::describeMatrix(xView);
+          const auto candDesc = ::clustering::detail::describeMatrix(candT);
+          auto distsDesc = ::clustering::detail::describeMatrixMut(distsView);
+          math::detail::gemmRunReference<T>(xDesc, candDesc, distsDesc, T{-2}, T{0},
+                                            m_gemmApArena.data(), m_gemmBpArena.data(), pool);
+          // Candidate norms once per pick.
+          T *candNorms = m_candNormsSq.data();
           for (std::size_t t = 0; t < nLocalTrials; ++t) {
-            dstRow[t] = distRow[t];
-            scores[t] += (distRow[t] < mi) ? distRow[t] : mi;
+            candNorms[t] = math::detail::sqNormRow<T, Layout::Contig>(candView, t);
+          }
+          const T *xNorms = m_xNormsSq.data();
+          const T *distsFlat = m_distsFlat.data();
+          for (std::size_t i = 0; i < n; ++i) {
+            const T mi = minSq[i];
+            const T xn = xNorms[i];
+            const T *distRowI = distsFlat + (i * nLocalTrials);
+            T *dstRow = candDistSqData + (i * transposedWidth);
+            for (std::size_t t = 0; t < nLocalTrials; ++t) {
+              T v = distRowI[t] + xn + candNorms[t];
+              if (v < T{0}) {
+                v = T{0};
+              }
+              dstRow[t] = v;
+              scores[t] += (v < mi) ? v : mi;
+            }
+          }
+        } else {
+          // Fused scoring: for each x row, compute L distances against the candidate pack and
+          // update L parallel running sums in one pass. The single-x-stream path is the load-
+          // bearing win at envelope shapes where n*d far exceeds L2 -- one stream is the
+          // difference between bandwidth-bound and bandwidth-bound times L. Parallelized over
+          // X rows via per-worker score slabs reduced at the end; candDistSqData writes are
+          // row-local so no aliasing across workers.
+          auto scanRange = [&](std::size_t lo, std::size_t hi, T *localScores) noexcept {
+            std::array<T, 32> distRowLocal{};
+            for (std::size_t i = lo; i < hi; ++i) {
+              const T *xi = xData + (i * d);
+              const T mi = minSq[i];
+              detail::sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d,
+                                               distRowLocal.data());
+              T *dstRow = candDistSqData + (i * transposedWidth);
+              for (std::size_t t = 0; t < nLocalTrials; ++t) {
+                dstRow[t] = distRowLocal[t];
+                localScores[t] += (distRowLocal[t] < mi) ? distRowLocal[t] : mi;
+              }
+            }
+          };
+
+          if (pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr) {
+            const std::size_t workers = pool.workerCount();
+            T *localScores = m_localScores.data();
+            for (std::size_t e = 0; e < workers * nLocalTrials; ++e) {
+              localScores[e] = T{0};
+            }
+            pool.pool
+                ->submit_blocks(
+                    std::size_t{0}, n,
+                    [&](std::size_t lo, std::size_t hi) {
+                      const std::size_t w = math::Pool::workerIndex();
+                      scanRange(lo, hi, localScores + (w * nLocalTrials));
+                    },
+                    workers)
+                .wait();
+            for (std::size_t w = 0; w < workers; ++w) {
+              const T *row = localScores + (w * nLocalTrials);
+              for (std::size_t t = 0; t < nLocalTrials; ++t) {
+                scores[t] += row[t];
+              }
+            }
+          } else {
+            scanRange(0, n, scores.data());
           }
         }
       }
@@ -516,7 +624,7 @@ public:
   }
 
 private:
-  void ensureShape(std::size_t n, std::size_t d, std::size_t L) {
+  void ensureShape(std::size_t n, std::size_t d, std::size_t L, std::size_t workers) {
     const std::size_t w = detail::greedyKmppTransposedWidth(L == 0 ? std::size_t{1} : L);
     if (m_candRows.dim(0) != L || m_candRows.dim(1) != d) {
       m_candRows = NDArray<T, 2, Layout::Contig>({L, d});
@@ -532,6 +640,31 @@ private:
     }
     if (m_minSq.dim(0) != n) {
       m_minSq = NDArray<T, 1>({n});
+    }
+    if (m_distsFlat.dim(0) != n || m_distsFlat.dim(1) != L) {
+      m_distsFlat =
+          NDArray<T, 2, Layout::Contig>({n == 0 ? std::size_t{1} : n, L == 0 ? std::size_t{1} : L});
+    }
+    if (m_xNormsSq.dim(0) != n) {
+      m_xNormsSq = NDArray<T, 1>({n == 0 ? std::size_t{1} : n});
+    }
+    if (m_candNormsSq.dim(0) != L) {
+      m_candNormsSq = NDArray<T, 1>({L == 0 ? std::size_t{1} : L});
+    }
+    // Persistent GEMM scratch. Seeder currently fans out at the caller level only; the GEMM
+    // path runs serially per pick, so one kMc*kKc Ap slice and one kKc*kNc Bp buffer suffice.
+    const std::size_t apSize = math::detail::kMc<T> * math::detail::kKc<T>;
+    const std::size_t bpSize = math::detail::kKc<T> * math::detail::kNc<T>;
+    if (m_gemmApArena.dim(0) != apSize) {
+      m_gemmApArena = NDArray<T, 1>({apSize});
+    }
+    if (m_gemmBpArena.dim(0) != bpSize) {
+      m_gemmBpArena = NDArray<T, 1>({bpSize});
+    }
+    const std::size_t workersClamped = workers == 0 ? std::size_t{1} : workers;
+    const std::size_t lsLen = workersClamped * (L == 0 ? std::size_t{1} : L);
+    if (m_localScores.dim(0) != lsLen) {
+      m_localScores = NDArray<T, 1>({lsLen});
     }
   }
 
@@ -552,6 +685,19 @@ private:
   /// Per-point running min-squared-distance to the selected centroid set. Private to the
   /// seeder; the Lloyd policy owns its own per-point distance scratch.
   NDArray<T, 1> m_minSq;
+  /// (n, L) flat scratch holding GEMM-based candidate-distance output for the high-d path.
+  NDArray<T, 2, Layout::Contig> m_distsFlat;
+  /// Per-point ||x||^2, length n. Computed once per seeder run(); reused across all picks.
+  NDArray<T, 1> m_xNormsSq;
+  /// Per-candidate ||c||^2, length L. Refreshed each pick.
+  NDArray<T, 1> m_candNormsSq;
+  /// Persistent GEMM Ap arena (kMc * kKc). Passed by pointer to gemmRunReference per pick.
+  NDArray<T, 1> m_gemmApArena;
+  /// Persistent GEMM Bp arena (kKc * kNc). Passed by pointer to gemmRunReference per pick.
+  NDArray<T, 1> m_gemmBpArena;
+  /// Per-worker local-scores scratch (workers * L). Scorers accumulate into their own slab
+  /// to avoid atomic contention; the reduce pass at pick-end folds into the outer scores[].
+  NDArray<T, 1> m_localScores;
 };
 
 } // namespace clustering::kmeans

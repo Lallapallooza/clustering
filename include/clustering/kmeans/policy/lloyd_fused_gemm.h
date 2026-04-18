@@ -99,7 +99,7 @@ public:
       : m_centroidsOld({0, 0}), m_cSqNorms({0}), m_sums({0, 0}), m_counts({0}), m_minDistSq({0}),
         m_shiftSq({0}), m_partialSums({0}), m_partialComps({0}), m_partialCounts({0}),
         m_foldComp({0}), m_packedB({0}), m_packedCSqNorms({0}), m_distsChunk({0, 0}),
-        m_gemmApArena({0}), m_xChunkNormsSq({0}) {}
+        m_gemmApArena({0}) {}
 
 #ifdef CLUSTERING_KMEANS_KAHAN_N_THRESHOLD
   /**
@@ -233,6 +233,10 @@ private:
       return;
     }
 
+    const bool needsChunk = d > math::defaults::pairwiseArgminMaxD;
+    const std::size_t chunkCap = math::pairwiseArgminChunkRows;
+    const std::size_t blocks = workerCount == 0 ? std::size_t{1} : workerCount;
+
     if (shapeChanged) {
       m_centroidsOld = NDArray<T, 2, Layout::Contig>({k, d});
       m_cSqNorms = NDArray<T, 1>({k});
@@ -241,34 +245,39 @@ private:
       m_minDistSq = NDArray<T, 1>({n});
       m_shiftSq = NDArray<T, 1>({k});
       m_foldComp = NDArray<T, 1>({k * d});
-      const std::size_t packedBSize = math::detail::packedBScratchSizeFloats(k, d);
+      // Packed-B sizing: the fused fast path at d<=pairwiseArgminMaxD uses the flat
+      // panel-per-centroid layout (ceil(k/Nr)*Nr*d); the chunked fallback uses the tiled
+      // (jcIdx, pcIdx) layout that @c gemmRunPrepacked expects and is what supports d > kKc
+      // and k > kNc without envelope asserts.
+      const std::size_t packedBSize = needsChunk
+                                          ? math::detail::packedBScratchSizeFloatsTiled<T>(k, d)
+                                          : math::detail::packedBScratchSizeFloats(k, d);
       const std::size_t packedNormsSize = math::detail::packedCSqNormsScratchSizeFloats(k);
       m_packedB = NDArray<T, 1>({packedBSize == 0 ? std::size_t{1} : packedBSize});
       m_packedCSqNorms = NDArray<T, 1>({packedNormsSize == 0 ? std::size_t{1} : packedNormsSize});
-      // Sized only when the materialized fallback might fire (d > fused cutoff); smaller shapes
-      // collapse to a 1x1 placeholder so allocations stay proportional to the workload.
-      const bool needsChunk = d > math::defaults::pairwiseArgminMaxD;
-      const auto chunkShape = needsChunk ? math::chunkedMaterializedScratchShape(n, k)
-                                         : std::array<std::size_t, 2>{1, 1};
-      m_distsChunk = NDArray<T, 2, Layout::Contig>({chunkShape[0], chunkShape[1]});
-      const std::size_t chunkRows =
-          (n < math::pairwiseArgminChunkRows) ? n : math::pairwiseArgminChunkRows;
-      const std::size_t chunkRowsClamped = chunkRows == 0 ? std::size_t{1} : chunkRows;
-      const std::size_t xNormsLen = needsChunk ? chunkRowsClamped : std::size_t{1};
-      m_xChunkNormsSq = NDArray<T, 1>({xNormsLen});
+      // Per-worker distance tile for the chunked path: one chunkCap*k slab per worker so
+      // the chunk fan-out runs without touching a shared tile.
+      const std::size_t distRows = needsChunk ? (blocks * chunkCap) : std::size_t{1};
+      const std::size_t distCols = needsChunk ? (k == 0 ? std::size_t{1} : k) : std::size_t{1};
+      m_distsChunk = NDArray<T, 2, Layout::Contig>({distRows, distCols});
+    } else if (workerChanged) {
+      // Only the per-worker slabs depend on workerCount; resize them if d triggered needsChunk.
+      if (needsChunk) {
+        const std::size_t distRows = blocks * chunkCap;
+        const std::size_t distCols = (k == 0 ? std::size_t{1} : k);
+        m_distsChunk = NDArray<T, 2, Layout::Contig>({distRows, distCols});
+      }
     }
 
-    // Per-block scratch sizing. Block count caps at workerCount (see BlockPartition); we size
-    // to the upper bound so both serial and parallel dispatch fit without reallocation inside
-    // the loop.
-    const std::size_t blocks = workerCount == 0 ? std::size_t{1} : workerCount;
+    // Per-block scratch sizing for scatter-and-fold. Block count caps at workerCount (see
+    // BlockPartition); we size to the upper bound so both serial and parallel dispatch fit
+    // without reallocation inside the loop.
     m_partialSums = NDArray<T, 1>({blocks * k * d});
     m_partialComps = NDArray<T, 1>({blocks * k * d});
     m_partialCounts = NDArray<std::int32_t, 1>({blocks * k});
 
     // Gemm A-pack arena sized to @c blocks * kMc * kKc so @c gemmRunPrepacked's per-worker
     // slice indexing stays in-bounds on every fan-out path.
-    const bool needsChunk = d > math::defaults::pairwiseArgminMaxD;
     const std::size_t apSize = blocks * math::detail::kMc<T> * math::detail::kKc<T>;
     m_gemmApArena = NDArray<T, 1>({needsChunk ? apSize : std::size_t{1}});
 
@@ -363,6 +372,37 @@ private:
 #endif
   }
 
+  /**
+   * @brief Pack the centroid matrix into the tiled @c (jcIdx, pcIdx) layout matching
+   *        @c gemmRunPrepacked's walk.
+   *
+   * Supports arbitrary @c d and @c k by splitting into @c kKc<T> and @c kNc<T> tiles
+   * respectively; the flat single-tile packB the fused path uses at small d cannot represent
+   * @c d > kKc<T> or @c k > kNc<T>.
+   */
+  void packCentroidsTiled(const NDArray<T, 2, Layout::Contig> &centroids) noexcept {
+    constexpr std::size_t kNr = math::detail::kKernelNr<T>;
+    constexpr std::size_t kKcVal = math::detail::kKc<T>;
+    constexpr std::size_t kNcVal = math::detail::kNc<T>;
+    const std::size_t k = centroids.dim(0);
+    const std::size_t d = centroids.dim(1);
+    const auto cTransposed = centroids.t();
+    const auto cDesc = ::clustering::detail::describeMatrix(cTransposed);
+    T *bp = m_packedB.data();
+    std::size_t jcBase = 0;
+    for (std::size_t jc = 0; jc < k; jc += kNcVal) {
+      const std::size_t nc = (jc + kNcVal <= k) ? kNcVal : (k - jc);
+      const std::size_t roundedNc = ((nc + kNr - 1) / kNr) * kNr;
+      std::size_t pcOffInJc = 0;
+      for (std::size_t pc = 0; pc < d; pc += kKcVal) {
+        const std::size_t kc = (pc + kKcVal <= d) ? kKcVal : (d - pc);
+        math::detail::packB<T>(cDesc, pc, kc, jc, nc, bp + jcBase + pcOffInJc);
+        pcOffInJc += kc * roundedNc;
+      }
+      jcBase += d * roundedNc;
+    }
+  }
+
   void runChunkedMaterializedAssignment(const NDArray<T, 2, Layout::Contig> &X,
                                         const NDArray<T, 2, Layout::Contig> &centroids,
                                         NDArray<std::int32_t, 1> &labels,
@@ -374,67 +414,69 @@ private:
       return;
     }
 
-    // Single-call @c packB emits one panel per row-strip; @c gemmRunPrepacked reads that panel
-    // assuming the @c (jc, pc) tile walks match the packer's layout. That match only holds when
-    // @c d <= kKc<T> and @c k <= kNc<T>. Outside the envelope the reader silently picks the
-    // wrong centroid columns; guard loudly so a future envelope widening surfaces as an assert
-    // rather than a numerical mystery.
-    CLUSTERING_ALWAYS_ASSERT(d <= math::detail::kKc<T>);
-    CLUSTERING_ALWAYS_ASSERT(k <= math::detail::kNc<T>);
+    packCentroidsTiled(centroids);
 
-    const auto cTransposed = centroids.t();
-    const auto cDesc = ::clustering::detail::describeMatrix(cTransposed);
-    math::detail::packB<T>(cDesc, 0, d, 0, k, m_packedB.data());
-
+    constexpr std::size_t kMcVal = math::detail::kMc<T>;
+    constexpr std::size_t kKcVal = math::detail::kKc<T>;
     const std::size_t chunkCap = math::pairwiseArgminChunkRows;
+    const std::size_t numChunks = (n + chunkCap - 1) / chunkCap;
+    const T *bp = m_packedB.data();
     T *apArena = m_gemmApArena.data();
-    T *xChunkNorms = m_xChunkNormsSq.data();
+    T *distsBase = m_distsChunk.data();
+    const T *cNormsBase = m_cSqNorms.data();
+    T *minDistBase = m_minDistSq.data();
+    std::int32_t *labelsBase = labels.data();
+    const T *xBase = X.data();
 
-    for (std::size_t iBase = 0; iBase < n; iBase += chunkCap) {
+    auto runOneChunk = [&](std::size_t chunkIdx) noexcept {
+      const std::size_t iBase = chunkIdx * chunkCap;
       const std::size_t chunkRows = (iBase + chunkCap <= n) ? chunkCap : (n - iBase);
+      const std::size_t w = math::Pool::workerIndex();
+      T *distsChunk = distsBase + (w * chunkCap * k);
+      T *apSlice = apArena + (w * kMcVal * kKcVal);
 
-      auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(X.data() + (iBase * d), {chunkRows, d});
-
-      for (std::size_t r = 0; r < chunkRows; ++r) {
-        xChunkNorms[r] = math::detail::sqNormRow<T, Layout::Contig>(xChunk, r);
-      }
-
-      auto distsView = NDArray<T, 2>::borrow(m_distsChunk.data(), {chunkRows, k});
+      auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(const_cast<T *>(xBase) + (iBase * d),
+                                                          {chunkRows, d});
+      auto distsView = NDArray<T, 2>::borrow(distsChunk, {chunkRows, k});
       const auto xDesc = ::clustering::detail::describeMatrix(xChunk);
       auto distsDesc = ::clustering::detail::describeMatrixMut(distsView);
-      math::detail::gemmRunPrepacked<T>(xDesc, m_packedB.data(), d, k, distsDesc, T{-2}, T{0},
-                                        apArena, pool);
+      // Serial GEMM inside the chunk; outer fan-out already owns parallelism.
+      math::detail::gemmRunPrepacked<T>(xDesc, bp, d, k, distsDesc, T{-2}, T{0}, apSlice,
+                                        math::Pool{});
 
-      auto scanRange = [&](std::size_t lo, std::size_t hi) noexcept {
-        for (std::size_t i = lo; i < hi; ++i) {
-          const T xn = xChunkNorms[i];
-          const T *row = m_distsChunk.data() + (i * k);
-          T bestVal = std::numeric_limits<T>::infinity();
-          std::int32_t bestIdx = 0;
-          for (std::size_t j = 0; j < k; ++j) {
-            // Reconstruct ||x||^2 + ||c||^2 - 2 x . c, clamping cancellation artefacts to zero
-            // the same way @c pairwiseSqEuclideanGemm's broadcast pass does.
-            T v = row[j] + xn + m_cSqNorms(j);
-            if (v < T{0}) {
-              v = T{0};
-            }
-            if (j == 0 || v < bestVal) {
-              bestVal = v;
-              bestIdx = static_cast<std::int32_t>(j);
-            }
+      // xNorms computed here so each chunk's X rows are still hot in L2 from the GEMM pack step.
+      for (std::size_t i = 0; i < chunkRows; ++i) {
+        const T xn = math::detail::sqNormRow<T, Layout::Contig>(xChunk, i);
+        const T *row = distsChunk + (i * k);
+        T bestVal = std::numeric_limits<T>::infinity();
+        std::int32_t bestIdx = 0;
+        for (std::size_t j = 0; j < k; ++j) {
+          T v = row[j] + xn + cNormsBase[j];
+          if (v < T{0}) {
+            v = T{0};
           }
-          m_minDistSq(iBase + i) = bestVal;
-          labels(iBase + i) = bestIdx;
+          if (j == 0 || v < bestVal) {
+            bestVal = v;
+            bestIdx = static_cast<std::int32_t>(j);
+          }
         }
-      };
+        minDistBase[iBase + i] = bestVal;
+        labelsBase[iBase + i] = bestIdx;
+      }
+    };
 
-      if (pool.shouldParallelize(chunkRows, 4, 2) && pool.pool != nullptr) {
-        pool.pool
-            ->submit_blocks(std::size_t{0}, chunkRows,
-                            [&](std::size_t lo, std::size_t hi) { scanRange(lo, hi); })
-            .wait();
-      } else {
-        scanRange(0, chunkRows);
+    if (pool.shouldParallelize(numChunks, 1, 2) && pool.pool != nullptr) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, numChunks,
+                          [&](std::size_t lo, std::size_t hi) {
+                            for (std::size_t c = lo; c < hi; ++c) {
+                              runOneChunk(c);
+                            }
+                          })
+          .wait();
+    } else {
+      for (std::size_t c = 0; c < numChunks; ++c) {
+        runOneChunk(c);
       }
     }
   }
@@ -666,7 +708,6 @@ private:
   NDArray<T, 1> m_packedCSqNorms;
   NDArray<T, 2, Layout::Contig> m_distsChunk;
   NDArray<T, 1> m_gemmApArena;
-  NDArray<T, 1> m_xChunkNormsSq;
 
   std::size_t m_n = 0;
   std::size_t m_d = 0;

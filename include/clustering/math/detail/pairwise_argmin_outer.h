@@ -10,6 +10,7 @@
 
 #include "clustering/always_assert.h"
 #include "clustering/math/detail/gemm_kernel_scalar.h"
+#include "clustering/math/detail/gemm_outer.h"
 #include "clustering/math/detail/gemm_pack.h"
 #include "clustering/math/detail/matrix_desc.h"
 #include "clustering/math/thread.h"
@@ -201,6 +202,29 @@ inline std::size_t packedCSqNormsScratchSizeFloats(std::size_t k) noexcept {
   constexpr std::size_t kNr = kKernelNr<float>;
   const std::size_t nPanels = (k + kNr - 1) / kNr;
   return nPanels * kNr;
+}
+
+/**
+ * @brief Total element count of a packed-B buffer laid out for @c gemmRunPrepacked.
+ *
+ * Sums @c k_dim * roundedNc over each @c jc block of width @c kNc<T>, where
+ * @c roundedNc = ceil(nc / kNr<T>) * kNr<T>. The result is the exact buffer size
+ * @c gemmRunPrepacked expects and matches @c GemmPlan's packing loop.
+ */
+template <class T>
+inline std::size_t packedBScratchSizeFloatsTiled(std::size_t k, std::size_t d) noexcept {
+  constexpr std::size_t kNr = kKernelNr<T>;
+  constexpr std::size_t kNcVal = kNc<T>;
+  if (k == 0 || d == 0) {
+    return 0;
+  }
+  std::size_t total = 0;
+  for (std::size_t jc = 0; jc < k; jc += kNcVal) {
+    const std::size_t nc = (jc + kNcVal <= k) ? kNcVal : (k - jc);
+    const std::size_t roundedNc = ((nc + kNr - 1) / kNr) * kNr;
+    total += d * roundedNc;
+  }
+  return total;
 }
 
 /**
