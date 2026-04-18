@@ -22,7 +22,7 @@ k-means with a nanobind Python binding.
 CPMAddPackage(
     NAME clustering
     GITHUB_REPOSITORY Lallapallooza/clustering
-    GIT_TAG v0.5.0
+    GIT_TAG v0.6.0
     OPTIONS "CLUSTERING_USE_AVX2 ON"
 )
 target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
