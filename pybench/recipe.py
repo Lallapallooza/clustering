@@ -34,7 +34,7 @@ EpsPolicy = Literal["fixed", "sqrt_d", "knee"]
 class Recipe:
     name: str
     ours: Callable[..., np.ndarray]
-    theirs: Callable[..., np.ndarray] | None = None
+    theirs: Callable[..., np.ndarray]
     default_params: dict[str, Any] = field(default_factory=dict)
     param_grid: dict[str, list[Any]] = field(default_factory=dict)
     default_sizes: tuple[int, ...] = (1000, 5000, 10000, 50000)

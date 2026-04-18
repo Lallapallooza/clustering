@@ -12,7 +12,6 @@ from typing import Any, Callable
 
 import memray
 import numpy as np
-import sklearn.cluster
 from kneed import KneeLocator
 from scipy.stats import vonmises_fisher
 from sklearn.datasets import make_blobs
@@ -109,29 +108,21 @@ def _thread_limit_for(n_jobs: Any) -> int:
     return max(1, requested)
 
 
-def make_sklearn_reference(algo_name: str) -> Callable:
-    class_name = (
-        algo_name.upper()
-        if algo_name.upper() in ("DBSCAN", "OPTICS")
-        else algo_name.capitalize()
-    )
-    cls = getattr(sklearn.cluster, class_name, None)
-    if cls is None:
-        cls = getattr(sklearn.cluster, algo_name.upper(), None)
-    if cls is None:
-        raise ValueError(f"No sklearn.cluster class found for algorithm '{algo_name}'")
+def _with_thread_limits(fn: Callable, n_jobs: Any) -> Callable:
+    """Wrap @p fn so every call runs under @c threadpool_limits(limits=n_jobs).
 
-    def reference(data: np.ndarray, **params: Any) -> np.ndarray:
-        # Scope BLAS and OpenMP together. sklearn KMeans uses OpenMP via
-        # Cython; pairwise distance paths at high dim go through BLAS.
-        # Limiting only one leaves the other to grab every core.
-        limit = _thread_limit_for(params.get("n_jobs"))
+    Applied to every @c theirs callable in @ref run_one so BLAS + OpenMP are
+    scoped to match ours' clamped C++ pool. Without this scoping, sklearn's
+    OpenMP inner loops grab every core regardless of @c n_jobs, making the
+    per-cell ratio meaningless at small @c n_jobs.
+    """
+    limit = _thread_limit_for(n_jobs)
+
+    def _wrapped(data: np.ndarray, **params: Any) -> np.ndarray:
         with threadpool_limits(limits=limit):
-            model = cls(**params)
-            labels = model.fit_predict(data)
-        return labels.astype(np.int32)
+            return fn(data, **params)
 
-    return reference
+    return _wrapped
 
 
 def expand_param_grid(recipe: Recipe) -> list[dict[str, Any]]:
@@ -197,9 +188,7 @@ def run_one(
 
     data = make_data(size, dataset)
 
-    theirs_fn = recipe.theirs
-    if theirs_fn is None:
-        theirs_fn = make_sklearn_reference(recipe.name)
+    theirs_fn = _with_thread_limits(recipe.theirs, params.get("n_jobs"))
 
     effective = _prepare_params(recipe, data, params)
 
