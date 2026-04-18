@@ -55,11 +55,11 @@ namespace clustering::math::detail {
  *                   cell in row-major order.
  */
 template <class Emit>
-inline void gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel,
-                                          std::size_t kc, const float *aRowNormsSq,
-                                          const float *bColNormsSq, std::size_t rowBase,
-                                          std::size_t colBase, std::size_t validRows,
-                                          std::size_t validCols, float radiusSq, Emit &&emit) {
+[[gnu::always_inline]] inline void
+gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::size_t kc,
+                              const float *aRowNormsSq, const float *bColNormsSq,
+                              std::size_t rowBase, std::size_t colBase, std::size_t validRows,
+                              std::size_t validCols, float radiusSq, Emit &&emit) {
   constexpr std::size_t kMr = kKernelMr<float>;
   constexpr std::size_t kNr = kKernelNr<float>;
 
@@ -70,62 +70,105 @@ inline void gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpP
   const float *__restrict__ bpLocal = bpPanel;
   const std::size_t kcLocal = kc;
 
-  __m256 c0 = _mm256_setzero_ps();
-  __m256 c1 = _mm256_setzero_ps();
-  __m256 c2 = _mm256_setzero_ps();
-  __m256 c3 = _mm256_setzero_ps();
-  __m256 c4 = _mm256_setzero_ps();
-  __m256 c5 = _mm256_setzero_ps();
+  // Split each output column into two accumulators so even / odd K iterations walk disjoint
+  // dependency chains. Zen's 4-cycle FMA latency otherwise caps a single-accumulator loop at
+  // 0.25 FMAs/cycle per output -- the doubled chains lift that to the 2 FMA/cycle port ceiling.
+  __m256 c0a = _mm256_setzero_ps();
+  __m256 c0b = _mm256_setzero_ps();
+  __m256 c1a = _mm256_setzero_ps();
+  __m256 c1b = _mm256_setzero_ps();
+  __m256 c2a = _mm256_setzero_ps();
+  __m256 c2b = _mm256_setzero_ps();
+  __m256 c3a = _mm256_setzero_ps();
+  __m256 c3b = _mm256_setzero_ps();
+  __m256 c4a = _mm256_setzero_ps();
+  __m256 c4b = _mm256_setzero_ps();
+  __m256 c5a = _mm256_setzero_ps();
+  __m256 c5b = _mm256_setzero_ps();
 
-  for (std::size_t k = 0; k < kcLocal; ++k) {
+  std::size_t k = 0;
+  for (; k + 1 < kcLocal; k += 2) {
+    const __m256 a0 = _mm256_load_ps(apLocal + (k * kMr));
+    const __m256 a1 = _mm256_load_ps(apLocal + ((k + 1) * kMr));
+    const float *bRow0 = bpLocal + (k * kNr);
+    const float *bRow1 = bpLocal + ((k + 1) * kNr);
+    c0a = _mm256_fmadd_ps(a0, _mm256_broadcast_ss(bRow0 + 0), c0a);
+    c0b = _mm256_fmadd_ps(a1, _mm256_broadcast_ss(bRow1 + 0), c0b);
+    c1a = _mm256_fmadd_ps(a0, _mm256_broadcast_ss(bRow0 + 1), c1a);
+    c1b = _mm256_fmadd_ps(a1, _mm256_broadcast_ss(bRow1 + 1), c1b);
+    c2a = _mm256_fmadd_ps(a0, _mm256_broadcast_ss(bRow0 + 2), c2a);
+    c2b = _mm256_fmadd_ps(a1, _mm256_broadcast_ss(bRow1 + 2), c2b);
+    c3a = _mm256_fmadd_ps(a0, _mm256_broadcast_ss(bRow0 + 3), c3a);
+    c3b = _mm256_fmadd_ps(a1, _mm256_broadcast_ss(bRow1 + 3), c3b);
+    c4a = _mm256_fmadd_ps(a0, _mm256_broadcast_ss(bRow0 + 4), c4a);
+    c4b = _mm256_fmadd_ps(a1, _mm256_broadcast_ss(bRow1 + 4), c4b);
+    c5a = _mm256_fmadd_ps(a0, _mm256_broadcast_ss(bRow0 + 5), c5a);
+    c5b = _mm256_fmadd_ps(a1, _mm256_broadcast_ss(bRow1 + 5), c5b);
+  }
+  if (k < kcLocal) {
     const __m256 a = _mm256_load_ps(apLocal + (k * kMr));
     const float *bRow = bpLocal + (k * kNr);
-    c0 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 0), c0);
-    c1 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 1), c1);
-    c2 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 2), c2);
-    c3 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 3), c3);
-    c4 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 4), c4);
-    c5 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 5), c5);
+    c0a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 0), c0a);
+    c1a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 1), c1a);
+    c2a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 2), c2a);
+    c3a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 3), c3a);
+    c4a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 4), c4a);
+    c5a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 5), c5a);
   }
+  const __m256 c0 = _mm256_add_ps(c0a, c0b);
+  const __m256 c1 = _mm256_add_ps(c1a, c1b);
+  const __m256 c2 = _mm256_add_ps(c2a, c2b);
+  const __m256 c3 = _mm256_add_ps(c3a, c3b);
+  const __m256 c4 = _mm256_add_ps(c4a, c4b);
+  const __m256 c5 = _mm256_add_ps(c5a, c5b);
 
-  // Fold @c dot(x_i, y_j) into @c ||x_i||^2 + ||y_j||^2 - 2*dot per column. Cancellation when
-  // @c x_i ~= y_j can drop the result fractionally below zero; clamping at zero keeps the
-  // contract that squared distances are non-negative, matching @ref pairwiseSqEuclideanGemm.
+  // Fold @c dot(x_i, y_j) into @c ||x_i||^2 + ||y_j||^2 - 2*dot per column, threshold-compare
+  // the 8 lanes in SIMD, then pack the result into an 8-bit column mask. Walking the mask is
+  // O(survivors) instead of the old scalar O(Mr * Nr) double loop. Cancellation when
+  // @c x_i ~= y_j can drop the dist fractionally below zero; the @c max(.,0) clamp preserves
+  // the non-negative squared-distance contract and never flips the sign of the comparison.
   const __m256 xNorms = _mm256_load_ps(aRowNormsSq);
   const __m256 neg2 = _mm256_set1_ps(-2.0F);
   const __m256 zero = _mm256_setzero_ps();
+  const __m256 radiusVec = _mm256_set1_ps(radiusSq);
 
-  alignas(32) std::array<std::array<float, kMr>, kNr> distCols{};
-  auto fold = [&](__m256 acc, std::size_t colOffset, float *out) noexcept {
+  auto foldAndMask = [&](__m256 acc, std::size_t colOffset) noexcept -> std::uint8_t {
     const __m256 yNorm = _mm256_set1_ps(bColNormsSq[colOffset]);
     __m256 dist = _mm256_fmadd_ps(acc, neg2, _mm256_add_ps(xNorms, yNorm));
     dist = _mm256_max_ps(dist, zero);
-    _mm256_store_ps(out, dist);
+    const __m256 survive = _mm256_cmp_ps(dist, radiusVec, _CMP_LE_OQ);
+    return static_cast<std::uint8_t>(_mm256_movemask_ps(survive));
   };
+
+  std::array<std::uint8_t, kNr> masks{};
   if (validCols > 0) {
-    fold(c0, 0, distCols[0].data());
+    masks[0] = foldAndMask(c0, 0);
   }
   if (validCols > 1) {
-    fold(c1, 1, distCols[1].data());
+    masks[1] = foldAndMask(c1, 1);
   }
   if (validCols > 2) {
-    fold(c2, 2, distCols[2].data());
+    masks[2] = foldAndMask(c2, 2);
   }
   if (validCols > 3) {
-    fold(c3, 3, distCols[3].data());
+    masks[3] = foldAndMask(c3, 3);
   }
   if (validCols > 4) {
-    fold(c4, 4, distCols[4].data());
+    masks[4] = foldAndMask(c4, 4);
   }
   if (validCols > 5) {
-    fold(c5, 5, distCols[5].data());
+    masks[5] = foldAndMask(c5, 5);
   }
 
-  for (std::size_t r = 0; r < validRows; ++r) {
-    for (std::size_t c = 0; c < validCols; ++c) {
-      if (distCols[c][r] <= radiusSq) {
-        emit(rowBase + r, colBase + c);
-      }
+  // Clamp mask bits beyond validRows so padding rows in the last M-tile never surface.
+  const auto rowMask =
+      (validRows >= kMr) ? std::uint8_t{0xFF} : static_cast<std::uint8_t>((1U << validRows) - 1U);
+  for (std::size_t c = 0; c < validCols; ++c) {
+    auto m = static_cast<std::uint8_t>(masks[c] & rowMask);
+    while (m != 0) {
+      const int bit = __builtin_ctz(static_cast<unsigned>(m));
+      emit(rowBase + static_cast<std::size_t>(bit), colBase + c);
+      m = static_cast<std::uint8_t>(m & (m - 1));
     }
   }
 }
