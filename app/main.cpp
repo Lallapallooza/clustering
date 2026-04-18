@@ -38,7 +38,7 @@ NDArray<float, 2> readCSV(const std::string &filename, size_t num_points, size_t
 
 } // namespace
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[]) try {
   if (argc < 8) {
     std::cerr << "Usage: " << argv[0]
               << " <CSV file> "
@@ -67,13 +67,7 @@ int main(int argc, char *argv[]) {
   std::cout << "Number of Jobs (njobs)  : " << n_jobs << "\n";
   std::cout << "Output File             : " << outputFile << "\n\n";
 
-  NDArray<float, 2> points({numPoints, dimensions});
-  try {
-    points = readCSV(csvFile, numPoints, dimensions);
-  } catch (const std::exception &e) {
-    std::cerr << "Error: " << e.what() << "\n";
-    return 1;
-  }
+  const NDArray<float, 2> points = readCSV(csvFile, numPoints, dimensions);
 
   std::cout << "Start!\n";
 
@@ -103,4 +97,7 @@ int main(int argc, char *argv[]) {
   }
 
   return 0;
+} catch (const std::exception &e) {
+  std::cerr << "Error: " << e.what() << "\n";
+  return 1;
 }
