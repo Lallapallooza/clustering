@@ -71,6 +71,14 @@ inline constexpr std::size_t kThresholdMaxD = 256;
 inline constexpr std::size_t kThresholdChunkRows = 256;
 
 /**
+ * @brief Number of @c Nr-wide B panels processed as a group so their packed bytes stay
+ *        L1-resident while every M-tile in the current chunk sweeps through them.
+ *
+ * A group of 32 panels at @c Nr=6 and @c d=64 is 48 KiB -- roughly one Zen L1d.
+ */
+inline constexpr std::size_t kThresholdPanelGroup = 32;
+
+/**
  * @brief AVX2 f32 specialization of the fused threshold outer driver.
  *
  * Iterates @c kThresholdChunkRows -sized row chunks of @p X. Within a chunk, each 8-row
@@ -146,31 +154,45 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
         (iChunkBase + kThresholdChunkRows <= n) ? kThresholdChunkRows : (n - iChunkBase);
     const std::size_t mTilesInChunk = (chunkRows + kMr - 1) / kMr;
 
-    // packA scratch and row-norms tile live across all tiles in the chunk; packA overwrites the
-    // first kMr*d floats before the kernel reads them, so no zero-init is needed and the stack
-    // alloc happens once per chunk rather than per tile.
-    alignas(32) std::array<float, kMr * kThresholdMaxD> apScratch;
-    alignas(32) std::array<float, kMr> xNormsTile;
     const auto xDesc = ::clustering::detail::describeMatrix(X);
 
+    // Pre-pack every A-tile in the chunk and its row-norms once, then swap the (M-tile, panel)
+    // loop nest so panels walk the inner axis while every M-tile sweeps the same panel group.
+    // A panel group ~= 48 KiB stays L1-resident across the M-tile inner sweep, so the B bytes
+    // we re-read go to L1 instead of L3 / cross-CCD fabric on the 9950X3D.
+    alignas(32) std::array<float, kThresholdChunkRows * kThresholdMaxD> apPacked;
+    alignas(32) std::array<float, kThresholdChunkRows> xNormsPacked;
     for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
       const std::size_t iBase = iChunkBase + (tileIdx * kMr);
       const std::size_t mc =
           (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
-
-      packA<float>(xDesc, iBase, mc, 0, d, apScratch.data());
-
+      float *tileSlot = apPacked.data() + (tileIdx * kMr * d);
+      packA<float>(xDesc, iBase, mc, 0, d, tileSlot);
       for (std::size_t r = 0; r < mc; ++r) {
-        xNormsTile[r] = xRowNormsSq(iBase + r);
+        xNormsPacked[(tileIdx * kMr) + r] = xRowNormsSq(iBase + r);
       }
+      for (std::size_t r = mc; r < kMr; ++r) {
+        xNormsPacked[(tileIdx * kMr) + r] = 0.0F;
+      }
+    }
 
-      for (std::size_t p = 0; p < nPanels; ++p) {
-        const std::size_t jBase = p * kNr;
-        const std::size_t nc = (jBase + kNr <= m) ? kNr : (m - jBase);
-        const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
-        const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
-        gemmKernel8x6Avx2F32Threshold(apScratch.data(), bpPanel, d, xNormsTile.data(), normsPanel,
-                                      iBase, jBase, mc, nc, radiusSq, emit);
+    for (std::size_t panelBase = 0; panelBase < nPanels; panelBase += kThresholdPanelGroup) {
+      const std::size_t panelEnd = std::min(panelBase + kThresholdPanelGroup, nPanels);
+      for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
+        const std::size_t iBase = iChunkBase + (tileIdx * kMr);
+        const std::size_t mc =
+            (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
+        const float *tileA = apPacked.data() + (tileIdx * kMr * d);
+        const float *tileNorms = xNormsPacked.data() + (tileIdx * kMr);
+
+        for (std::size_t p = panelBase; p < panelEnd; ++p) {
+          const std::size_t jBase = p * kNr;
+          const std::size_t nc = (jBase + kNr <= m) ? kNr : (m - jBase);
+          const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
+          const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
+          gemmKernel8x6Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
+                                        nc, radiusSq, emit);
+        }
       }
     }
   };
