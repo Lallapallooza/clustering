@@ -267,7 +267,8 @@ private:
       // Per-worker distance tile for the chunked path: one chunkCap*k slab per worker so
       // the chunk fan-out runs without touching a shared tile.
       const std::size_t distRows = needsChunk ? (blocks * chunkCap) : std::size_t{1};
-      const std::size_t distCols = needsChunk ? (k == 0 ? std::size_t{1} : k) : std::size_t{1};
+      const std::size_t safeK = (k == 0) ? std::size_t{1} : k;
+      const std::size_t distCols = needsChunk ? safeK : std::size_t{1};
       m_distsChunk = NDArray<T, 2, Layout::Contig>({distRows, distCols});
     } else if (workerChanged) {
       // Only the per-worker slabs depend on workerCount; resize them if d triggered needsChunk.

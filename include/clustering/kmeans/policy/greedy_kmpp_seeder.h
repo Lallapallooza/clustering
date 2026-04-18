@@ -78,8 +78,8 @@ sqEuclideanRowToBatchAvx2Fixed(const float *x, const float *candData, std::size_
   // fmadd round-trip; also gives the register allocator enough explicit live ranges to keep
   // accumulators in YMM registers rather than spilling to the stack (measured: 8 GFLOPS with
   // the original 1x loop, ~2x post-unroll on the seeder's B=4 hot path).
-  __m256 acc0[B];
-  __m256 acc1[B];
+  std::array<__m256, B> acc0{};
+  std::array<__m256, B> acc1{};
   for (std::size_t t = 0; t < B; ++t) {
     acc0[t] = _mm256_setzero_ps();
     acc1[t] = _mm256_setzero_ps();
@@ -106,7 +106,7 @@ sqEuclideanRowToBatchAvx2Fixed(const float *x, const float *candData, std::size_
       acc0[t] = _mm256_fmadd_ps(diff, diff, acc0[t]);
     }
   }
-  float tail[B];
+  std::array<float, B> tail{};
   for (std::size_t t = 0; t < B; ++t) {
     tail[t] = 0.0F;
   }
@@ -436,8 +436,7 @@ public:
         scores[t] = T{0};
       }
       constexpr std::size_t kMaxLocalTrials = 32;
-      std::array<T, kMaxLocalTrials> distRow{};
-      CLUSTERING_ALWAYS_ASSERT(nLocalTrials <= distRow.size());
+      CLUSTERING_ALWAYS_ASSERT(nLocalTrials <= kMaxLocalTrials);
 
       const std::size_t transposedWidth = detail::greedyKmppTransposedWidth(nLocalTrials);
       bool scoredViaTransposed = false;
