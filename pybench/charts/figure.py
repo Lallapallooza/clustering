@@ -8,6 +8,8 @@ from typing import Any
 from matplotlib import colormaps
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FixedLocator, FuncFormatter, NullLocator
 
 from pybench.charts.data import safe_ratio
 from pybench.charts.meta import RunMetadata
@@ -23,6 +25,60 @@ class BuildFigureInputs:
     non_njobs_params: tuple[tuple[str, Any], ...]
     dataset_spec: str
     ari_threshold: float | None
+
+
+# Paper-grade palette: near-black for headings, warm grey chrome, desaturated
+# green/red for the win/loss bands. Data colors come from a widened viridis
+# slice for strong contrast between series (see _series_colors).
+_TEXT = "#111419"
+_MUTED = "#4E5866"
+_AXIS = "#2A313A"
+_GRID = "#E4E8ED"
+_PARITY = "#6C7480"
+_BAND_WIN = "#3EA06E"
+_BAND_LOSS = "#D06963"
+
+# Tiered tick lists ordered coarse -> fine. _pick_log_ticks walks the tiers and
+# picks the first one that produces 3-7 ticks inside a facet's y-range. Every
+# tier includes 1.0 so parity lines up on a gridline whenever it's in view.
+_TICK_TIERS: tuple[tuple[float, ...], ...] = (
+    (0.3, 1.0, 3.0, 10.0, 30.0, 100.0),
+    (0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 50.0, 100.0),
+    (0.5, 0.7, 0.85, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0),
+    (0.7, 0.8, 0.85, 0.95, 1.0, 1.1, 1.2, 1.35, 1.5, 1.7, 2.0, 2.5, 3.0),
+    (0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.2, 1.3, 1.4, 1.5, 1.7, 2.0, 2.5),
+)
+
+
+def _pick_log_ticks(
+    lo: float, hi: float, *, target_min: int = 3, target_max: int = 7
+) -> list[float]:
+    """Pick a clean set of major ticks for a log-scale range ``[lo, hi]``."""
+    for tier in _TICK_TIERS:
+        in_range = [t for t in tier if lo <= t <= hi]
+        if target_min <= len(in_range) <= target_max:
+            return in_range
+    finest = [t for t in _TICK_TIERS[-1] if lo <= t <= hi]
+    if len(finest) > target_max:
+        step = (len(finest) - 1) / (target_max - 1)
+        return [finest[round(i * step)] for i in range(target_max)]
+    return finest
+
+
+def _padded_log_range(
+    values: list[float], *, pad_fold: float = 1.10
+) -> tuple[float, float]:
+    """Tight log-scale bounds around ``values`` with a small multiplicative pad.
+
+    Intentionally does NOT force parity (1.0) into view -- when every value is
+    comfortably above 1x, including 1x would drag the scale down and compress
+    the data. The green/red win/loss shading continues to mark the parity
+    crossover wherever it falls inside the axis range.
+    """
+    finite = [v for v in values if math.isfinite(v) and v > 0]
+    if not finite:
+        return (1.0 / pad_fold, 1.0 * pad_fold)
+    return (min(finite) / pad_fold, max(finite) * pad_fold)
 
 
 def _round_half_up(r: float, digits: int) -> str:
@@ -49,13 +105,7 @@ def _get_n_jobs(r: RunResult) -> int:
 def _format_non_njobs_params(pairs: tuple[tuple[str, Any], ...]) -> str:
     if not pairs:
         return ""
-    return "+".join(f"{k}={v}" for k, v in pairs)
-
-
-def _meta_lines(meta: RunMetadata, dataset_spec: str) -> tuple[str, str]:
-    top = f"{dataset_spec}  |  {meta.timestamp_iso}"
-    bot = f"git={meta.git_sha}  |  {meta.machine}"
-    return top, bot
+    return "  |  ".join(f"{k}={v}" for k, v in pairs)
 
 
 def _collect_line(
@@ -94,6 +144,77 @@ def _fill_gaps(
     return list(all_sizes), aligned
 
 
+def _fmt_size_tick(x: float, _pos: int) -> str:
+    if x >= 1e6:
+        v = x / 1e6
+        return f"{v:g}M"
+    if x >= 1e3:
+        v = x / 1e3
+        return f"{v:g}k"
+    return f"{x:g}"
+
+
+def _fmt_ratio_tick(y: float, _pos: int) -> str:
+    if y <= 0 or not math.isfinite(y):
+        return ""
+    if y >= 1.0:
+        if y == int(y):
+            return f"{int(y)}x"
+        return f"{y:g}x"
+    return f"{y:g}x"
+
+
+def _style_axes(ax: Any, *, sizes: list[int]) -> None:
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(_AXIS)
+        ax.spines[side].set_linewidth(0.7)
+
+    ax.set_facecolor("white")
+    ax.grid(
+        which="major",
+        axis="both",
+        color=_GRID,
+        linestyle="-",
+        linewidth=0.6,
+        alpha=1.0,
+        zorder=0,
+    )
+    ax.set_axisbelow(True)
+
+    ax.tick_params(
+        axis="both",
+        which="major",
+        color=_AXIS,
+        labelcolor=_TEXT,
+        labelsize=10.0,
+        length=3.5,
+        width=0.8,
+        pad=3,
+    )
+    ax.tick_params(axis="both", which="minor", length=0)
+
+    # Y-major ticks are pinned later (per-facet) once we know the data range.
+    ax.yaxis.set_major_formatter(FuncFormatter(_fmt_ratio_tick))
+    ax.yaxis.set_minor_locator(NullLocator())
+
+    # Pin x-major ticks to the actual dataset sizes so each data column lines up
+    # with a labeled gridline.
+    if sizes:
+        ax.xaxis.set_major_locator(FixedLocator(sizes))
+    ax.xaxis.set_major_formatter(FuncFormatter(_fmt_size_tick))
+    ax.xaxis.set_minor_locator(NullLocator())
+
+    # Every facet carries its own x- and y-tick labels. Rows no longer share a
+    # y-scale (each (metric, dim) has its own natural range), and the speedup
+    # row would otherwise sit above unlabeled x-ticks -- so we label every axis
+    # instead of relying on the shared-axis convention.
+
+
 def _plot_one_axes(
     ax: Any,
     *,
@@ -101,15 +222,25 @@ def _plot_one_axes(
     dim: int,
     n_jobs_values: list[int],
     metric: str,
-    cmap: Any,
+    colors: list[Any],
 ) -> None:
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.axhline(1.0, linestyle="--", linewidth=0.8, alpha=0.5)
+    # Win/loss bands first so they sit under everything else. A touch more
+    # saturated than a typical paper preprint so the reader sees at a glance
+    # which side of parity the curve lives on.
+    ax.axhspan(1.0, 1e8, facecolor=_BAND_WIN, alpha=0.07, zorder=0)
+    ax.axhspan(1e-8, 1.0, facecolor=_BAND_LOSS, alpha=0.07, zorder=0)
+    # Parity line (dashed). A Line2D with linestyle="--" is what the tests
+    # distinguish from the solid series lines.
+    ax.axhline(
+        1.0,
+        linestyle="--",
+        linewidth=1.1,
+        color=_PARITY,
+        alpha=0.95,
+        zorder=1,
+    )
     all_sizes = _all_sizes_for_dim(results, dim)
-    n = max(1, len(n_jobs_values))
     for i, nj in enumerate(n_jobs_values):
-        color = cmap((i + 0.5) / n)
         present_sizes, ratios = _collect_line(results, dim, nj, metric)
         xs, ys = _fill_gaps(all_sizes, present_sizes, ratios)
         if not xs:
@@ -119,27 +250,133 @@ def _plot_one_axes(
             ys,
             marker="o",
             linestyle="-",
-            color=color,
+            linewidth=2.3,
+            markersize=7.0,
+            markeredgecolor="white",
+            markeredgewidth=1.1,
+            color=colors[i],
             label=f"n_jobs={nj}",
+            zorder=3,
         )
-        last_finite_idx = None
-        for j in range(len(ys) - 1, -1, -1):
-            if math.isfinite(ys[j]):
-                last_finite_idx = j
-                break
-        last_label = format_ratio_label(
-            ys[last_finite_idx] if last_finite_idx is not None else math.nan
+
+
+def _series_colors(cmap: Any, n: int) -> list[Any]:
+    # Sample viridis across a wider slice than the default so adjacent series
+    # read as visually distinct on screen and in print. Skipping the extreme
+    # dark (unreadable) and extreme yellow (washes out on white) ends keeps the
+    # palette print-safe while preserving monotonic luminance (pinned by test).
+    if n <= 1:
+        return [cmap(0.5)]
+    return [cmap(0.08 + 0.84 * i / (n - 1)) for i in range(n)]
+
+
+def _draw_title_block(
+    fig: Figure,
+    *,
+    algo: str,
+    param_summary: str,
+    dataset_spec: str,
+) -> None:
+    fig.text(
+        0.06,
+        0.955,
+        f"{algo}  vs  scikit-learn",
+        fontsize=19.0,
+        fontweight="bold",
+        color=_TEXT,
+        ha="left",
+        va="top",
+    )
+    fig.text(
+        0.99,
+        0.958,
+        "higher is better",
+        fontsize=10.5,
+        color=_MUTED,
+        ha="right",
+        va="top",
+    )
+    subtitle_parts = [s for s in (param_summary, dataset_spec) if s]
+    if subtitle_parts:
+        fig.text(
+            0.06,
+            0.915,
+            "    |    ".join(subtitle_parts),
+            fontsize=11.5,
+            color=_MUTED,
+            ha="left",
+            va="top",
         )
-        anchor_x = xs[last_finite_idx] if last_finite_idx is not None else xs[-1]
-        anchor_y = ys[last_finite_idx] if last_finite_idx is not None else 1.0
-        ax.annotate(
-            f"n_jobs={nj}  {last_label}",
-            xy=(anchor_x, anchor_y),
-            xytext=(5, 0),
-            textcoords="offset points",
-            fontsize=8,
-            color=color,
+
+
+def _draw_header_rule(fig: Figure) -> None:
+    from matplotlib.lines import Line2D as _L2D
+
+    rule = _L2D(
+        [0.06, 0.99],
+        [0.87, 0.87],
+        transform=fig.transFigure,
+        color=_AXIS,
+        linewidth=0.9,
+        alpha=0.25,
+        solid_capstyle="butt",
+    )
+    fig.add_artist(rule)
+
+
+def _draw_legend(fig: Figure, n_jobs_values: list[int], colors: list[Any]) -> None:
+    handles: list[Line2D] = []
+    for i, nj in enumerate(n_jobs_values):
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="-",
+                linewidth=2.3,
+                markersize=7.0,
+                markeredgecolor="white",
+                markeredgewidth=1.1,
+                color=colors[i],
+                label=f"n_jobs = {nj}",
+            )
         )
+    handles.append(
+        Line2D(
+            [0],
+            [0],
+            linestyle="--",
+            linewidth=1.1,
+            color=_PARITY,
+            label="parity (theirs = ours)",
+        )
+    )
+    legend = fig.legend(
+        handles=handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.048),
+        ncol=len(handles),
+        frameon=False,
+        fontsize=11.0,
+        handlelength=2.6,
+        handletextpad=0.7,
+        columnspacing=2.6,
+    )
+    for txt in legend.get_texts():
+        txt.set_color(_TEXT)
+
+
+def _draw_caption(fig: Figure, meta: RunMetadata) -> None:
+    caption = f"git  {meta.git_sha}    |    {meta.machine}    |    {meta.timestamp_iso}"
+    fig.text(
+        0.5,
+        0.014,
+        caption,
+        fontsize=9.0,
+        color=_MUTED,
+        ha="center",
+        va="bottom",
+    )
 
 
 def build_figure(inputs: BuildFigureInputs) -> Figure:
@@ -148,27 +385,55 @@ def build_figure(inputs: BuildFigureInputs) -> Figure:
     if d == 0:
         return build_empty_figure(inputs.algo, "no dims to render")
 
-    width = max(6.0, 3.5 * d)
-    fig = Figure(figsize=(width, 6.0))
-    # Attaching the Agg canvas here makes fig.savefig work without pyplot.
+    width = max(10.0, 3.4 * d + 1.6)
+    height = 8.1
+    fig = Figure(figsize=(width, height), facecolor="white")
     FigureCanvasAgg(fig)
 
-    axes_grid = fig.subplots(2, d, sharex=True, squeeze=False)
+    gs = fig.add_gridspec(
+        nrows=2,
+        ncols=d,
+        left=0.055,
+        right=0.99,
+        top=0.81,
+        bottom=0.145,
+        hspace=0.38,
+        wspace=0.28,
+    )
+
+    # Share x per column (same dataset sizes across the two metric rows), but
+    # not y per row -- each (metric, dim) facet picks its own y-range so the
+    # curves in low-variance facets don't collapse to a flat line.
+    axes = [[fig.add_subplot(gs[r, c]) for c in range(d)] for r in range(2)]
+    for c in range(d):
+        axes[1][c].sharex(axes[0][c])
 
     n_jobs_values = sorted({_get_n_jobs(r) for r in inputs.partition_results})
-    cmap = colormaps["viridis"]
+    colors = _series_colors(colormaps["viridis"], len(n_jobs_values))
 
     for col, dim in enumerate(dims):
-        top = axes_grid[0, col]
-        bot = axes_grid[1, col]
-        top.set_title(f"dim={dim}")
+        top = axes[0][col]
+        bot = axes[1][col]
+        sizes_for_dim = _all_sizes_for_dim(inputs.partition_results, dim)
+        _style_axes(top, sizes=sizes_for_dim)
+        _style_axes(bot, sizes=sizes_for_dim)
+
+        top.set_title(
+            f"d = {dim}",
+            fontsize=12.0,
+            fontweight="bold",
+            color=_TEXT,
+            pad=6,
+            loc="left",
+        )
+
         _plot_one_axes(
             top,
             results=inputs.partition_results,
             dim=dim,
             n_jobs_values=n_jobs_values,
             metric="time",
-            cmap=cmap,
+            colors=colors,
         )
         _plot_one_axes(
             bot,
@@ -176,37 +441,90 @@ def build_figure(inputs: BuildFigureInputs) -> Figure:
             dim=dim,
             n_jobs_values=n_jobs_values,
             metric="mem",
-            cmap=cmap,
+            colors=colors,
         )
-        if col == 0:
-            top.set_ylabel("time (theirs / ours)")
-            bot.set_ylabel("memory (theirs / ours)")
-        bot.set_xlabel("dataset size")
 
-    param_summary = _format_non_njobs_params(inputs.non_njobs_params)
-    suptitle = inputs.algo if not param_summary else f"{inputs.algo}   {param_summary}"
-    fig.suptitle(suptitle)
-    meta_top, meta_bot = _meta_lines(inputs.title_meta, inputs.dataset_spec)
-    fig.text(0.5, 0.935, meta_top, fontsize=7, ha="center")
-    fig.text(0.5, 0.905, meta_bot, fontsize=7, ha="center")
+        if col == 0:
+            top.set_ylabel(
+                "time speedup   (theirs / ours)",
+                fontsize=11.5,
+                fontweight="medium",
+                color=_TEXT,
+                labelpad=8,
+            )
+            bot.set_ylabel(
+                "memory savings   (theirs / ours)",
+                fontsize=11.5,
+                fontweight="medium",
+                color=_TEXT,
+                labelpad=8,
+            )
+
+    # Pin axis limits AFTER drawing so the win/loss axhspans (extending to
+    # +/-1e8 to clip the plot area) can't drag the autoscaled range out to
+    # something meaningless. Each facet gets a y-range tight to its own data
+    # so the curves actually fill the plot area, and its tick list is picked
+    # to match that range's width.
+    for c, dim in enumerate(dims):
+        facet = [r for r in inputs.partition_results if r.dims == dim]
+        time_vals = [safe_ratio(r.theirs_median_ms, r.ours_median_ms) for r in facet]
+        mem_vals = [safe_ratio(r.theirs_peak_mb, r.ours_peak_mb) for r in facet]
+        t_lo, t_hi = _padded_log_range(time_vals)
+        m_lo, m_hi = _padded_log_range(mem_vals)
+        axes[0][c].set_ylim(t_lo, t_hi)
+        axes[1][c].set_ylim(m_lo, m_hi)
+        axes[0][c].yaxis.set_major_locator(FixedLocator(_pick_log_ticks(t_lo, t_hi)))
+        axes[1][c].yaxis.set_major_locator(FixedLocator(_pick_log_ticks(m_lo, m_hi)))
+        sizes_for_dim = _all_sizes_for_dim(inputs.partition_results, dim)
+        if sizes_for_dim:
+            lo = sizes_for_dim[0] / 1.15
+            hi = sizes_for_dim[-1] * 1.15
+            axes[0][c].set_xlim(lo, hi)
+
+    # Single shared x-axis caption in the gutter between the plots and the
+    # legend row; clearer than repeating "dataset size" on every axes.
+    fig.text(
+        (0.06 + 0.99) / 2.0,
+        0.098,
+        "dataset size  (n)",
+        fontsize=11.5,
+        fontweight="medium",
+        color=_TEXT,
+        ha="center",
+        va="bottom",
+    )
+
+    _draw_title_block(
+        fig,
+        algo=inputs.algo,
+        param_summary=_format_non_njobs_params(inputs.non_njobs_params),
+        dataset_spec=inputs.dataset_spec,
+    )
+    # Hairline rule between the header block and the plot grid -- reads as a
+    # paper "abstract / body" separator without being loud.
+    _draw_header_rule(fig)
+    _draw_legend(fig, n_jobs_values, colors)
+    _draw_caption(fig, inputs.title_meta)
+
     if inputs.ari_threshold is not None:
         fig.text(
             0.99,
-            0.01,
-            f"ARI>={inputs.ari_threshold:g}",
-            fontsize=7,
+            0.014,
+            f"ARI >= {inputs.ari_threshold:g}",
+            fontsize=9.0,
+            color=_MUTED,
             ha="right",
             va="bottom",
         )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.87))
+
     return fig
 
 
 def build_empty_figure(algo: str, reason: str) -> Figure:
-    fig = Figure(figsize=(6.0, 4.0))
+    fig = Figure(figsize=(6.0, 4.0), facecolor="white")
     FigureCanvasAgg(fig)
     ax = fig.subplots(1, 1)
-    ax.set_title(f"{algo}: no data")
+    ax.set_title(f"{algo}: no data", color=_TEXT)
     ax.text(
         0.5,
         0.5,
@@ -215,7 +533,10 @@ def build_empty_figure(algo: str, reason: str) -> Figure:
         ha="center",
         va="center",
         transform=ax.transAxes,
+        color=_MUTED,
     )
+    for spine in ax.spines.values():
+        spine.set_visible(False)
     ax.set_xticks([])
     ax.set_yticks([])
     return fig
