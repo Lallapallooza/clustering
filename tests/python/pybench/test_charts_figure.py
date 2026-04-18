@@ -242,19 +242,31 @@ def test_title_contains_meta() -> None:
     assert "Xeon-7777" in all_title_text
 
 
-def test_endpoint_annotations_placed_per_ratio_line() -> None:
+def test_figure_legend_lists_each_njobs_and_parity() -> None:
     inputs = _grid_inputs(
         dims=(2, 8),
         sizes=(1000, 5000),
         n_jobs=(1, 4, 8),
     )
     fig = build_figure(inputs)
+    assert len(fig.legends) == 1
+    labels = [t.get_text() for t in fig.legends[0].get_texts()]
+    for nj in (1, 4, 8):
+        assert any(f"n_jobs = {nj}" == lbl for lbl in labels)
+    assert any("parity" in lbl for lbl in labels)
+
+
+def test_axes_have_no_text_annotations() -> None:
+    # Former endpoint labels overlapped; identification now lives in the
+    # figure-level legend, so data axes stay free of ad-hoc text artifacts.
+    inputs = _grid_inputs(
+        dims=(2, 8),
+        sizes=(1000, 5000),
+        n_jobs=(1, 4),
+    )
+    fig = build_figure(inputs)
     for ax in fig.axes:
-        ratio_lines = _ratio_lines(ax)
-        assert len(ax.texts) == len(ratio_lines) > 0
-        for t in ax.texts:
-            text = t.get_text()
-            assert text.endswith("x") or text == "n/a"
+        assert list(ax.texts) == []
 
 
 def test_build_empty_figure() -> None:
