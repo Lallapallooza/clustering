@@ -25,15 +25,20 @@ def _ours(data: np.ndarray, *, n_clusters: int, n_jobs: int = 1) -> np.ndarray:
     return best_labels
 
 
-def _theirs(data: np.ndarray, *, n_clusters: int, **_: int) -> np.ndarray:
-    model = KMeans(
-        n_clusters=n_clusters,
-        n_init=_N_INIT,
-        max_iter=300,
-        tol=1e-4,
-        random_state=0,
+def _theirs(data: np.ndarray, *, n_clusters: int, **_: object) -> np.ndarray:
+    # sklearn.KMeans dropped @c n_jobs in 1.0; parallelism is scoped via
+    # threadpool_limits around the call, applied by the runner on every theirs_fn.
+    return (
+        KMeans(
+            n_clusters=n_clusters,
+            n_init=_N_INIT,
+            max_iter=300,
+            tol=1e-4,
+            random_state=0,
+        )
+        .fit_predict(data)
+        .astype(np.int32)
     )
-    return model.fit_predict(data).astype(np.int32)
 
 
 recipe = Recipe(
