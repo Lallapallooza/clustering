@@ -86,8 +86,24 @@ kmeans_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> da
     throw nb::value_error("tol must be >= 0");
   }
 
-  NDArray<float, 2> X({N, D});
-  std::memcpy(X.data(), data.data(), N * D * sizeof(float));
+  // Borrow the numpy buffer directly when it is 32-byte aligned: @c KMeans treats @p X as
+  // read-only and several AVX2 tiers assume 32-byte aligned loads on @p X through the
+  // @c NDArray::isAligned<32>() gate. Borrowing a loosely-aligned numpy array would force the
+  // dispatcher down fallback paths whose interactions are less thoroughly exercised, and in
+  // practice we hit a heap-corruption tail on that path. Align-gated borrow captures the common
+  // case (numpy contiguous arrays from @c make_blobs, @c astype, etc. on x86_64 glibc land on
+  // 32-byte boundaries here) without exposing the unaligned fallback.
+  constexpr std::size_t kAvx2Align = 32;
+  const bool dataAligned = (reinterpret_cast<std::uintptr_t>(data.data()) % kAvx2Align) == 0;
+  NDArray<float, 2> xOwned({0, 0});
+  auto X = [&] {
+    if (dataAligned) {
+      return clustering::python::borrowFromNumpyContig<float>(data);
+    }
+    xOwned = NDArray<float, 2>({N, D});
+    std::memcpy(xOwned.data(), data.data(), N * D * sizeof(float));
+    return NDArray<float, 2, clustering::Layout::Contig>::borrow(xOwned.data(), {N, D});
+  }();
 
   KMeans<float> algo(k, jobs);
   {
