@@ -19,6 +19,7 @@ from sklearn.metrics import adjusted_rand_score
 from sklearn.neighbors import NearestNeighbors
 from threadpoolctl import threadpool_limits
 
+from pybench.alignment import as_aligned
 from pybench.recipe import DatasetSpec, EpsPolicy, Recipe, RunResult
 
 
@@ -52,10 +53,21 @@ def _make_vmf(n_samples: int, spec: DatasetSpec) -> np.ndarray:
 
 
 def make_data(n_samples: int, spec: DatasetSpec) -> np.ndarray:
-    """Reproducible float32 dataset. Branches to vMF above vmf_switch_dim."""
-    if spec.n_features > spec.vmf_switch_dim:
-        return _make_vmf(n_samples, spec)
-    return _make_blobs(n_samples, spec)
+    """Reproducible 32-byte aligned float32 dataset. Branches to vMF above vmf_switch_dim.
+
+    numpy's default allocator lands on 16-byte boundaries non-deterministically for contiguous
+    arrays, which routes the C++ binding down its memcpy fallback on half of cases and makes
+    memray peak numbers compare unevenly between @c ours and @c theirs (the copy lands inside
+    the tracker scope on one run and outside on another). Aligning at the data source pins both
+    implementations to the same input layout so the recorded peak reflects implementation
+    footprint, not allocator luck.
+    """
+    raw = (
+        _make_vmf(n_samples, spec)
+        if spec.n_features > spec.vmf_switch_dim
+        else _make_blobs(n_samples, spec)
+    )
+    return as_aligned(raw)
 
 
 def _knee_eps(data: np.ndarray, k: int) -> float:
