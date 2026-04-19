@@ -76,8 +76,10 @@ public:
    * @param X       Contiguous n x d dataset. The caller retains ownership; @p X must outlive
    *                this @c run call and every subsequent call that intends to reuse scratch.
    * @param maxIter Iteration cap on the inner Lloyd loop.
-   * @param tol     Convergence tolerance on the L2 centroid shift (linear). Internally compared
-   *                as @c tol*tol against the Kahan-summed per-centroid shift-squared.
+   * @param tol     Convergence tolerance relative to the mean column variance of @p X
+   *                (sklearn convention). The effective sum-of-shift-squared threshold is
+   *                @c tol * mean(var(X, axis=0)); iteration stops when the Kahan-summed per-
+   *                centroid shift-squared falls at or below that threshold.
    * @param seed    PRNG seed. Identical @c (seed, nJobs, X, maxIter, tol) produces bit-identical
    *                labels, centroids, and inertia at @c nJobs=1.
    *
