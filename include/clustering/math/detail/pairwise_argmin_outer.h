@@ -166,7 +166,9 @@ inline void pairwiseArgminOuterAvx2F32(const NDArray<float, 2, Layout::Contig> &
     std::memcpy(labels.data() + iBase, argBuf.data(), mc * sizeof(std::int32_t));
   };
 
-  if (pool.shouldParallelize(mTiles, 1, 2) && pool.pool != nullptr) {
+  const std::size_t totalOps = n * d * k;
+  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2) &&
+      pool.pool != nullptr) {
     pool.pool
         ->submit_blocks(std::size_t{0}, mTiles,
                         [&](std::size_t lo, std::size_t hi) {
@@ -315,7 +317,9 @@ inline void pairwiseArgminOuterAvx2F32WithScratch(const NDArray<float, 2, Layout
     std::memcpy(labels.data() + iBase, argBuf.data(), mc * sizeof(std::int32_t));
   };
 
-  if (pool.shouldParallelize(mTiles, 1, 2) && pool.pool != nullptr) {
+  const std::size_t totalOps = n * d * k;
+  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2) &&
+      pool.pool != nullptr) {
     pool.pool
         ->submit_blocks(std::size_t{0}, mTiles,
                         [&](std::size_t lo, std::size_t hi) {
@@ -365,6 +369,7 @@ inline void pairwiseArgminDirectSmallDF32(const NDArray<float, 2, Layout::Contig
   std::int32_t *labelsData = labels.data();
   float *minSqData = outMinSq.data();
   const std::size_t mTiles = (n + kMr - 1) / kMr;
+  const std::size_t totalOps = n * d * k;
 
   auto runOneTile = [&](std::size_t tileIdx) noexcept {
     const std::size_t iBase = tileIdx * kMr;
@@ -408,7 +413,8 @@ inline void pairwiseArgminDirectSmallDF32(const NDArray<float, 2, Layout::Contig
     std::memcpy(labelsData + iBase, argBuf.data(), mc * sizeof(std::int32_t));
   };
 
-  if (pool.shouldParallelize(mTiles, 1, 2) && pool.pool != nullptr) {
+  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2) &&
+      pool.pool != nullptr) {
     pool.pool
         ->submit_blocks(std::size_t{0}, mTiles,
                         [&](std::size_t lo, std::size_t hi) {

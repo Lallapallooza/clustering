@@ -52,16 +52,11 @@ public:
    *              @ref math::Pool helpers.
    */
   explicit KMeans(std::size_t k, std::size_t nJobs = std::thread::hardware_concurrency())
-      : m_k(k), m_centroids({0, 0}), m_labels({0}) {
+      : m_k(k), m_nJobs(clampedJobCount(nJobs)), m_centroids({0, 0}), m_labels({0}) {
     CLUSTERING_ALWAYS_ASSERT(k >= 1);
-    // Skip pool construction when the caller asks for serial execution. The pool ctor spawns
-    // nJobs std::thread workers plus a detach/join pair per instance; at the small-n corner
-    // those threads sit idle yet still cost ~20 us per KMeans instance. Leaving m_pool empty
-    // lets run() pass Pool{nullptr} down without the creation/destruction detour.
-    const std::size_t clamped = clampedJobCount(nJobs);
-    if (clamped > 1) {
-      m_pool.emplace(clamped);
-    }
+    // Defer pool construction to @ref run: at small shapes every hot phase gates serial, and
+    // spawning nJobs workers in the ctor burns tens of microseconds of thread-create futex
+    // traffic that the fit never amortizes. @ref run emplaces on first need and reuses.
   }
 
   KMeans(const KMeans &) = delete;
@@ -102,6 +97,9 @@ public:
       return;
     }
 
+    if (m_nJobs > 1 && !m_pool.has_value() && shouldSpawnPoolForShape(n, d)) {
+      m_pool.emplace(m_nJobs);
+    }
     const math::Pool pool{m_pool.has_value() ? &*m_pool : nullptr};
     m_seeder.run(X, m_k, seed, pool, m_centroids);
     m_lloyd.run(X, m_centroids, m_k, maxIter, tol, pool, m_labels, m_inertia, m_nIter, m_converged);
@@ -149,7 +147,18 @@ private:
     }
   }
 
+  /// Conservatively predict whether any hot phase of this fit would clear its parallel gate.
+  /// Mirrors the most permissive per-phase work threshold (argmin's @c n * d * k against the
+  /// shared @c shouldParallelizeWork floor). When it returns @c false the pool is unused, so we
+  /// skip the tens-of-microseconds thread-spawn cost for small-shape fits.
+  [[nodiscard]] bool shouldSpawnPoolForShape(std::size_t n, std::size_t d) const noexcept {
+    constexpr std::size_t kMinOpsPerWorker = std::size_t{1} << 15;
+    const std::size_t totalOps = n * d * m_k;
+    return (totalOps / m_nJobs) >= kMinOpsPerWorker;
+  }
+
   std::size_t m_k;
+  std::size_t m_nJobs;
   std::optional<BS::light_thread_pool> m_pool;
   NDArray<T, 2, Layout::Contig> m_centroids;
   NDArray<std::int32_t, 1> m_labels;

@@ -60,6 +60,27 @@ struct Pool {
     }
     return (totalWork / minChunk) >= (workerCount() * minTasksPerWorker);
   }
+
+  /**
+   * @brief Decide whether @p totalOps warrants parallel dispatch, based on work volume.
+   *
+   * Complements @ref shouldParallelize by gating on total arithmetic work rather than task
+   * count. At very low per-unit cost (e.g. distance kernels at @c d=2) the chunk-count gate
+   * can pass while the per-worker workload is dwarfed by dispatch overhead; this check prevents
+   * fan-out when the per-worker op budget would not amortize the pool submit/wait syscalls.
+   *
+   * @param totalOps         Approximate total arithmetic operation count across all workers.
+   * @param minOpsPerWorker  Minimum per-worker op budget that amortizes dispatch overhead.
+   * @return @c true when fan-out pays, @c false otherwise.
+   */
+  [[nodiscard]] bool shouldParallelizeWork(std::size_t totalOps,
+                                           std::size_t minOpsPerWorker = std::size_t{1}
+                                                                         << 15) const noexcept {
+    if (pool == nullptr) {
+      return false;
+    }
+    return (totalOps / workerCount()) >= minOpsPerWorker;
+  }
 };
 
 } // namespace clustering::math

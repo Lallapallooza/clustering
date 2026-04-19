@@ -602,7 +602,8 @@ private:
       return;
     }
 
-    const bool willParallelize = pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr;
+    const bool willParallelize = pool.shouldParallelizeWork(n * d) &&
+                                 pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr;
     const std::size_t desiredBlocks = willParallelize ? pool.workerCount() : std::size_t{1};
     const detail::BlockPartition part(0, n, desiredBlocks);
     const std::size_t numBlocks = part.num_blocks == 0 ? std::size_t{1} : part.num_blocks;
@@ -686,7 +687,8 @@ private:
       return;
     }
 
-    const bool willParallelize = pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr;
+    const bool willParallelize = pool.shouldParallelizeWork(n * d) &&
+                                 pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr;
     const std::size_t desiredBlocks = willParallelize ? pool.workerCount() : std::size_t{1};
     const detail::BlockPartition part(0, n, desiredBlocks);
     const std::size_t numBlocks = part.num_blocks == 0 ? std::size_t{1} : part.num_blocks;
