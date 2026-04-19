@@ -105,7 +105,8 @@ public:
         m_shiftSq({0}), m_partialSums({0}), m_partialComps({0}), m_partialCounts({0}),
         m_foldComp({0}), m_packedB({0}), m_packedCSqNorms({0}), m_distsChunk({0, 0}),
         m_gemmApArena({0}), m_xNormsSq({0}), m_varSum({0}), m_varSumSq({0}), m_u({0}), m_l({0}),
-        m_shiftEuclidean({0}), m_halfDistToNearestOther({0}) {}
+        m_shiftEuclidean({0}), m_halfDistToNearestOther({0}), m_elkanBounds({0, 0}),
+        m_centerDist({0, 0}) {}
 
 #ifdef CLUSTERING_KMEANS_KAHAN_N_THRESHOLD
   /**
@@ -192,15 +193,24 @@ public:
     // unbounded chunked assignment every iteration.
     const bool hamerlyEligible =
         (d > math::defaults::pairwiseArgminMaxD) && (k <= kHamerlyMaxK) && (k >= 2);
+    // Elkan keeps k lower bounds per sample instead of Hamerly's one, pruning far more distance
+    // work once k exceeds Hamerly's regime. The @c n * k bound matrix grows linearly in both,
+    // so we gate on an @c n * k envelope bound (memory ceiling) and require @c k above the
+    // Hamerly cap so the two paths don't overlap.
+    const bool elkanEligible = (d > math::defaults::pairwiseArgminMaxD) && (k > kHamerlyMaxK) &&
+                               (k <= kElkanMaxK) && (n * k <= kElkanNKLimit) && (k >= 2);
 
     while (iter < maxIter) {
       if (hamerlyEligible && iter > 0) {
         runHamerlyAssignment(X, centroids, outLabels, pool);
+      } else if (elkanEligible && iter > 0) {
+        runElkanAssignment(X, centroids, outLabels, pool);
       } else {
-        // First iteration (or Hamerly-ineligible shape) goes through the dispatcher. For the
-        // chunked path @c m_u and @c m_l are seeded inline from the argmin post-pass; other
-        // tiers leave them stale, but the Hamerly fast path only fires at @c d above the
-        // chunked threshold so those tiers never read them.
+        // First iteration (or no-prune shape) goes through the dispatcher. For the chunked path
+        // Hamerly's @c m_u and @c m_l are seeded inline from the argmin post-pass and Elkan's
+        // @c m_elkanBounds matrix is filled from the same per-sample scan; other tiers leave
+        // them stale, but the prune paths only fire at @c d above the chunked threshold so
+        // those tiers never read them.
         runAssignment(X, centroids, outLabels, pool);
       }
 
@@ -243,6 +253,8 @@ public:
     // when the shape never enabled Hamerly.
     if (hamerlyEligible && iter > 0) {
       runHamerlyAssignment(X, centroids, outLabels, math::Pool{});
+    } else if (elkanEligible && iter > 0) {
+      runElkanAssignment(X, centroids, outLabels, math::Pool{});
     } else {
       runAssignment(X, centroids, outLabels, pool);
     }
@@ -338,6 +350,16 @@ private:
       m_l = NDArray<T, 1>({n});
       m_shiftEuclidean = NDArray<T, 1>({k});
       m_halfDistToNearestOther = NDArray<T, 1>({k});
+      // Elkan's @c n * k bound matrix and the per-pair centroid-distance matrix are allocated
+      // unconditionally; rows past the caller's active-k index stay zero and the allocation
+      // cost amortizes across Lloyd iterations on the same shape.
+      if (n * k <= kElkanNKLimit && k <= kElkanMaxK) {
+        m_elkanBounds = NDArray<T, 2, Layout::Contig>({n, k});
+        m_centerDist = NDArray<T, 2, Layout::Contig>({k, k});
+      } else {
+        m_elkanBounds = NDArray<T, 2, Layout::Contig>({0, 0});
+        m_centerDist = NDArray<T, 2, Layout::Contig>({0, 0});
+      }
       // Packed-B sizing: the fused fast path at d<=pairwiseArgminMaxD uses the flat
       // panel-per-centroid layout (ceil(k/Nr)*Nr*d); the chunked fallback uses the tiled
       // (jcIdx, pcIdx) layout that @c gemmRunPrepacked expects and is what supports d > kKc
@@ -525,6 +547,10 @@ private:
     // extra comparisons per row plus two @c sqrt calls, far below a second pass over @p X.
     T *uBase = m_u.data();
     T *lBase = m_l.data();
+    // Elkan bound seeding lights up only when the scratch matrix was sized for this shape;
+    // at shapes past @ref kElkanNKLimit or @ref kElkanMaxK the pointer stays null and the
+    // per-row loop skips the per-cluster bound stores.
+    T *elkanBoundsBase = m_elkanBounds.dim(0) == n ? m_elkanBounds.data() : nullptr;
 
     auto runOneChunk = [&](std::size_t chunkIdx) noexcept {
       const std::size_t iBase = chunkIdx * chunkCap;
@@ -546,6 +572,7 @@ private:
       for (std::size_t i = 0; i < chunkRows; ++i) {
         const T xn = xNormsChunk[i];
         const T *row = distsChunk + (i * k);
+        T *elkanRow = elkanBoundsBase != nullptr ? elkanBoundsBase + ((iBase + i) * k) : nullptr;
         T bestVal = std::numeric_limits<T>::infinity();
         T secondVal = std::numeric_limits<T>::infinity();
         std::int32_t bestIdx = 0;
@@ -553,6 +580,9 @@ private:
           T v = row[j] + xn + cNormsBase[j];
           if (v < T{0}) {
             v = T{0};
+          }
+          if (elkanRow != nullptr) {
+            elkanRow[j] = std::sqrt(v);
           }
           if (v < bestVal) {
             secondVal = bestVal;
@@ -799,6 +829,23 @@ private:
   static constexpr std::size_t kHamerlyMaxK = 64;
 
   /**
+   * @brief Maximum @c k for which Elkan's @c n * k bound matrix is allowed to fit in memory.
+   *
+   * Pairs with @ref kElkanNKLimit to cap the scratch footprint across the shape envelope;
+   * anything above this falls back to the bound-free chunked assignment every iteration.
+   */
+  static constexpr std::size_t kElkanMaxK = 4096;
+
+  /**
+   * @brief Envelope cap on @c n * k for Elkan eligibility, in elements.
+   *
+   * At @c sizeof(T) = 4 this caps the bound matrix at @c kElkanNKLimit * 4 bytes (128 MB by
+   * default). Shapes above this threshold skip Elkan and keep paying the full chunked
+   * assignment each iteration.
+   */
+  static constexpr std::size_t kElkanNKLimit = std::size_t{32} << 20;
+
+  /**
    * @brief Hamerly bounds-aware assignment for iterations beyond the first.
    *
    * Updates @c m_u and @c m_l against the Euclidean centroid shifts the caller has already
@@ -934,6 +981,134 @@ private:
     }
   }
 
+  /**
+   * @brief Elkan bounds-aware assignment (k lower bounds per sample).
+   *
+   * At shapes above Hamerly's @c k cap this maintains @c m_elkanBounds(i, c) as a lower bound
+   * on @c ||x_i - c||. Per iteration the bounds are refreshed against the centroid shifts, the
+   * pairwise centroid matrix is recomputed, and each sample runs the classic three-gate prune:
+   * Lemma 1 shortcut on the upper bound, per-cluster lower-bound gate, and the
+   * @c 0.5 * ||c_a - c|| center-midpoint gate. The tight distance to @c c_a is lazily computed
+   * only when the first gate of some cluster @c c requires it.
+   */
+  void runElkanAssignment(const NDArray<T, 2, Layout::Contig> &X,
+                          const NDArray<T, 2, Layout::Contig> &centroids,
+                          NDArray<std::int32_t, 1> &labels, math::Pool pool) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const std::size_t k = centroids.dim(0);
+    if (n == 0 || d == 0 || k == 0 || m_elkanBounds.dim(0) != n || m_elkanBounds.dim(1) != k) {
+      return;
+    }
+    const T *xData = X.data();
+    const T *cData = centroids.data();
+    T *uData = m_u.data();
+    T *boundsData = m_elkanBounds.data();
+    T *minDistData = m_minDistSq.data();
+    std::int32_t *labelsData = labels.data();
+
+    // Per-cluster shift (Euclidean) used to update all bounds once at the top of the pass.
+    T *shiftData = m_shiftEuclidean.data();
+    for (std::size_t c = 0; c < k; ++c) {
+      shiftData[c] = std::sqrt(m_shiftSq(c));
+    }
+
+    // Pairwise centroid distances. Symmetric; fill upper triangle and mirror. @c O(k^2 * d),
+    // amortized against the @c n * k inner scan below.
+    T *centerDistData = m_centerDist.data();
+    T *halfDistData = m_halfDistToNearestOther.data();
+    for (std::size_t c = 0; c < k; ++c) {
+      centerDistData[(c * k) + c] = T{0};
+      T nearest = std::numeric_limits<T>::infinity();
+      for (std::size_t cp = 0; cp < k; ++cp) {
+        if (cp == c) {
+          continue;
+        }
+        T dist;
+        if (cp > c) {
+          const T dsq = math::detail::sqEuclideanRowPtr<T>(cData + (c * d), cData + (cp * d), d);
+          dist = std::sqrt(dsq);
+          centerDistData[(c * k) + cp] = dist;
+          centerDistData[(cp * k) + c] = dist;
+        } else {
+          dist = centerDistData[(c * k) + cp];
+        }
+        if (dist < nearest) {
+          nearest = dist;
+        }
+      }
+      halfDistData[c] = T{0.5} * nearest;
+    }
+
+    auto processRange = [&](std::size_t lo, std::size_t hi) noexcept {
+      for (std::size_t i = lo; i < hi; ++i) {
+        std::int32_t a = labelsData[i];
+        if (a < 0 || std::cmp_greater_equal(a, k)) {
+          continue;
+        }
+        auto au = static_cast<std::size_t>(a);
+        T u = uData[i] + shiftData[au];
+        T *lRow = boundsData + (i * k);
+        // Bound-shift pass for this sample: looser lower bounds against all clusters. Done
+        // inline so the per-sample walk touches the row exactly once.
+        for (std::size_t c = 0; c < k; ++c) {
+          T lnew = lRow[c] - shiftData[c];
+          if (lnew < T{0}) {
+            lnew = T{0};
+          }
+          lRow[c] = lnew;
+        }
+
+        if (u <= halfDistData[au]) {
+          uData[i] = u;
+          continue;
+        }
+
+        bool uTight = false;
+        const T *xi = xData + (i * d);
+        for (std::size_t c = 0; c < k; ++c) {
+          if (c == au) {
+            continue;
+          }
+          const T lc = lRow[c];
+          const T half = T{0.5} * centerDistData[(au * k) + c];
+          if (u <= lc || u <= half) {
+            continue;
+          }
+          if (!uTight) {
+            const T tightSq = math::detail::sqEuclideanRowPtr<T>(xi, cData + (au * d), d);
+            u = std::sqrt(tightSq);
+            minDistData[i] = tightSq;
+            uTight = true;
+            if (u <= lc || u <= half) {
+              continue;
+            }
+          }
+          const T dSq = math::detail::sqEuclideanRowPtr<T>(xi, cData + (c * d), d);
+          const T dEuc = std::sqrt(dSq);
+          lRow[c] = dEuc;
+          if (dEuc < u) {
+            au = c;
+            a = static_cast<std::int32_t>(c);
+            u = dEuc;
+            minDistData[i] = dSq;
+          }
+        }
+        uData[i] = u;
+        labelsData[i] = a;
+      }
+    };
+
+    if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, n,
+                          [&](std::size_t lo, std::size_t hi) { processRange(lo, hi); })
+          .wait();
+    } else {
+      processRange(0, n);
+    }
+  }
+
   NDArray<T, 2, Layout::Contig> m_centroidsOld;
   NDArray<T, 1> m_cSqNorms;
   NDArray<T, 2, Layout::Contig> m_sums;
@@ -958,10 +1133,17 @@ private:
   NDArray<T, 1> m_l;
   /// Per-cluster Euclidean centroid shift for the current iteration, sqrt of m_shiftSq.
   NDArray<T, 1> m_shiftEuclidean;
-  /// Per-cluster half-distance to the nearest other centroid. Populated each Hamerly call and
-  /// consulted by the Lemma 1 shortcut to skip the per-sample tight-distance recompute when
-  /// the upper bound already clears the inter-cluster midpoint.
+  /// Per-cluster half-distance to the nearest other centroid. Populated each Hamerly/Elkan
+  /// call and consulted by the Lemma 1 shortcut to skip the per-sample tight-distance recompute
+  /// when the upper bound already clears the inter-cluster midpoint.
   NDArray<T, 1> m_halfDistToNearestOther;
+  /// Elkan's @c n x k per-sample lower-bound matrix (Euclidean, not squared). @c m_elkanBounds(i,
+  /// c) is a lower bound on @c ||x_i - c||; updated after each centroid shift and refined on the
+  /// per-sample scan when the bound is consulted.
+  NDArray<T, 2, Layout::Contig> m_elkanBounds;
+  /// Elkan's pairwise centroid-distance matrix (Euclidean). @c m_centerDist(c, c') = ||c - c'||,
+  /// populated each Elkan call and consulted for the 0.5-times bound shortcut.
+  NDArray<T, 2, Layout::Contig> m_centerDist;
 
   std::size_t m_n = 0;
   std::size_t m_d = 0;
