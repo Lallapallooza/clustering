@@ -81,6 +81,16 @@ void BM_Perf_HighD_250k_j16(benchmark::State &s) { runKMeans(s, 250000, 1024, 16
 void BM_Perf_HighD_250k_j1(benchmark::State &s) { runKMeans(s, 250000, 1024, 16, 1); }
 void BM_Perf_MidD_50k_j1(benchmark::State &s) { runKMeans(s, 50000, 32, 16, 1); }
 
+// Elkan-eligible cells: d > pairwiseArgminMaxD (64) and k > kHamerlyMaxK (64). Sized so the
+// n*k bound matrix stays under kElkanNKLimit; at n=50k the cap admits k up to ~640, so k=128
+// and k=256 both enter Elkan. k=512 at n=50k is 25M elements, still under the 32M floor.
+void BM_Perf_Elkan_d128_k128_j1(benchmark::State &s) { runKMeans(s, 50000, 128, 128, 1); }
+void BM_Perf_Elkan_d128_k128_j16(benchmark::State &s) { runKMeans(s, 50000, 128, 128, 16); }
+void BM_Perf_Elkan_d256_k256_j1(benchmark::State &s) { runKMeans(s, 50000, 256, 256, 1); }
+void BM_Perf_Elkan_d256_k256_j16(benchmark::State &s) { runKMeans(s, 50000, 256, 256, 16); }
+void BM_Perf_Elkan_d128_k512_j1(benchmark::State &s) { runKMeans(s, 50000, 128, 512, 1); }
+void BM_Perf_Elkan_d128_k512_j16(benchmark::State &s) { runKMeans(s, 50000, 128, 512, 16); }
+
 } // namespace
 
 BENCHMARK(BM_KMeansAuto_LowDSmall)->Unit(benchmark::kMillisecond)->UseRealTime();
@@ -106,5 +116,12 @@ BENCHMARK(BM_Perf_SmallLowD_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_Perf_HighD_250k_j16)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_Perf_HighD_250k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_Perf_MidD_50k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+
+BENCHMARK(BM_Perf_Elkan_d128_k128_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_Elkan_d128_k128_j16)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_Elkan_d256_k256_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_Elkan_d256_k256_j16)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_Elkan_d128_k512_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_Elkan_d128_k512_j16)->Unit(benchmark::kMillisecond)->UseRealTime();
 
 BENCHMARK_MAIN();
