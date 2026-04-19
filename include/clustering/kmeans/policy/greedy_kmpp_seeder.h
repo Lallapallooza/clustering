@@ -694,20 +694,32 @@ private:
     if (m_minSq.dim(0) != n) {
       m_minSq = NDArray<T, 1>({n});
     }
-    if (m_distsFlat.dim(0) != n || m_distsFlat.dim(1) != L) {
-      m_distsFlat =
-          NDArray<T, 2, Layout::Contig>({n == 0 ? std::size_t{1} : n, L == 0 ? std::size_t{1} : L});
+    // GEMM-scoring-only scratch (distsFlat, xNormsSq, candNormsSq, gemmApArena, gemmBpArena).
+    // The GEMM path fires at @c d >= 32 && L >= kKernelNr<float>; outside that envelope we keep
+    // unit-sized placeholders so @c .data() stays dereferenceable without paying the @c kKc*kNc
+    // envelope tax (@c Bp alone is several MB).
+    constexpr std::size_t kNrForGemm = math::detail::kKernelNr<float>;
+    const bool gemmScoringUsed = std::is_same_v<T, float> && (d >= 32) && (L >= kNrForGemm);
+    const std::size_t distsFlatRows =
+        gemmScoringUsed ? (n == 0 ? std::size_t{1} : n) : std::size_t{1};
+    const std::size_t distsFlatCols =
+        gemmScoringUsed ? (L == 0 ? std::size_t{1} : L) : std::size_t{1};
+    if (m_distsFlat.dim(0) != distsFlatRows || m_distsFlat.dim(1) != distsFlatCols) {
+      m_distsFlat = NDArray<T, 2, Layout::Contig>({distsFlatRows, distsFlatCols});
     }
-    if (m_xNormsSq.dim(0) != n) {
-      m_xNormsSq = NDArray<T, 1>({n == 0 ? std::size_t{1} : n});
+    const std::size_t xNormsLen = gemmScoringUsed ? (n == 0 ? std::size_t{1} : n) : std::size_t{1};
+    if (m_xNormsSq.dim(0) != xNormsLen) {
+      m_xNormsSq = NDArray<T, 1>({xNormsLen});
     }
-    if (m_candNormsSq.dim(0) != L) {
-      m_candNormsSq = NDArray<T, 1>({L == 0 ? std::size_t{1} : L});
+    const std::size_t candNormsLen =
+        gemmScoringUsed ? (L == 0 ? std::size_t{1} : L) : std::size_t{1};
+    if (m_candNormsSq.dim(0) != candNormsLen) {
+      m_candNormsSq = NDArray<T, 1>({candNormsLen});
     }
-    // Persistent GEMM scratch. Seeder currently fans out at the caller level only; the GEMM
-    // path runs serially per pick, so one kMc*kKc Ap slice and one kKc*kNc Bp buffer suffice.
-    const std::size_t apSize = math::detail::kMc<T> * math::detail::kKc<T>;
-    const std::size_t bpSize = math::detail::kKc<T> * math::detail::kNc<T>;
+    const std::size_t apSize =
+        gemmScoringUsed ? (math::detail::kMc<T> * math::detail::kKc<T>) : std::size_t{1};
+    const std::size_t bpSize =
+        gemmScoringUsed ? (math::detail::kKc<T> * math::detail::kNc<T>) : std::size_t{1};
     if (m_gemmApArena.dim(0) != apSize) {
       m_gemmApArena = NDArray<T, 1>({apSize});
     }
