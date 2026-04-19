@@ -106,12 +106,8 @@ uv run benchmark --algo kmeans --sizes 5000 50000   # quick run
 uv run benchmark --list                             # show available recipes
 ```
 
-CPU Performance with 1 Job
-![CPU1](resources/results_1job.png)
-CPU Performance with 24 Job
-![CPU2](resources/results_24job.png)
-PCA-based Cluster Visualization
-![PCA](resources/result.png)
+k-means vs scikit-learn (n_clusters=16, varying n and n_jobs)
+![kmeans](resources/kmeans_benchmark.png)
 
 ## Development
 
