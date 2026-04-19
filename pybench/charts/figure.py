@@ -40,11 +40,31 @@ _BAND_LOSS = "#D06963"
 
 # Tiered tick lists ordered coarse -> fine. _pick_log_ticks walks the tiers and
 # picks the first one that produces 3-7 ticks inside a facet's y-range. Every
-# tier includes 1.0 so parity lines up on a gridline whenever it's in view.
+# tier includes 1.0 so parity lines up on a gridline whenever it's in view. The
+# low end extends below 0.1 so facets where one side dominates (e.g. memory
+# ratios of 0.1x-0.5x) still get labeled gridlines instead of a blank axis.
 _TICK_TIERS: tuple[tuple[float, ...], ...] = (
-    (0.3, 1.0, 3.0, 10.0, 30.0, 100.0),
-    (0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 50.0, 100.0),
-    (0.5, 0.7, 0.85, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0),
+    (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0),
+    (
+        0.03,
+        0.05,
+        0.1,
+        0.2,
+        0.3,
+        0.5,
+        0.7,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        5.0,
+        7.0,
+        10.0,
+        20.0,
+        50.0,
+        100.0,
+    ),
+    (0.2, 0.3, 0.5, 0.7, 0.85, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0),
     (0.7, 0.8, 0.85, 0.95, 1.0, 1.1, 1.2, 1.35, 1.5, 1.7, 2.0, 2.5, 3.0),
     (0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.2, 1.3, 1.4, 1.5, 1.7, 2.0, 2.5),
 )
@@ -53,16 +73,29 @@ _TICK_TIERS: tuple[tuple[float, ...], ...] = (
 def _pick_log_ticks(
     lo: float, hi: float, *, target_min: int = 3, target_max: int = 7
 ) -> list[float]:
-    """Pick a clean set of major ticks for a log-scale range ``[lo, hi]``."""
+    """Pick a clean set of major ticks for a log-scale range ``[lo, hi]``.
+
+    Walks the curated tiers coarse -> fine and returns the first that lands in
+    the target count window. If no tier matches, returns the non-empty tier
+    whose count is closest to the window so the axis never renders blank.
+    """
+    best: list[float] = []
+    best_score = math.inf
     for tier in _TICK_TIERS:
         in_range = [t for t in tier if lo <= t <= hi]
-        if target_min <= len(in_range) <= target_max:
+        n = len(in_range)
+        if target_min <= n <= target_max:
             return in_range
-    finest = [t for t in _TICK_TIERS[-1] if lo <= t <= hi]
-    if len(finest) > target_max:
-        step = (len(finest) - 1) / (target_max - 1)
-        return [finest[round(i * step)] for i in range(target_max)]
-    return finest
+        if n == 0:
+            continue
+        score = target_min - n if n < target_min else n - target_max
+        if score < best_score:
+            best_score = score
+            best = in_range
+    if len(best) > target_max:
+        step = (len(best) - 1) / (target_max - 1)
+        return [best[round(i * step)] for i in range(target_max)]
+    return best
 
 
 def _padded_log_range(
