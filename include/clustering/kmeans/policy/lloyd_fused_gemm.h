@@ -105,7 +105,7 @@ public:
         m_shiftSq({0}), m_partialSums({0}), m_partialComps({0}), m_partialCounts({0}),
         m_foldComp({0}), m_packedB({0}), m_packedCSqNorms({0}), m_distsChunk({0, 0}),
         m_gemmApArena({0}), m_xNormsSq({0}), m_varSum({0}), m_varSumSq({0}), m_u({0}), m_l({0}),
-        m_shiftEuclidean({0}) {}
+        m_shiftEuclidean({0}), m_halfDistToNearestOther({0}) {}
 
 #ifdef CLUSTERING_KMEANS_KAHAN_N_THRESHOLD
   /**
@@ -337,6 +337,7 @@ private:
       m_u = NDArray<T, 1>({n});
       m_l = NDArray<T, 1>({n});
       m_shiftEuclidean = NDArray<T, 1>({k});
+      m_halfDistToNearestOther = NDArray<T, 1>({k});
       // Packed-B sizing: the fused fast path at d<=pairwiseArgminMaxD uses the flat
       // panel-per-centroid layout (ceil(k/Nr)*Nr*d); the chunked fallback uses the tiled
       // (jcIdx, pcIdx) layout that @c gemmRunPrepacked expects and is what supports d > kKc
@@ -841,6 +842,27 @@ private:
       }
     }
 
+    // Per-cluster half-distance to the nearest other centroid. When @c u(x) for a sample
+    // assigned to cluster @c c clears this threshold, triangle inequality pins the sample in
+    // @c c: any other @c c' is at least @c 2 * halfDist[c] away, so @c ||x - c'|| >= 2 *
+    // halfDist[c] - u(x) >= u(x) >= ||x - c||. Populating it is @c O(k^2 * d), negligible next
+    // to Hamerly's per-sample work at @c k <= 64.
+    T *halfDistData = m_halfDistToNearestOther.data();
+    for (std::size_t c = 0; c < k; ++c) {
+      T nearestSq = std::numeric_limits<T>::infinity();
+      const T *caRow = cData + (c * d);
+      for (std::size_t cp = 0; cp < k; ++cp) {
+        if (cp == c) {
+          continue;
+        }
+        const T dsq = math::detail::sqEuclideanRowPtr<T>(caRow, cData + (cp * d), d);
+        if (dsq < nearestSq) {
+          nearestSq = dsq;
+        }
+      }
+      halfDistData[c] = T{0.5} * std::sqrt(nearestSq);
+    }
+
     auto processRange = [&](std::size_t lo, std::size_t hi) noexcept {
       std::array<T, kHamerlyMaxK> distBuf{};
       for (std::size_t i = lo; i < hi; ++i) {
@@ -853,6 +875,17 @@ private:
         T li = lData[i] - ((au == argMax) ? s2Max : sMax);
 
         if (ui <= li) {
+          uData[i] = ui;
+          lData[i] = li;
+          continue;
+        }
+
+        // Lemma 1 shortcut: if the upper bound clears the half-distance to the nearest other
+        // centroid, the sample's label cannot have changed -- no need to recompute
+        // @c ||x - c_a||. @c ui is still the post-shift bound, which stays valid; @c li is
+        // allowed to decay here because the outer per-sample gate will exact-recompute it on
+        // the next iteration that forces a tightening or a full scan.
+        if (ui <= halfDistData[au]) {
           uData[i] = ui;
           lData[i] = li;
           continue;
@@ -925,6 +958,10 @@ private:
   NDArray<T, 1> m_l;
   /// Per-cluster Euclidean centroid shift for the current iteration, sqrt of m_shiftSq.
   NDArray<T, 1> m_shiftEuclidean;
+  /// Per-cluster half-distance to the nearest other centroid. Populated each Hamerly call and
+  /// consulted by the Lemma 1 shortcut to skip the per-sample tight-distance recompute when
+  /// the upper bound already clears the inter-cluster midpoint.
+  NDArray<T, 1> m_halfDistToNearestOther;
 
   std::size_t m_n = 0;
   std::size_t m_d = 0;
