@@ -731,19 +731,18 @@ private:
     // envelope tax (@c Bp alone is several MB).
     constexpr std::size_t kNrForGemm = math::detail::kKernelNr<float>;
     const bool gemmScoringUsed = std::is_same_v<T, float> && (d >= 32) && (L >= kNrForGemm);
-    const std::size_t distsFlatRows =
-        gemmScoringUsed ? (n == 0 ? std::size_t{1} : n) : std::size_t{1};
-    const std::size_t distsFlatCols =
-        gemmScoringUsed ? (L == 0 ? std::size_t{1} : L) : std::size_t{1};
+    const std::size_t nSafe = (n == 0) ? std::size_t{1} : n;
+    const std::size_t lSafe = (L == 0) ? std::size_t{1} : L;
+    const std::size_t distsFlatRows = gemmScoringUsed ? nSafe : std::size_t{1};
+    const std::size_t distsFlatCols = gemmScoringUsed ? lSafe : std::size_t{1};
     if (m_distsFlat.dim(0) != distsFlatRows || m_distsFlat.dim(1) != distsFlatCols) {
       m_distsFlat = NDArray<T, 2, Layout::Contig>({distsFlatRows, distsFlatCols});
     }
-    const std::size_t xNormsLen = gemmScoringUsed ? (n == 0 ? std::size_t{1} : n) : std::size_t{1};
+    const std::size_t xNormsLen = gemmScoringUsed ? nSafe : std::size_t{1};
     if (m_xNormsSq.dim(0) != xNormsLen) {
       m_xNormsSq = NDArray<T, 1>({xNormsLen});
     }
-    const std::size_t candNormsLen =
-        gemmScoringUsed ? (L == 0 ? std::size_t{1} : L) : std::size_t{1};
+    const std::size_t candNormsLen = gemmScoringUsed ? lSafe : std::size_t{1};
     if (m_candNormsSq.dim(0) != candNormsLen) {
       m_candNormsSq = NDArray<T, 1>({candNormsLen});
     }
