@@ -163,7 +163,7 @@ TEST(KMeansEndToEnd, ElkanPathRecoversBlobs) {
   constexpr std::size_t k = 80;
   const Blobs b = makeBlobs(n, d, k, 0.5F, 99U);
 
-  KMeans<float> km(k, 1);
+  KMeans<float> km(k, 16);
   km.run(b.X, 100, 1e-4F, 5U);
 
   EXPECT_EQ(km.labels().dim(0), n);

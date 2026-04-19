@@ -746,8 +746,15 @@ private:
     if (m_candNormsSq.dim(0) != candNormsLen) {
       m_candNormsSq = NDArray<T, 1>({candNormsLen});
     }
-    const std::size_t apSize =
-        gemmScoringUsed ? (math::detail::kMc<T> * math::detail::kKc<T>) : std::size_t{1};
+    const std::size_t workersClamped = workers == 0 ? std::size_t{1} : workers;
+    // @c gemmRunReference parallelizes the Mc-tile loop, with each worker owning a per-worker
+    // slice of the A-pack arena at offset @c (worker * kMc * kKc). Sizing the arena for just
+    // one worker was fine while the seeder's envelope kept the GEMM path off (k=16, L=4 fell
+    // into the SoA kernel), but the Elkan-eligible shapes push L >= kNrF where the GEMM scoring
+    // activates and multiple workers collide into the same slice.
+    const std::size_t apSize = gemmScoringUsed
+                                   ? (workersClamped * math::detail::kMc<T> * math::detail::kKc<T>)
+                                   : std::size_t{1};
     const std::size_t bpSize =
         gemmScoringUsed ? (math::detail::kKc<T> * math::detail::kNc<T>) : std::size_t{1};
     if (m_gemmApArena.dim(0) != apSize) {
@@ -756,7 +763,6 @@ private:
     if (m_gemmBpArena.dim(0) != bpSize) {
       m_gemmBpArena = NDArray<T, 1>({bpSize});
     }
-    const std::size_t workersClamped = workers == 0 ? std::size_t{1} : workers;
     const std::size_t lsLen = workersClamped * (L == 0 ? std::size_t{1} : L);
     if (m_localScores.dim(0) != lsLen) {
       m_localScores = NDArray<T, 1>({lsLen});
