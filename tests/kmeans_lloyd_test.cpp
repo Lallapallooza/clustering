@@ -154,6 +154,28 @@ double referenceLloydInertia(const NDArray<float, 2> &X, std::size_t k, std::uin
 
 } // namespace
 
+// Exercises the Elkan prune path (d > pairwiseArgminMaxD and k > kHamerlyMaxK). At this shape
+// the bound matrix is @c n * k floats, populated on the first full assignment and maintained
+// across iterations. Recovery of well-separated blobs is the correctness gate.
+TEST(KMeansEndToEnd, ElkanPathRecoversBlobs) {
+  constexpr std::size_t n = 600;
+  constexpr std::size_t d = 128;
+  constexpr std::size_t k = 80;
+  const Blobs b = makeBlobs(n, d, k, 0.5F, 99U);
+
+  KMeans<float> km(k, 1);
+  km.run(b.X, 100, 1e-4F, 5U);
+
+  EXPECT_EQ(km.labels().dim(0), n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::int32_t lbl = km.labels()(i);
+    EXPECT_GE(lbl, 0);
+    EXPECT_LT(static_cast<std::size_t>(lbl), k);
+  }
+  EXPECT_TRUE(std::isfinite(km.inertia()));
+  EXPECT_GT(purity(km.labels(), b.truth, k), 0.95);
+}
+
 TEST(KMeansEndToEnd, RecoversTruthLabelsOnBlobs) {
   constexpr std::size_t n = 600;
   constexpr std::size_t d = 8;
