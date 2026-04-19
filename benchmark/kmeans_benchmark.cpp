@@ -74,6 +74,13 @@ void BM_Perf_256D_100k_j1(benchmark::State &s) { runKMeans(s, 100000, 256, 16, 1
 void BM_Perf_128D_100k_j1(benchmark::State &s) { runKMeans(s, 100000, 128, 16, 1); }
 void BM_Perf_512D_250k_j1(benchmark::State &s) { runKMeans(s, 250000, 512, 16, 1); }
 
+// Scaling-regression cells isolating the three parallel-regression regimes.
+void BM_Perf_SmallLowD_j16(benchmark::State &s) { runKMeans(s, 5000, 2, 16, 16); }
+void BM_Perf_SmallLowD_j1(benchmark::State &s) { runKMeans(s, 5000, 2, 16, 1); }
+void BM_Perf_HighD_250k_j16(benchmark::State &s) { runKMeans(s, 250000, 1024, 16, 16); }
+void BM_Perf_HighD_250k_j1(benchmark::State &s) { runKMeans(s, 250000, 1024, 16, 1); }
+void BM_Perf_MidD_50k_j1(benchmark::State &s) { runKMeans(s, 50000, 32, 16, 1); }
+
 } // namespace
 
 BENCHMARK(BM_KMeansAuto_LowDSmall)->Unit(benchmark::kMillisecond)->UseRealTime();
@@ -93,5 +100,11 @@ BENCHMARK(BM_Perf_128D_250k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_Perf_256D_100k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_Perf_128D_100k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
 BENCHMARK(BM_Perf_512D_250k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+
+BENCHMARK(BM_Perf_SmallLowD_j16)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_SmallLowD_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_HighD_250k_j16)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_HighD_250k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
+BENCHMARK(BM_Perf_MidD_50k_j1)->Unit(benchmark::kMillisecond)->UseRealTime();
 
 BENCHMARK_MAIN();
