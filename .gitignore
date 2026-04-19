@@ -60,6 +60,7 @@ dist/
 
 # Benchmark output
 benchmark_results*/
+perf_out/
 
 # Mongo Explorer plugin
 .idea/**/mongoSettings.xml
