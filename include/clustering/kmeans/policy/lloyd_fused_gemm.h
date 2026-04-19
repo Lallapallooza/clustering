@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -11,9 +13,11 @@
 #include "clustering/always_assert.h"
 #include "clustering/kmeans/detail/convergence.h"
 #include "clustering/kmeans/detail/empty_cluster.h"
+#include "clustering/kmeans/policy/greedy_kmpp_seeder.h"
 #include "clustering/math/centroid_shift.h"
 #include "clustering/math/defaults.h"
 #include "clustering/math/detail/avx2_helpers.h"
+#include "clustering/math/detail/columnwise_reduce_avx2.h"
 #include "clustering/math/detail/gemm_outer_prepacked.h"
 #include "clustering/math/detail/gemm_pack.h"
 #include "clustering/math/detail/matrix_desc.h"
@@ -100,7 +104,8 @@ public:
       : m_centroidsOld({0, 0}), m_cSqNorms({0}), m_sums({0, 0}), m_counts({0}), m_minDistSq({0}),
         m_shiftSq({0}), m_partialSums({0}), m_partialComps({0}), m_partialCounts({0}),
         m_foldComp({0}), m_packedB({0}), m_packedCSqNorms({0}), m_distsChunk({0, 0}),
-        m_gemmApArena({0}), m_xNormsSq({0}) {}
+        m_gemmApArena({0}), m_xNormsSq({0}), m_varSum({0}), m_varSumSq({0}), m_u({0}), m_l({0}),
+        m_shiftEuclidean({0}) {}
 
 #ifdef CLUSTERING_KMEANS_KAHAN_N_THRESHOLD
   /**
@@ -125,8 +130,10 @@ public:
    *                  iteration-final values.
    * @param k         Number of clusters.
    * @param maxIter   Iteration cap.
-   * @param tol       Convergence tolerance on the L2 centroid shift (linear; compared
-   *                  internally as @c tol*tol against the Kahan-summed per-centroid shift-squared).
+   * @param tol       Convergence tolerance relative to the mean column variance of @p X
+   *                  (sklearn convention). Internally converted to a sum-of-shift-squared
+   *                  threshold as @c tol * mean(var(X, axis=0)) and compared against the
+   *                  Kahan-summed per-centroid shift-squared.
    * @param pool      Parallelism injection.
    * @param outLabels Length-n assignment; each entry in @c [0, k).
    * @param outInertia Kahan-summed @c f64 total of per-point squared distance to assignment.
@@ -157,7 +164,13 @@ public:
     const std::size_t workerCount = pool.workerCount();
     ensureShape(n, d, k, workerCount);
 
-    const T tolSq = tol * tol;
+    // Sklearn-compatible tol semantics: the threshold on sum(||Δc_j||^2) is @c tol * mean_var
+    // where @c mean_var is the mean of per-column variances of @p X. This is scale-invariant,
+    // which is the property callers expect when they pass the same numeric @c tol across
+    // datasets of different magnitudes. The raw-L2-shift convention our earlier prose described
+    // made @c tol=1e-4 hundreds-of-thousands of times tighter than sklearn at the same numeric
+    // value, which inflated the Lloyd iteration count by 3-4x on typical blob data.
+    const T shiftSqThreshold = tol * meanColumnVariance(X);
     const bool useKahan = n >= kahanNThreshold;
 
     // X is input-only; its squared-row-norms are reused across every Lloyd iteration's
@@ -172,8 +185,24 @@ public:
     std::size_t iter = 0;
     bool converged = false;
 
+    // Hamerly pruning lights up only at the @c d that forces the chunked materialized path; the
+    // direct small-@c d and fused argmin paths are already so dense that the per-iter bound
+    // bookkeeping outweighs the saved distance work. @c k is capped by @c kHamerlyMaxK because
+    // the per-row scan uses a stack-allocated distance buffer; above that we fall back to the
+    // unbounded chunked assignment every iteration.
+    const bool hamerlyEligible =
+        (d > math::defaults::pairwiseArgminMaxD) && (k <= kHamerlyMaxK) && (k >= 2);
+
     while (iter < maxIter) {
-      runAssignment(X, centroids, outLabels, pool);
+      if (hamerlyEligible && iter > 0) {
+        runHamerlyAssignment(X, centroids, outLabels, pool);
+      } else {
+        // First iteration (or Hamerly-ineligible shape) goes through the dispatcher. For the
+        // chunked path @c m_u and @c m_l are seeded inline from the argmin post-pass; other
+        // tiers leave them stale, but the Hamerly fast path only fires at @c d above the
+        // chunked threshold so those tiers never read them.
+        runAssignment(X, centroids, outLabels, pool);
+      }
 
       std::memcpy(m_centroidsOld.data(), centroids.data(),
                   centroids.dim(0) * centroids.dim(1) * sizeof(T));
@@ -200,7 +229,7 @@ public:
       const T totalShift = ::clustering::kmeans::detail::totalShiftSqKahan<T>(m_shiftSq);
 
       ++iter;
-      if (totalShift <= tolSq) {
+      if (totalShift <= shiftSqThreshold) {
         converged = true;
         break;
       }
@@ -234,6 +263,49 @@ public:
   }
 
 private:
+  /**
+   * @brief Mean over columns of the per-column population variance of @p X.
+   *
+   * Sklearn's @c _tolerance(X, tol) returns @c tol * mean(var(X, axis=0)); this is that
+   * @c mean(var(X, axis=0)) factor. Single pass of E[X^2] - E[X]^2 per column; O(n*d), cheap
+   * relative to even a single Lloyd iteration. Returns @c 0 when @p X is empty so callers fall
+   * back to a @c tol of @c 0 and iterate to @c maxIter.
+   */
+  [[nodiscard]] T meanColumnVariance(const NDArray<T, 2, Layout::Contig> &X) {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    if (n == 0 || d == 0) {
+      return T{0};
+    }
+    const T *xData = X.data();
+
+    // Per-column accumulators kept in scratch so repeat runs at the same shape skip the
+    // allocator. Row-major walk (x traversed in storage order) keeps every column load
+    // inside the same cache line as its neighbors -- the natural column-major alternative
+    // misses L1 once per load at large @p d.
+    if (m_varSum.dim(0) != d) {
+      m_varSum = NDArray<T, 1>({d});
+      m_varSumSq = NDArray<T, 1>({d});
+    }
+    T *colSum = m_varSum.data();
+    T *colSumSq = m_varSumSq.data();
+    for (std::size_t t = 0; t < d; ++t) {
+      colSum[t] = T{0};
+      colSumSq[t] = T{0};
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      const T *row = xData + (i * d);
+      math::detail::columnwiseAccumSumSq<T>(row, d, colSum, colSumSq);
+    }
+    const auto nInv = static_cast<T>(1) / static_cast<T>(n);
+    T acc = T{0};
+    for (std::size_t t = 0; t < d; ++t) {
+      const T mean = colSum[t] * nInv;
+      acc += (colSumSq[t] * nInv) - (mean * mean);
+    }
+    return acc / static_cast<T>(d);
+  }
+
   void ensureShape(std::size_t n, std::size_t d, std::size_t k, std::size_t workerCount) {
     const bool shapeChanged = (n != m_n) || (d != m_d) || (k != m_k);
     const bool workerChanged = (workerCount != m_workerCount);
@@ -254,6 +326,12 @@ private:
       m_xNormsSq = NDArray<T, 1>({n});
       m_shiftSq = NDArray<T, 1>({k});
       m_foldComp = NDArray<T, 1>({k * d});
+      // Hamerly bound scratch: per-point upper/lower Euclidean bounds and per-cluster sqrt
+      // shifts. Seeded by the first iteration's full scan and maintained by the bounds-aware
+      // reassignment on subsequent iterations.
+      m_u = NDArray<T, 1>({n});
+      m_l = NDArray<T, 1>({n});
+      m_shiftEuclidean = NDArray<T, 1>({k});
       // Packed-B sizing: the fused fast path at d<=pairwiseArgminMaxD uses the flat
       // panel-per-centroid layout (ceil(k/Nr)*Nr*d); the chunked fallback uses the tiled
       // (jcIdx, pcIdx) layout that @c gemmRunPrepacked expects and is what supports d > kKc
@@ -437,6 +515,10 @@ private:
     T *minDistBase = m_minDistSq.data();
     std::int32_t *labelsBase = labels.data();
     const T *xBase = X.data();
+    // Hamerly bound seeding happens inline in the argmin post-pass; the cost is a handful of
+    // extra comparisons per row plus two @c sqrt calls, far below a second pass over @p X.
+    T *uBase = m_u.data();
+    T *lBase = m_l.data();
 
     auto runOneChunk = [&](std::size_t chunkIdx) noexcept {
       const std::size_t iBase = chunkIdx * chunkCap;
@@ -459,19 +541,25 @@ private:
         const T xn = xNormsChunk[i];
         const T *row = distsChunk + (i * k);
         T bestVal = std::numeric_limits<T>::infinity();
+        T secondVal = std::numeric_limits<T>::infinity();
         std::int32_t bestIdx = 0;
         for (std::size_t j = 0; j < k; ++j) {
           T v = row[j] + xn + cNormsBase[j];
           if (v < T{0}) {
             v = T{0};
           }
-          if (j == 0 || v < bestVal) {
+          if (v < bestVal) {
+            secondVal = bestVal;
             bestVal = v;
             bestIdx = static_cast<std::int32_t>(j);
+          } else if (v < secondVal) {
+            secondVal = v;
           }
         }
         minDistBase[iBase + i] = bestVal;
         labelsBase[iBase + i] = bestIdx;
+        uBase[iBase + i] = std::sqrt(bestVal);
+        lBase[iBase + i] = std::sqrt(secondVal);
       }
     };
 
@@ -625,12 +713,7 @@ private:
         const T *xRow = X.data() + (i * d);
         T *sumRow = slab + (row * d);
         T *compRow = cslab + (row * d);
-        for (std::size_t t = 0; t < d; ++t) {
-          const T y = xRow[t] - compRow[t];
-          const T tVal = sumRow[t] + y;
-          compRow[t] = (tVal - sumRow[t]) - y;
-          sumRow[t] = tVal;
-        }
+        math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
         nslab[row] += 1;
       }
     };
@@ -699,6 +782,187 @@ private:
     }
   }
 
+  /**
+   * @brief Maximum @c k supported by the Hamerly per-row scan's stack-allocated distance buffer.
+   *
+   * Kept modest to bound stack usage; at larger @c k Elkan-style per-centroid bounds beat
+   * Hamerly's single lower bound so we'd switch strategies rather than grow the buffer.
+   */
+  static constexpr std::size_t kHamerlyMaxK = 64;
+
+  /**
+   * @brief Seed Hamerly upper/lower bounds after the first iteration's full assignment.
+   *
+   * Runs a per-row scan that computes the true squared distance to every centroid, writes
+   * @c m_u[i] = sqrt(dist to assigned centroid) and @c m_l[i] = sqrt(second-smallest distance)
+   * so the subsequent iterations' bound update is seeded against tight values rather than the
+   * decomposed-formula residual @c runAssignment writes into @c m_minDistSq. @c m_minDistSq is
+   * also overwritten with the tight squared min so downstream reads (inertia recompute, empty-
+   * cluster reseed donor selection) are numerically clean.
+   */
+  void seedHamerlyBounds(const NDArray<T, 2, Layout::Contig> &X,
+                         const NDArray<T, 2, Layout::Contig> &centroids,
+                         const NDArray<std::int32_t, 1> &labels, math::Pool pool) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const std::size_t k = centroids.dim(0);
+    if (n == 0 || d == 0 || k == 0 || k > kHamerlyMaxK) {
+      return;
+    }
+    const T *xData = X.data();
+    const T *cData = centroids.data();
+    T *uData = m_u.data();
+    T *lData = m_l.data();
+    T *minDistData = m_minDistSq.data();
+    const std::int32_t *labelsData = labels.data();
+
+    auto seedRange = [&](std::size_t lo, std::size_t hi) noexcept {
+      std::array<T, kHamerlyMaxK> distBuf{};
+      for (std::size_t i = lo; i < hi; ++i) {
+        const T *xi = xData + (i * d);
+        detail::sqEuclideanRowToBatch<T>(xi, cData, k, d, distBuf.data());
+        T best = std::numeric_limits<T>::infinity();
+        T second = std::numeric_limits<T>::infinity();
+        for (std::size_t j = 0; j < k; ++j) {
+          const T v = distBuf[j];
+          if (v < best) {
+            second = best;
+            best = v;
+          } else if (v < second) {
+            second = v;
+          }
+        }
+        // Anchor @c m_u to labels[i] (the just-committed assignment) rather than the argmin of
+        // the fresh scan: a float32 tie inside the chunked post-pass's decomposed formula can
+        // move argmin by one cluster relative to the tight scan, and Hamerly's invariant is
+        // @c u(x) >= ||x - c(a(x))||, not @c u(x) >= min_j ||x - c_j||.
+        const std::int32_t a = labelsData[i];
+        T tight = best;
+        if (a >= 0 && std::cmp_less(a, k)) {
+          const auto au = static_cast<std::size_t>(a);
+          const T *caRow = cData + (au * d);
+          tight = math::detail::sqEuclideanRowPtr<T>(xi, caRow, d);
+        }
+        minDistData[i] = tight;
+        uData[i] = std::sqrt(tight);
+        lData[i] = std::sqrt(second);
+      }
+    };
+
+    if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, n,
+                          [&](std::size_t lo, std::size_t hi) { seedRange(lo, hi); })
+          .wait();
+    } else {
+      seedRange(0, n);
+    }
+  }
+
+  /**
+   * @brief Hamerly bounds-aware assignment for iterations beyond the first.
+   *
+   * Updates @c m_u and @c m_l against the Euclidean centroid shifts the caller has already
+   * computed into @c m_shiftSq, then for each point applies the @c u <= l prune; points that
+   * clear the prune have their @c u tightened to the exact distance to the current assigned
+   * centroid and rechecked, and only those still above the lower bound fall into the full
+   * @c k-distance scan. Labels, @c m_u, @c m_l, and @c m_minDistSq are all maintained.
+   */
+  void runHamerlyAssignment(const NDArray<T, 2, Layout::Contig> &X,
+                            const NDArray<T, 2, Layout::Contig> &centroids,
+                            NDArray<std::int32_t, 1> &labels, math::Pool pool) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const std::size_t k = centroids.dim(0);
+    if (n == 0 || d == 0 || k == 0 || k > kHamerlyMaxK) {
+      return;
+    }
+    const T *xData = X.data();
+    const T *cData = centroids.data();
+    T *uData = m_u.data();
+    T *lData = m_l.data();
+    T *minDistData = m_minDistSq.data();
+    std::int32_t *labelsData = labels.data();
+
+    // Per-cluster Euclidean shift + top-2 of shifts. The second-largest shift is the amount we
+    // subtract from @c l(x) when x's assigned cluster is the one with the largest shift --
+    // otherwise the largest shift is the loose bound donor for every non-assigned cluster.
+    T sMax = T{0};
+    T s2Max = T{0};
+    std::size_t argMax = 0;
+    T *shiftData = m_shiftEuclidean.data();
+    for (std::size_t c = 0; c < k; ++c) {
+      const T s = std::sqrt(m_shiftSq(c));
+      shiftData[c] = s;
+      if (s > sMax) {
+        s2Max = sMax;
+        sMax = s;
+        argMax = c;
+      } else if (s > s2Max) {
+        s2Max = s;
+      }
+    }
+
+    auto processRange = [&](std::size_t lo, std::size_t hi) noexcept {
+      std::array<T, kHamerlyMaxK> distBuf{};
+      for (std::size_t i = lo; i < hi; ++i) {
+        const std::int32_t a = labelsData[i];
+        if (a < 0 || std::cmp_greater_equal(a, k)) {
+          continue;
+        }
+        const auto au = static_cast<std::size_t>(a);
+        T ui = uData[i] + shiftData[au];
+        T li = lData[i] - ((au == argMax) ? s2Max : sMax);
+
+        if (ui <= li) {
+          uData[i] = ui;
+          lData[i] = li;
+          continue;
+        }
+
+        const T *xi = xData + (i * d);
+        const T *caRow = cData + (au * d);
+        const T tightSq = math::detail::sqEuclideanRowPtr<T>(xi, caRow, d);
+        ui = std::sqrt(tightSq);
+
+        if (ui <= li) {
+          uData[i] = ui;
+          lData[i] = li;
+          minDistData[i] = tightSq;
+          continue;
+        }
+
+        detail::sqEuclideanRowToBatch<T>(xi, cData, k, d, distBuf.data());
+        T best = std::numeric_limits<T>::infinity();
+        T second = std::numeric_limits<T>::infinity();
+        std::int32_t bestIdx = 0;
+        for (std::size_t j = 0; j < k; ++j) {
+          const T v = distBuf[j];
+          if (v < best) {
+            second = best;
+            best = v;
+            bestIdx = static_cast<std::int32_t>(j);
+          } else if (v < second) {
+            second = v;
+          }
+        }
+        labelsData[i] = bestIdx;
+        minDistData[i] = best;
+        uData[i] = std::sqrt(best);
+        lData[i] = std::sqrt(second);
+      }
+    };
+
+    if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, n,
+                          [&](std::size_t lo, std::size_t hi) { processRange(lo, hi); })
+          .wait();
+    } else {
+      processRange(0, n);
+    }
+  }
+
   NDArray<T, 2, Layout::Contig> m_centroidsOld;
   NDArray<T, 1> m_cSqNorms;
   NDArray<T, 2, Layout::Contig> m_sums;
@@ -714,6 +978,15 @@ private:
   NDArray<T, 2, Layout::Contig> m_distsChunk;
   NDArray<T, 1> m_gemmApArena;
   NDArray<T, 1> m_xNormsSq;
+  NDArray<T, 1> m_varSum;
+  NDArray<T, 1> m_varSumSq;
+  /// Per-point Hamerly upper bound on ||x - c(a(x))||, Euclidean (not squared). Seeded after
+  /// the first iteration's full assignment; updated in-place each subsequent iteration.
+  NDArray<T, 1> m_u;
+  /// Per-point Hamerly lower bound on ||x - c(j != a(x))||, Euclidean. Same seeding/update.
+  NDArray<T, 1> m_l;
+  /// Per-cluster Euclidean centroid shift for the current iteration, sqrt of m_shiftSq.
+  NDArray<T, 1> m_shiftEuclidean;
 
   std::size_t m_n = 0;
   std::size_t m_d = 0;

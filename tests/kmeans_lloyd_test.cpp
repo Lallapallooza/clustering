@@ -316,6 +316,26 @@ TEST(KMeansEndToEnd, AdversarialEmptyClusterReseed) {
   }
 }
 
+// Pins the sklearn-compatible tol semantic: on data with variance O(1), tol=1e-4 converges in
+// far fewer than maxIter iterations. Under the earlier raw-L2-shift convention the internal
+// threshold was tol*tol = 1e-8 which, on typical blob data, required hundreds of iterations;
+// the variance-scaled threshold follows sklearn's _tolerance(X, tol) = tol * mean_var and
+// terminates near the sklearn iteration count.
+TEST(KMeansEndToEnd, TolScaledByVarianceMatchesSklearnConvergencePace) {
+  constexpr std::size_t n = 5000;
+  constexpr std::size_t d = 4;
+  constexpr std::size_t k = 8;
+  // Separation 50 vs sigma 0.5 produces variance-of-columns ~O(1e3), so the variance-scaled
+  // threshold (tol * mean_var) is comfortably looser than the pre-fix (tol*tol) and iteration
+  // counts collapse to a typical Lloyd pace of 2-20 steps.
+  const Blobs b = makeBlobs(n, d, k, 0.5F, 77U);
+
+  KMeans<float> km(k, 1);
+  km.run(b.X, 300U, 1e-4F, 17U);
+  EXPECT_TRUE(km.converged());
+  EXPECT_LT(km.nIter(), 50U) << "nIter=" << km.nIter();
+}
+
 TEST(KMeansEndToEnd, ResetReleasesThenReruns) {
   constexpr std::size_t n = 200;
   constexpr std::size_t d = 4;
