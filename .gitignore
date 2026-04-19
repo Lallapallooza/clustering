@@ -59,7 +59,7 @@ dist/
 .envrc
 
 # Benchmark output
-benchmark_results/
+benchmark_results*/
 
 # Mongo Explorer plugin
 .idea/**/mongoSettings.xml
