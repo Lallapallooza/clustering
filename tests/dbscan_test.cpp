@@ -61,11 +61,11 @@ TEST(DBSCAN, FindsTwoWellSeparatedClusters) {
     points[i][1] = 0.0f;
   }
 
-  DBSCAN<float> dbscan(points, 0.3f, 2, 1);
-  dbscan.run();
+  DBSCAN<float> dbscan(0.3f, 2, 1);
+  dbscan.run(points);
 
   EXPECT_EQ(dbscan.nClusters(), 2u);
-  EXPECT_NE(dbscan.labels()[0], dbscan.labels()[5]);
+  EXPECT_NE(dbscan.labels().flatIndex(0), dbscan.labels().flatIndex(5));
 }
 
 TEST(DBSCAN, MarksIsolatedPointsAsNoise) {
@@ -77,11 +77,11 @@ TEST(DBSCAN, MarksIsolatedPointsAsNoise) {
   points[5][0] = 1000.0f;
   points[5][1] = 1000.0f;
 
-  DBSCAN<float> dbscan(points, 0.3f, 2, 1);
-  dbscan.run();
+  DBSCAN<float> dbscan(0.3f, 2, 1);
+  dbscan.run(points);
 
   EXPECT_EQ(dbscan.nClusters(), 1u);
-  EXPECT_EQ(dbscan.labels()[5], DBSCAN<float>::NOISY);
+  EXPECT_EQ(dbscan.labels().flatIndex(5), DBSCAN<float>::NOISY);
 }
 
 // Both backends must produce the same partition across the KDTree/brute-force dimension
@@ -90,16 +90,16 @@ TEST(DBSCAN, ExplicitBackendsAgreeAcrossDims) {
   for (const std::size_t d : {4U, 8U, 16U, 32U, 64U}) {
     const auto points = makeThreeBlobs(200, d, /*seed=*/0xC10D + d);
 
-    DBSCAN<float, KDTree<float, KDTreeDistanceType::kEucledian>> viaTree(points, 1.0f, 5, 2);
-    viaTree.run();
+    DBSCAN<float, KDTree<float, KDTreeDistanceType::kEucledian>> viaTree(1.0f, 5, 2);
+    viaTree.run(points);
 
-    DBSCAN<float, BruteForcePairwise<float>> viaBrute(points, 1.0f, 5, 2);
-    viaBrute.run();
+    DBSCAN<float, BruteForcePairwise<float>> viaBrute(1.0f, 5, 2);
+    viaBrute.run(points);
 
     ASSERT_EQ(viaTree.nClusters(), 3u) << "fixture degenerate at d=" << d;
     ASSERT_EQ(viaBrute.nClusters(), viaTree.nClusters()) << "backend mismatch at d=" << d;
     for (std::size_t i = 0; i < points.dim(0); ++i) {
-      EXPECT_EQ(viaTree.labels()[i], viaBrute.labels()[i])
+      EXPECT_EQ(viaTree.labels().flatIndex(i), viaBrute.labels().flatIndex(i))
           << "label mismatch at d=" << d << " i=" << i;
     }
   }

@@ -24,37 +24,52 @@ using clustering::python::borrowFromNumpyContigReadOnly;
 using clustering::python::borrowFromNumpyStrided;
 using clustering::python::wrapAsNumpy;
 
-static nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>
+static nb::ndarray<nb::numpy, std::int32_t, nb::ndim<1>>
 dbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> data, float eps,
                int min_pts, int n_jobs) {
-  // Normalise n_jobs while GIL is still held (safe numpy access window).
-  size_t jobs = (n_jobs <= 0) ? static_cast<size_t>(std::thread::hardware_concurrency())
-                              : static_cast<size_t>(n_jobs);
+  const std::size_t jobs = (n_jobs <= 0) ? std::size_t{0} : static_cast<std::size_t>(n_jobs);
 
-  const size_t N = data.shape(0);
-  const size_t D = data.shape(1);
+  const std::size_t N = data.shape(0);
+  const std::size_t D = data.shape(1);
 
-  // Copy numpy data into NDArray<float,2> while GIL is held.
-  NDArray<float, 2> points({N, D});
-  std::memcpy(points.data(), data.data(), N * D * sizeof(float));
-
-  // Allocate output buffer (owned by a capsule).
-  int32_t *out = new int32_t[N];
-
-  {
-    nb::gil_scoped_release release;
-
-    DBSCAN<float> algo(points, eps, static_cast<size_t>(min_pts), jobs);
-    algo.run();
-
-    const auto &labels = algo.labels();
-    std::copy(labels.begin(), labels.end(), out);
+  if (min_pts < 1) {
+    throw nb::value_error("min_pts must be >= 1");
+  }
+  if (!(eps >= 0.0F)) {
+    throw nb::value_error("eps must be >= 0");
   }
 
-  nb::capsule owner(out, [](void *p) noexcept { delete[] static_cast<int32_t *>(p); });
+  // Borrow the numpy buffer directly when it is 32-byte aligned: several AVX2 tiers assume
+  // 32-byte aligned loads on @p X through the @c NDArray::isAligned<32>() gate. Borrowing a
+  // loosely-aligned numpy array would force the dispatcher down fallback paths whose
+  // interactions are less thoroughly exercised. Align-gated borrow captures the common case
+  // (numpy contiguous arrays from @c make_blobs, @c astype, etc. on x86_64 glibc land on
+  // 32-byte boundaries here) without exposing the unaligned fallback.
+  constexpr std::size_t kAvx2Align = 32;
+  const bool dataAligned = (reinterpret_cast<std::uintptr_t>(data.data()) % kAvx2Align) == 0;
+  NDArray<float, 2> xOwned({0, 0});
+  auto X = [&] {
+    if (dataAligned) {
+      return clustering::python::borrowFromNumpyContig<float>(data);
+    }
+    xOwned = NDArray<float, 2>({N, D});
+    std::memcpy(xOwned.data(), data.data(), N * D * sizeof(float));
+    return NDArray<float, 2, clustering::Layout::Contig>::borrow(xOwned.data(), {N, D});
+  }();
 
-  size_t shape[1] = {N};
-  return nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>(out, 1, shape, owner);
+  DBSCAN<float> algo(eps, static_cast<std::size_t>(min_pts), jobs);
+  {
+    nb::gil_scoped_release release;
+    algo.run(X);
+  }
+
+  // Detach labels into a fresh owned buffer so the solver remains reusable and the capsule
+  // has full ownership of the numpy-visible storage.
+  NDArray<std::int32_t, 1> labels_out({N});
+  if (N > 0) {
+    std::memcpy(labels_out.data(), algo.labels().data(), N * sizeof(std::int32_t));
+  }
+  return wrapAsNumpy<std::int32_t>(std::move(labels_out));
 }
 
 static std::tuple<nb::ndarray<nb::numpy, std::int32_t, nb::ndim<1>>,
