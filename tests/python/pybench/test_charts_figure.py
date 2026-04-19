@@ -294,6 +294,42 @@ def test_format_ratio_label(r: float, expected: str) -> None:
     assert format_ratio_label(r) == expected
 
 
+def test_facet_has_major_yticks_when_ratios_sit_below_parity() -> None:
+    # Regression: when every ratio for a facet is well below 1x (e.g. memory
+    # ratios of 0.1x-0.5x), the axis must still carry labeled gridlines.
+    results = [
+        _make_result(
+            size=s,
+            dims=2,
+            n_jobs=1,
+            ours_peak_mb=mb_ours,
+            theirs_peak_mb=mb_theirs,
+        )
+        for s, mb_ours, mb_theirs in (
+            (5000, 4.5, 0.44),
+            (10000, 5.0, 0.67),
+            (50000, 8.5, 2.81),
+            (100000, 12.9, 5.48),
+            (250000, 26.0, 13.49),
+        )
+    ]
+    inputs = BuildFigureInputs(
+        algo="kmeans",
+        partition_results=tuple(results),
+        dims_sorted=(2,),
+        title_meta=_meta(),
+        non_njobs_params=(),
+        dataset_spec="blobs centers=16",
+        ari_threshold=None,
+    )
+    fig = build_figure(inputs)
+    mem_ax = fig.axes[1]
+    tick_positions = [t for t in mem_ax.get_yticks() if math.isfinite(t)]
+    tick_labels = [t.get_text() for t in mem_ax.get_yticklabels()]
+    assert tick_positions, "memory axis has no major ticks"
+    assert any(lbl.strip() for lbl in tick_labels), "memory axis ticks are unlabeled"
+
+
 def test_figure_savefig_produces_nonempty_png(tmp_path: Any) -> None:
     inputs = _grid_inputs(
         dims=(2, 8),
