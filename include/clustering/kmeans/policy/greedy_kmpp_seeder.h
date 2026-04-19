@@ -566,44 +566,75 @@ public:
             // SoA 8-row M-tile kernel: streams X AoS through an in-register 8x8 transpose so 8
             // rows' features land in feature-major YMM accumulators, folds L distances per row
             // without per-row horizontal reductions, writes the per-(row, cand) distances to
-            // @c outDist, and accumulates min-capped scores. Gated on @c L in [1, 6], @c d >= 8,
-            // and the serial dispatch so the 8-row tiling is unambiguous.
-            const bool soaEligible =
-                (d >= 8) && (nLocalTrials >= 1) && (nLocalTrials <= 6) && !willParallelize;
+            // @c outDist, and accumulates min-capped scores. The kernel handles arbitrary row
+            // counts, so per-worker row ranges slot in under the same parallel fan-out that
+            // feeds the fallback path.
+            const bool soaEligible = (d >= 8) && (nLocalTrials >= 1) && (nLocalTrials <= 6);
             if (soaEligible) {
-              switch (nLocalTrials) {
-              case 1:
-                math::detail::kmppScoreSoaRowsAvx2F32<1>(xData, n, d, candRowsData, minSq,
-                                                         candDistSqData, transposedWidth,
-                                                         scores.data());
-                break;
-              case 2:
-                math::detail::kmppScoreSoaRowsAvx2F32<2>(xData, n, d, candRowsData, minSq,
-                                                         candDistSqData, transposedWidth,
-                                                         scores.data());
-                break;
-              case 3:
-                math::detail::kmppScoreSoaRowsAvx2F32<3>(xData, n, d, candRowsData, minSq,
-                                                         candDistSqData, transposedWidth,
-                                                         scores.data());
-                break;
-              case 4:
-                math::detail::kmppScoreSoaRowsAvx2F32<4>(xData, n, d, candRowsData, minSq,
-                                                         candDistSqData, transposedWidth,
-                                                         scores.data());
-                break;
-              case 5:
-                math::detail::kmppScoreSoaRowsAvx2F32<5>(xData, n, d, candRowsData, minSq,
-                                                         candDistSqData, transposedWidth,
-                                                         scores.data());
-                break;
-              case 6:
-                math::detail::kmppScoreSoaRowsAvx2F32<6>(xData, n, d, candRowsData, minSq,
-                                                         candDistSqData, transposedWidth,
-                                                         scores.data());
-                break;
-              default:
-                break;
+              auto soaRange = [&](std::size_t lo, std::size_t hi, T *localScores) noexcept {
+                const std::size_t rangeN = hi - lo;
+                const float *xSlice = xData + (lo * d);
+                const float *minSlice = minSq + lo;
+                float *distSlice = candDistSqData + (lo * transposedWidth);
+                switch (nLocalTrials) {
+                case 1:
+                  math::detail::kmppScoreSoaRowsAvx2F32<1>(xSlice, rangeN, d, candRowsData,
+                                                           minSlice, distSlice, transposedWidth,
+                                                           localScores);
+                  break;
+                case 2:
+                  math::detail::kmppScoreSoaRowsAvx2F32<2>(xSlice, rangeN, d, candRowsData,
+                                                           minSlice, distSlice, transposedWidth,
+                                                           localScores);
+                  break;
+                case 3:
+                  math::detail::kmppScoreSoaRowsAvx2F32<3>(xSlice, rangeN, d, candRowsData,
+                                                           minSlice, distSlice, transposedWidth,
+                                                           localScores);
+                  break;
+                case 4:
+                  math::detail::kmppScoreSoaRowsAvx2F32<4>(xSlice, rangeN, d, candRowsData,
+                                                           minSlice, distSlice, transposedWidth,
+                                                           localScores);
+                  break;
+                case 5:
+                  math::detail::kmppScoreSoaRowsAvx2F32<5>(xSlice, rangeN, d, candRowsData,
+                                                           minSlice, distSlice, transposedWidth,
+                                                           localScores);
+                  break;
+                case 6:
+                  math::detail::kmppScoreSoaRowsAvx2F32<6>(xSlice, rangeN, d, candRowsData,
+                                                           minSlice, distSlice, transposedWidth,
+                                                           localScores);
+                  break;
+                default:
+                  break;
+                }
+              };
+
+              if (willParallelize) {
+                const std::size_t workers = pool.workerCount();
+                T *localScores = m_localScores.data();
+                for (std::size_t e = 0; e < workers * nLocalTrials; ++e) {
+                  localScores[e] = T{0};
+                }
+                pool.pool
+                    ->submit_blocks(
+                        std::size_t{0}, n,
+                        [&](std::size_t lo, std::size_t hi) {
+                          const std::size_t w = math::Pool::workerIndex();
+                          soaRange(lo, hi, localScores + (w * nLocalTrials));
+                        },
+                        workers)
+                    .wait();
+                for (std::size_t w = 0; w < workers; ++w) {
+                  const T *row = localScores + (w * nLocalTrials);
+                  for (std::size_t t = 0; t < nLocalTrials; ++t) {
+                    scores[t] += row[t];
+                  }
+                }
+              } else {
+                soaRange(0, n, scores.data());
               }
               scoredViaSoa = true;
             }
