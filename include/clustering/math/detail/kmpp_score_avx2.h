@@ -97,32 +97,37 @@ kmppScoreSoaRowsAvx2F32(const float *xData, std::size_t n, std::size_t d, const 
 
       for (std::size_t t = 0; t < L; ++t) {
         const float *cand = candData + (t * d) + k;
-        __m256 a = acc[t];
+        // Two independent FMA chains per candidate: even features into @c ae (seeded with the
+        // prior k_chunk's acc), odd features into @c ao (starts at zero, merged at k_chunk end).
+        // Halves the critical-path dependency depth at the cost of one VADDPS per k_chunk; fits
+        // at L <= 6 without spilling (8 xK + L acc + 2 chain temps + alias on c/diff).
+        __m256 ae = acc[t];
+        __m256 ao = _mm256_setzero_ps();
         __m256 c = _mm256_broadcast_ss(cand + 0);
         __m256 diff = _mm256_sub_ps(xK0, c);
-        a = _mm256_fmadd_ps(diff, diff, a);
+        ae = _mm256_fmadd_ps(diff, diff, ae);
         c = _mm256_broadcast_ss(cand + 1);
         diff = _mm256_sub_ps(xK1, c);
-        a = _mm256_fmadd_ps(diff, diff, a);
+        ao = _mm256_fmadd_ps(diff, diff, ao);
         c = _mm256_broadcast_ss(cand + 2);
         diff = _mm256_sub_ps(xK2, c);
-        a = _mm256_fmadd_ps(diff, diff, a);
+        ae = _mm256_fmadd_ps(diff, diff, ae);
         c = _mm256_broadcast_ss(cand + 3);
         diff = _mm256_sub_ps(xK3, c);
-        a = _mm256_fmadd_ps(diff, diff, a);
+        ao = _mm256_fmadd_ps(diff, diff, ao);
         c = _mm256_broadcast_ss(cand + 4);
         diff = _mm256_sub_ps(xK4, c);
-        a = _mm256_fmadd_ps(diff, diff, a);
+        ae = _mm256_fmadd_ps(diff, diff, ae);
         c = _mm256_broadcast_ss(cand + 5);
         diff = _mm256_sub_ps(xK5, c);
-        a = _mm256_fmadd_ps(diff, diff, a);
+        ao = _mm256_fmadd_ps(diff, diff, ao);
         c = _mm256_broadcast_ss(cand + 6);
         diff = _mm256_sub_ps(xK6, c);
-        a = _mm256_fmadd_ps(diff, diff, a);
+        ae = _mm256_fmadd_ps(diff, diff, ae);
         c = _mm256_broadcast_ss(cand + 7);
         diff = _mm256_sub_ps(xK7, c);
-        a = _mm256_fmadd_ps(diff, diff, a);
-        acc[t] = a;
+        ao = _mm256_fmadd_ps(diff, diff, ao);
+        acc[t] = _mm256_add_ps(ae, ao);
       }
     }
 
