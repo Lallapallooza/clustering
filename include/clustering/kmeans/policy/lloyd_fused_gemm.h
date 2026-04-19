@@ -235,12 +235,17 @@ public:
       }
     }
 
-    // Re-assign labels against the final centroids. The direct small-@c d path already writes
-    // true squared distances into m_minDistSq; the decomposed @c ||c||^2 - 2 x.c + ||x||^2
-    // formula carries cancellation noise at large coordinate magnitudes, which inertia and
-    // the argmax reseed both need faithful, so the recompute-direct pass runs on the other
-    // two tiers.
-    runAssignment(X, centroids, outLabels, pool);
+    // Re-assign labels against the final centroids. At convergence the bounds Hamerly maintains
+    // are already tight for the pre-update centroids; feeding one more bound-aware pass against
+    // the tiny final shift prunes nearly every row and is an order of magnitude cheaper than a
+    // full chunked GEMM assignment. Force the serial fan-out so the per-worker submit/wait pair
+    // doesn't dominate the trivial post-convergence work; the chunked fallback still fans out
+    // when the shape never enabled Hamerly.
+    if (hamerlyEligible && iter > 0) {
+      runHamerlyAssignment(X, centroids, outLabels, math::Pool{});
+    } else {
+      runAssignment(X, centroids, outLabels, pool);
+    }
     if (!assignmentProducesDirectMinDistSq(X, centroids)) {
       recomputeMinDistSqDirect(X, centroids, outLabels, pool);
     }

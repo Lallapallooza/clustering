@@ -5,6 +5,7 @@ import numpy as np
 from _clustering import kmeans as cpp_kmeans
 from sklearn.cluster import KMeans
 
+from pybench.alignment import as_aligned
 from pybench.recipe import DatasetSpec, Recipe
 
 
@@ -12,6 +13,9 @@ _N_INIT = 5
 
 
 def _ours(data: np.ndarray, *, n_clusters: int, n_jobs: int = 1) -> np.ndarray:
+    # One-shot align before the n_init loop so every fit borrows the same aligned
+    # buffer rather than forcing the C++ binding through its memcpy fallback.
+    data = as_aligned(data)
     best_labels: np.ndarray | None = None
     best_inertia = float("inf")
     for seed in range(_N_INIT):

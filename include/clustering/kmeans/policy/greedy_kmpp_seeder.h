@@ -20,6 +20,8 @@
 
 #ifdef CLUSTERING_USE_AVX2
 #include <immintrin.h>
+
+#include "clustering/math/detail/kmpp_score_avx2.h"
 #endif
 
 namespace clustering::kmeans {
@@ -557,44 +559,96 @@ public:
           // difference between bandwidth-bound and bandwidth-bound times L. Parallelized over
           // X rows via per-worker score slabs reduced at the end; candDistSqData writes are
           // row-local so no aliasing across workers.
-          auto scanRange = [&](std::size_t lo, std::size_t hi, T *localScores) noexcept {
-            std::array<T, 32> distRowLocal{};
-            for (std::size_t i = lo; i < hi; ++i) {
-              const T *xi = xData + (i * d);
-              const T mi = minSq[i];
-              detail::sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d,
-                                               distRowLocal.data());
-              T *dstRow = candDistSqData + (i * transposedWidth);
-              for (std::size_t t = 0; t < nLocalTrials; ++t) {
-                dstRow[t] = distRowLocal[t];
-                localScores[t] += (distRowLocal[t] < mi) ? distRowLocal[t] : mi;
+          const bool willParallelize = pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr;
+          bool scoredViaSoa = false;
+#ifdef CLUSTERING_USE_AVX2
+          if constexpr (std::is_same_v<T, float>) {
+            // SoA 8-row M-tile kernel: streams X AoS through an in-register 8x8 transpose so 8
+            // rows' features land in feature-major YMM accumulators, folds L distances per row
+            // without per-row horizontal reductions, writes the per-(row, cand) distances to
+            // @c outDist, and accumulates min-capped scores. Gated on @c L in [1, 6], @c d >= 8,
+            // and the serial dispatch so the 8-row tiling is unambiguous.
+            const bool soaEligible =
+                (d >= 8) && (nLocalTrials >= 1) && (nLocalTrials <= 6) && !willParallelize;
+            if (soaEligible) {
+              switch (nLocalTrials) {
+              case 1:
+                math::detail::kmppScoreSoaRowsAvx2F32<1>(xData, n, d, candRowsData, minSq,
+                                                         candDistSqData, transposedWidth,
+                                                         scores.data());
+                break;
+              case 2:
+                math::detail::kmppScoreSoaRowsAvx2F32<2>(xData, n, d, candRowsData, minSq,
+                                                         candDistSqData, transposedWidth,
+                                                         scores.data());
+                break;
+              case 3:
+                math::detail::kmppScoreSoaRowsAvx2F32<3>(xData, n, d, candRowsData, minSq,
+                                                         candDistSqData, transposedWidth,
+                                                         scores.data());
+                break;
+              case 4:
+                math::detail::kmppScoreSoaRowsAvx2F32<4>(xData, n, d, candRowsData, minSq,
+                                                         candDistSqData, transposedWidth,
+                                                         scores.data());
+                break;
+              case 5:
+                math::detail::kmppScoreSoaRowsAvx2F32<5>(xData, n, d, candRowsData, minSq,
+                                                         candDistSqData, transposedWidth,
+                                                         scores.data());
+                break;
+              case 6:
+                math::detail::kmppScoreSoaRowsAvx2F32<6>(xData, n, d, candRowsData, minSq,
+                                                         candDistSqData, transposedWidth,
+                                                         scores.data());
+                break;
+              default:
+                break;
               }
+              scoredViaSoa = true;
             }
-          };
+          }
+#endif
+          if (!scoredViaSoa) {
+            auto scanRange = [&](std::size_t lo, std::size_t hi, T *localScores) noexcept {
+              std::array<T, 32> distRowLocal{};
+              for (std::size_t i = lo; i < hi; ++i) {
+                const T *xi = xData + (i * d);
+                const T mi = minSq[i];
+                detail::sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d,
+                                                 distRowLocal.data());
+                T *dstRow = candDistSqData + (i * transposedWidth);
+                for (std::size_t t = 0; t < nLocalTrials; ++t) {
+                  dstRow[t] = distRowLocal[t];
+                  localScores[t] += (distRowLocal[t] < mi) ? distRowLocal[t] : mi;
+                }
+              }
+            };
 
-          if (pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr) {
-            const std::size_t workers = pool.workerCount();
-            T *localScores = m_localScores.data();
-            for (std::size_t e = 0; e < workers * nLocalTrials; ++e) {
-              localScores[e] = T{0};
-            }
-            pool.pool
-                ->submit_blocks(
-                    std::size_t{0}, n,
-                    [&](std::size_t lo, std::size_t hi) {
-                      const std::size_t w = math::Pool::workerIndex();
-                      scanRange(lo, hi, localScores + (w * nLocalTrials));
-                    },
-                    workers)
-                .wait();
-            for (std::size_t w = 0; w < workers; ++w) {
-              const T *row = localScores + (w * nLocalTrials);
-              for (std::size_t t = 0; t < nLocalTrials; ++t) {
-                scores[t] += row[t];
+            if (willParallelize) {
+              const std::size_t workers = pool.workerCount();
+              T *localScores = m_localScores.data();
+              for (std::size_t e = 0; e < workers * nLocalTrials; ++e) {
+                localScores[e] = T{0};
               }
+              pool.pool
+                  ->submit_blocks(
+                      std::size_t{0}, n,
+                      [&](std::size_t lo, std::size_t hi) {
+                        const std::size_t w = math::Pool::workerIndex();
+                        scanRange(lo, hi, localScores + (w * nLocalTrials));
+                      },
+                      workers)
+                  .wait();
+              for (std::size_t w = 0; w < workers; ++w) {
+                const T *row = localScores + (w * nLocalTrials);
+                for (std::size_t t = 0; t < nLocalTrials; ++t) {
+                  scores[t] += row[t];
+                }
+              }
+            } else {
+              scanRange(0, n, scores.data());
             }
-          } else {
-            scanRange(0, n, scores.data());
           }
         }
       }
