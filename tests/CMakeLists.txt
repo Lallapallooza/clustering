@@ -29,6 +29,7 @@ add_executable(
     hdbscan_test.cpp
     hdbscan_prim_mst_test.cpp
     hdbscan_boruvka_mst_test.cpp
+    hdbscan_nn_descent_mst_test.cpp
     nn_descent_test.cpp
     kmeans_lloyd_test.cpp
     kmeans_seeder_dispatch_test.cpp
