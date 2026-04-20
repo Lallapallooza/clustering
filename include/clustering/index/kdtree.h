@@ -6,10 +6,13 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <span>
+#include <utility>
 #include <vector>
 
 #include "clustering/always_assert.h"
 #include "clustering/math/detail/avx2_helpers.h"
+#include "clustering/math/detail/bounded_max_heap.h"
 #include "clustering/math/detail/radius_scan.h"
 #include "clustering/math/thread.h"
 #include "clustering/memory/linear_alloc.h"
@@ -40,6 +43,11 @@ struct KDTreeNode {
   KDTreeNode *m_left;
   /// Right child, or @c nullptr on a leaf.
   KDTreeNode *m_right;
+  /// Monotonic identifier assigned at construction; keys into the owning tree's per-node
+  /// bounds buffer. Stays valid for the tree's lifetime and never collides across nodes of
+  /// the same tree. Four bytes is enough: @ref KDTree's node budget never exceeds @c N,
+  /// which the HDBSCAN contract caps at the signed 32-bit range.
+  std::uint32_t m_id;
 };
 
 /**
@@ -118,6 +126,16 @@ public:
         d[j] = s[j];
       }
     }
+    // Populate per-node axis-aligned bounding boxes once the tree is built and the reordered
+    // points buffer is materialized. Layout is @c (numNodes * 2 * d) flat: row @c 2*id holds the
+    // min-coords vector, row @c 2*id + 1 holds the max-coords vector. Dual-tree walkers consume
+    // this through @ref nodeBounds as a pair of @c std::span views; leaving @ref KDTreeNode's
+    // size unchanged past the monotonic @c m_id keeps leaf-scan cache behaviour stable at
+    // high @c d.
+    m_nodeBounds.assign(static_cast<std::size_t>(m_nextNodeId) * 2 * m_dim, T{});
+    if (m_root != nullptr) {
+      populateBounds(m_root);
+    }
   }
 
   /**
@@ -193,6 +211,105 @@ public:
     }
     return adj;
   }
+
+  /**
+   * @brief Returns the k nearest neighbours of every indexed point, self-excluded.
+   *
+   * For every row @c i of the original point cloud, the method finds the @c k original-index
+   * points minimizing squared Euclidean distance to row @c i (excluding @c i itself) and writes
+   * the result as two parallel @c (n x k) arrays: @c indices[i][j] is the original index of the
+   * @c j-th closest neighbour, @c sqDists[i][j] is its squared distance. Each row is sorted
+   * ascending by @c sqDist. Ties in distance resolve on smaller neighbour index so results are
+   * reproducible bit-for-bit across runs at matched input.
+   *
+   * Traversal is depth-first with the bounded max-heap's current worst retained distance serving
+   * as the pruning bound (@c heap.top().first). Until the heap fills, the bound is
+   * @c std::numeric_limits<T>::max() and pruning is inactive.
+   *
+   * @pre @c k >= 1 and @c k < n.
+   *
+   * @param k    Number of neighbours per point (self-excluded). The signed 32-bit argument mirrors
+   *             the neighbour-index type carried through the @c (indices, sqDists) output; the
+   *             preconditions clamp it to @c [1, n).
+   * @param pool Parallelism injection for the outer per-point loop; follows the
+   *             @c shouldParallelize policy the radius-query path uses.
+   * @return Pair of two arrays: @c .first is an @c (n x k) @c std::int32_t array of neighbour
+   *         indices; @c .second is an @c (n x k) @c T array of squared distances.
+   */
+  [[nodiscard]] std::pair<NDArray<std::int32_t, 2>, NDArray<T, 2>> knnQuery(std::int32_t k,
+                                                                            math::Pool pool) const {
+    const std::size_t n = m_points.dim(0);
+    CLUSTERING_ALWAYS_ASSERT(k >= 1);
+    CLUSTERING_ALWAYS_ASSERT(std::cmp_less(k, n));
+
+    const auto kSz = static_cast<std::size_t>(k);
+    NDArray<std::int32_t, 2> indices({n, kSz});
+    NDArray<T, 2> sqDists({n, kSz});
+
+    auto runRange = [&](std::size_t lo, std::size_t hi) {
+      // Reuse the traversal stack and heap across every query in this chunk; both are reset at
+      // the head of each per-point walk.
+      std::vector<KDTreeNode *> stack;
+      stack.reserve(kDefaultStackReserve);
+      math::detail::BoundedMaxHeap<T, std::int32_t> heap(kSz);
+      const T *sourceData = m_points.data();
+      std::int32_t *idxOut = indices.data();
+      T *distOut = sqDists.data();
+      for (std::size_t i = lo; i < hi; ++i) {
+        const auto iOriginal = static_cast<std::int32_t>(i);
+        const T *qp = sourceData + (i * m_dim);
+        heap.clear();
+        knnQueryImpl(m_root, qp, iOriginal, heap, stack);
+        // Drain the heap into descending-distance order (root is largest), then reverse to get
+        // ascending order. Drain slots are written to the tail of the row so the reverse step is
+        // just index arithmetic.
+        std::size_t slot = heap.size();
+        while (slot > 0) {
+          --slot;
+          const auto &top = heap.top();
+          idxOut[(i * kSz) + slot] = top.second;
+          distOut[(i * kSz) + slot] = top.first;
+          heap.pop();
+        }
+      }
+    };
+
+    if (pool.shouldParallelize(n, 4, 2) && pool.pool != nullptr) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, n,
+                          [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); })
+          .wait();
+    } else {
+      runRange(0, n);
+    }
+    return {std::move(indices), std::move(sqDists)};
+  }
+
+  /**
+   * @brief Axis-aligned bounding box of the points routed through @p node.
+   *
+   * For a leaf, the bounds enclose every point stored at the leaf. For an internal node, the
+   * bounds enclose the union of the child boxes plus the pivot. Callers consume the result as
+   * two @c d-element spans into the tree's contiguous bounds buffer; the pointers are valid for
+   * the tree's lifetime.
+   *
+   * @param node Node to query; must belong to this tree. Passing @c nullptr is a precondition
+   *             violation.
+   * @return Pair of spans @c (min, max), each of length @c d.
+   */
+  [[nodiscard]] std::pair<std::span<const T>, std::span<const T>>
+  nodeBounds(const KDTreeNode *node) const noexcept {
+    assert(node != nullptr && "KDTree::nodeBounds on null node");
+    const std::size_t base = static_cast<std::size_t>(node->m_id) * 2 * m_dim;
+    const T *bounds = m_nodeBounds.data() + base;
+    return {std::span<const T>(bounds, m_dim), std::span<const T>(bounds + m_dim, m_dim)};
+  }
+
+  /// Root of the tree; @c nullptr for an empty point set.
+  [[nodiscard]] const KDTreeNode *root() const noexcept { return m_root; }
+
+  /// Dimension count of the indexed point cloud.
+  [[nodiscard]] std::size_t dim() const noexcept { return m_dim; }
 
   /**
    * @brief Destroys the KDTree, deallocating its nodes.
@@ -272,7 +389,8 @@ private:
       *node = {.m_index = start,     // offset into m_indices
                .m_dim = end - start, // count of points
                .m_left = nullptr,
-               .m_right = nullptr};
+               .m_right = nullptr,
+               .m_id = m_nextNodeId++};
       return node;
     }
 
@@ -292,7 +410,8 @@ private:
     *node = {.m_index = median, // reordered slot of the pivot
              .m_dim = dim,
              .m_left = build(start, median, depth + 1),
-             .m_right = build(median + 1, end, depth + 1)};
+             .m_right = build(median + 1, end, depth + 1),
+             .m_id = m_nextNodeId++};
 
     return node;
   }
@@ -398,6 +517,179 @@ private:
     }
   }
 
+  /**
+   * @brief Depth-first kNN walker with bounded-max-heap pruning.
+   *
+   * Pushes every candidate point into the heap, using the heap's largest-key entry as the
+   * pruning bound. Until the heap fills (holds @c k entries), the bound is
+   * @c std::numeric_limits<T>::max() and the walker accepts all subtrees; once full, subtrees
+   * whose minimum possible distance along the split axis exceeds the bound are skipped.
+   *
+   * @param root       Root node of the subtree to search.
+   * @param qp         Pointer to the contiguous query point; size-@c m_dim.
+   * @param selfIndex  Original-index slot to exclude from the result (the query's own row).
+   * @param heap       Caller-owned bounded max-heap; cleared by the public @ref knnQuery driver.
+   * @param stack      Caller-owned traversal scratch; cleared at the head of each call, reused
+   *                   across subsequent calls within a range chunk.
+   */
+  void knnQueryImpl(KDTreeNode *root, const T *qp, std::int32_t selfIndex,
+                    math::detail::BoundedMaxHeap<T, std::int32_t> &heap,
+                    std::vector<KDTreeNode *> &stack) const {
+    if (root == nullptr) {
+      return;
+    }
+
+    stack.clear();
+    stack.push_back(root);
+
+    const T *reorderedBase = m_points_reordered.data();
+
+    while (!stack.empty()) {
+      const KDTreeNode *node = stack.back();
+      stack.pop_back();
+
+      if (node == nullptr) {
+        continue;
+      }
+
+      // Current pruning bound. Until the heap is full, accept everything; once full, the heap
+      // root's squared distance is the worst retained and serves as the upper bound.
+      const T bound =
+          (heap.size() < heap.capacity()) ? std::numeric_limits<T>::max() : heap.top().first;
+
+      if (node->m_left == nullptr && node->m_right == nullptr) {
+        // Leaf: walk the contiguous count x d block and push each candidate into the heap. Self-
+        // exclusion is by original index so a candidate is skipped iff it is the query row.
+        const std::size_t base = node->m_index;
+        const std::size_t count = node->m_dim;
+        const T *leafPts = reorderedBase + (base * m_dim);
+        for (std::size_t i = 0; i < count; ++i) {
+          const auto pointIdx = static_cast<std::int32_t>(m_indices[base + i]);
+          if (pointIdx == selfIndex) {
+            continue;
+          }
+          const T dsq = math::detail::sqEuclideanRowPtr(qp, leafPts + (i * m_dim), m_dim);
+          heap.push(dsq, pointIdx);
+        }
+        continue;
+      }
+
+      // Internal: test the pivot, then descend near child first so the bound tightens before the
+      // far-child prune test. The pivot's pointwise distance competes with the heap directly.
+      const std::size_t pivotSlot = node->m_index;
+      const std::size_t splitDim = node->m_dim;
+      const T *pivotRow = reorderedBase + (pivotSlot * m_dim);
+      const auto pivotIdx = static_cast<std::int32_t>(m_indices[pivotSlot]);
+      if (pivotIdx != selfIndex) {
+        const T dist_sq = math::detail::sqEuclideanRowPtr(qp, pivotRow, m_dim);
+        heap.push(dist_sq, pivotIdx);
+      }
+
+      const T pivotCoord = pivotRow[splitDim];
+      const T diff = qp[splitDim] - pivotCoord;
+      const T diffSq = diff * diff;
+      // DFS descends near-first, far-second. Stack is LIFO, so push far before near.
+      if (diff < 0) {
+        if (diffSq <= bound && node->m_right != nullptr) {
+          stack.push_back(node->m_right);
+        }
+        if (node->m_left != nullptr) {
+          stack.push_back(node->m_left);
+        }
+      } else {
+        if (diffSq <= bound && node->m_left != nullptr) {
+          stack.push_back(node->m_left);
+        }
+        if (node->m_right != nullptr) {
+          stack.push_back(node->m_right);
+        }
+      }
+    }
+  }
+
+  /**
+   * @brief Post-order walk that fills @ref m_nodeBounds for every node in @p node's subtree.
+   *
+   * Leaves seed their box from the contiguous points they store; internal nodes take the
+   * element-wise min/max of their children's boxes and then union-in the pivot's row so the
+   * reported box truly encloses every point routed through the node (including the pivot at
+   * the internal node's own position).
+   *
+   * @param node Root of the subtree to populate; must be non-null.
+   */
+  void populateBounds(KDTreeNode *node) noexcept {
+    T *minOut = m_nodeBounds.data() + (static_cast<std::size_t>(node->m_id) * 2 * m_dim);
+    T *maxOut = minOut + m_dim;
+
+    if (node->m_left == nullptr && node->m_right == nullptr) {
+      // Leaf: seed from the first stored row, then fold the remaining rows into min/max.
+      const std::size_t base = node->m_index;
+      const std::size_t count = node->m_dim;
+      const T *leafPts = m_points_reordered.data() + (base * m_dim);
+      for (std::size_t j = 0; j < m_dim; ++j) {
+        minOut[j] = leafPts[j];
+        maxOut[j] = leafPts[j];
+      }
+      for (std::size_t i = 1; i < count; ++i) {
+        const T *row = leafPts + (i * m_dim);
+        for (std::size_t j = 0; j < m_dim; ++j) {
+          if (row[j] < minOut[j]) {
+            minOut[j] = row[j];
+          }
+          if (row[j] > maxOut[j]) {
+            maxOut[j] = row[j];
+          }
+        }
+      }
+      return;
+    }
+
+    // Internal: recurse first so children's bounds are ready, then take their union. The tree
+    // invariant guarantees every internal node has at least one child -- the build routine only
+    // returns @c nullptr when @p start >= @p end, and the internal-node branch is only entered
+    // when the range exceeds @c LeafSize, which is @c >= 1.
+    if (node->m_left != nullptr) {
+      populateBounds(node->m_left);
+    }
+    if (node->m_right != nullptr) {
+      populateBounds(node->m_right);
+    }
+
+    const KDTreeNode *const seed = (node->m_left != nullptr) ? node->m_left : node->m_right;
+    const T *seedMin = m_nodeBounds.data() + (static_cast<std::size_t>(seed->m_id) * 2 * m_dim);
+    const T *seedMax = seedMin + m_dim;
+    for (std::size_t j = 0; j < m_dim; ++j) {
+      minOut[j] = seedMin[j];
+      maxOut[j] = seedMax[j];
+    }
+
+    if (node->m_left != nullptr && node->m_right != nullptr) {
+      const T *otherMin =
+          m_nodeBounds.data() + (static_cast<std::size_t>(node->m_right->m_id) * 2 * m_dim);
+      const T *otherMax = otherMin + m_dim;
+      for (std::size_t j = 0; j < m_dim; ++j) {
+        if (otherMin[j] < minOut[j]) {
+          minOut[j] = otherMin[j];
+        }
+        if (otherMax[j] > maxOut[j]) {
+          maxOut[j] = otherMax[j];
+        }
+      }
+    }
+
+    // Union-in the pivot's own row so the internal-node box encloses the pivot point too.
+    const std::size_t pivotSlot = node->m_index;
+    const T *pivotRow = m_points_reordered.data() + (pivotSlot * m_dim);
+    for (std::size_t j = 0; j < m_dim; ++j) {
+      if (pivotRow[j] < minOut[j]) {
+        minOut[j] = pivotRow[j];
+      }
+      if (pivotRow[j] > maxOut[j]) {
+        maxOut[j] = pivotRow[j];
+      }
+    }
+  }
+
   /// Initial capacity for the per-chunk traversal stack. Tree depth stays below
   /// @c log2(n / LeafSize) in the balanced case; 64 slots absorb the worst-case spillover
   /// from unbalanced subtrees so the vector almost never grows past this reserve.
@@ -413,6 +705,12 @@ private:
   std::vector<T> m_points_reordered;  ///< Points in tree-build order; row @c k is
                                       ///< @c m_points[m_indices[k]]. Makes each leaf's
                                       ///< coordinates a contiguous @c count x d block.
+  /// Monotonic node identifier assigned at @ref build; equals the final node count once the
+  /// tree is fully constructed. Keys into @ref m_nodeBounds.
+  std::uint32_t m_nextNodeId = 0;
+  /// Flat per-node bounds buffer; row @c 2*id holds min-coords, row @c 2*id + 1 holds max-
+  /// coords, each of length @c m_dim. Populated by @ref populateBounds after the tree is built.
+  std::vector<T> m_nodeBounds;
 };
 
 } // namespace clustering
