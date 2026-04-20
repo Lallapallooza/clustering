@@ -62,10 +62,29 @@ public:
     }
 
     const T radiusSq = radius * radius;
+    // Symmetric eps-neighbour graph: the kernel emits each unique upper-triangular cell once
+    // with @c row <= col. The kernel-side emit only touches @c adj[row] so workers writing
+    // disjoint row chunks remain race-free; the mirror push (@c adj[col].push(row)) runs as a
+    // single-threaded post-pass below. Halves the pairwise compute on the brute-force path.
     auto emit = [&adj](std::size_t row, std::size_t col) {
       adj[row].push_back(static_cast<std::int32_t>(col));
     };
-    math::pairwiseSqEuclideanThresholded(m_points, m_points, radiusSq, pool, emit);
+    math::pairwiseSqEuclideanThresholdedSymmetric(m_points, radiusSq, pool, emit);
+
+    // Mirror pass: each surviving upper-triangular pair @c (i, j) lives in @c adj[i]; push
+    // @c i to @c adj[j] sequentially so the parallel sweep above never crosses worker
+    // boundaries. The size snapshot stops the loop from walking the freshly-mirrored entries
+    // when the next outer @c i lands on a row that earlier iterations already augmented.
+    for (std::size_t i = 0; i < n; ++i) {
+      const std::size_t origSize = adj[i].size();
+      for (std::size_t k = 0; k < origSize; ++k) {
+        const auto jSigned = adj[i][k];
+        const auto j = static_cast<std::size_t>(jSigned);
+        if (j > i) {
+          adj[j].push_back(static_cast<std::int32_t>(i));
+        }
+      }
+    }
     return adj;
   }
 
