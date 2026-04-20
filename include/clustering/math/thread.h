@@ -3,8 +3,50 @@
 #include <BS_thread_pool.hpp>
 #include <cstddef>
 #include <optional>
+#include <thread>
 
 namespace clustering::math {
+
+/**
+ * @brief Clamp a caller-supplied @p nJobs to a valid @c BS::light_thread_pool worker count.
+ *
+ * Algorithm wrappers (@c KMeans, @c DBSCAN) accept @c nJobs via the scikit-learn convention:
+ * @c 0 means "use hardware concurrency." @c std::thread::hardware_concurrency() can itself
+ * return @c 0 on exotic targets; this helper promotes that to @c 1 so the pool-worker count
+ * is always valid.
+ *
+ * @param nJobs Caller-supplied worker count; @c 0 means "match hardware concurrency."
+ * @return Non-zero worker count suitable for constructing a @c BS::light_thread_pool.
+ */
+inline std::size_t clampedJobCount(std::size_t nJobs) noexcept {
+  if (nJobs == 0) {
+    const std::size_t hw = std::thread::hardware_concurrency();
+    return hw == 0 ? std::size_t{1} : hw;
+  }
+  return nJobs;
+}
+
+/**
+ * @brief Decide whether spawning a pool with @p nJobs workers is worth it for @p totalOps
+ *        of arithmetic work.
+ *
+ * Complements @c Pool::shouldParallelizeWork: that method gates fan-out once a pool is
+ * already attached, whereas this free helper decides whether to pay the one-time thread-spawn
+ * cost at all. Returning @c false at small shapes lets the algorithm wrappers skip tens of
+ * microseconds of pthread-create traffic a fully-serial fit would never amortize.
+ *
+ * @param totalOps         Approximate total arithmetic operation count across all workers.
+ * @param nJobs            Target worker count (see @ref clampedJobCount for the clamp rule).
+ * @param minOpsPerWorker  Minimum per-worker op budget that amortizes dispatch overhead.
+ * @return @c true when the pool should be spawned, @c false when serial-only pays.
+ */
+inline bool shouldSpawnPool(std::size_t totalOps, std::size_t nJobs,
+                            std::size_t minOpsPerWorker = std::size_t{1} << 15) noexcept {
+  if (nJobs <= 1) {
+    return false;
+  }
+  return (totalOps / nJobs) >= minOpsPerWorker;
+}
 
 /**
  * @brief Thin injection wrapper around a @c BS::light_thread_pool.

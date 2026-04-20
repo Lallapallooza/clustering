@@ -2,7 +2,6 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
-#include <vector>
 
 #include "clustering/dbscan.h"
 
@@ -72,8 +71,8 @@ int main(int argc, char *argv[]) try {
   std::cout << "Start!\n";
 
   const std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
-  DBSCAN<float> dbscan(points, eps, minPts, n_jobs);
-  dbscan.run();
+  DBSCAN<float> dbscan(eps, minPts, n_jobs);
+  dbscan.run(points);
   const std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
 
   std::cout << "Elapsed = "
@@ -83,7 +82,7 @@ int main(int argc, char *argv[]) try {
             << "\n";
 
   const auto &labels = dbscan.labels();
-  std::cout << "labels size: " << labels.size() << "\n";
+  std::cout << "labels size: " << labels.dim(0) << "\n";
   std::cout << "nClusters: " << dbscan.nClusters() << "\n";
 
   std::ofstream out(outputFile);
@@ -92,8 +91,8 @@ int main(int argc, char *argv[]) try {
     return 1;
   }
 
-  for (const auto &i : labels) {
-    out << i << "\n";
+  for (std::size_t i = 0; i < labels.dim(0); ++i) {
+    out << labels.flatIndex(i) << "\n";
   }
 
   return 0;

@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <thread>
 #include <type_traits>
 
 #include "clustering/always_assert.h"
@@ -51,8 +50,8 @@ public:
    *              to @c std::thread::hardware_concurrency() so the pool is always usable by the
    *              @ref math::Pool helpers.
    */
-  explicit KMeans(std::size_t k, std::size_t nJobs = std::thread::hardware_concurrency())
-      : m_k(k), m_nJobs(clampedJobCount(nJobs)), m_centroids({0, 0}), m_labels({0}) {
+  explicit KMeans(std::size_t k, std::size_t nJobs = 0)
+      : m_k(k), m_nJobs(math::clampedJobCount(nJobs)), m_centroids({0, 0}), m_labels({0}) {
     CLUSTERING_ALWAYS_ASSERT(k >= 1);
     // Defer pool construction to @ref run: at small shapes every hot phase gates serial, and
     // spawning nJobs workers in the ctor burns tens of microseconds of thread-create futex
@@ -97,7 +96,7 @@ public:
       return;
     }
 
-    if (m_nJobs > 1 && !m_pool.has_value() && shouldSpawnPoolForShape(n, d)) {
+    if (!m_pool.has_value() && math::shouldSpawnPool(n * d * m_k, m_nJobs)) {
       m_pool.emplace(m_nJobs);
     }
     const math::Pool pool{m_pool.has_value() ? &*m_pool : nullptr};
@@ -130,14 +129,6 @@ public:
   }
 
 private:
-  static std::size_t clampedJobCount(std::size_t nJobs) noexcept {
-    if (nJobs == 0) {
-      const std::size_t hw = std::thread::hardware_concurrency();
-      return hw == 0 ? std::size_t{1} : hw;
-    }
-    return nJobs;
-  }
-
   void ensureOutputShape(std::size_t n, std::size_t d) {
     if (m_centroids.dim(0) != m_k || m_centroids.dim(1) != d) {
       m_centroids = NDArray<T, 2, Layout::Contig>({m_k, d});
@@ -145,16 +136,6 @@ private:
     if (m_labels.dim(0) != n) {
       m_labels = NDArray<std::int32_t, 1>({n});
     }
-  }
-
-  /// Conservatively predict whether any hot phase of this fit would clear its parallel gate.
-  /// Mirrors the most permissive per-phase work threshold (argmin's @c n * d * k against the
-  /// shared @c shouldParallelizeWork floor). When it returns @c false the pool is unused, so we
-  /// skip the tens-of-microseconds thread-spawn cost for small-shape fits.
-  [[nodiscard]] bool shouldSpawnPoolForShape(std::size_t n, std::size_t d) const noexcept {
-    constexpr std::size_t kMinOpsPerWorker = std::size_t{1} << 15;
-    const std::size_t totalOps = n * d * m_k;
-    return (totalOps / m_nJobs) >= kMinOpsPerWorker;
   }
 
   std::size_t m_k;
