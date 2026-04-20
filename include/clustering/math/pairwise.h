@@ -556,4 +556,73 @@ void pairwiseSqEuclideanThresholded(const NDArray<T, 2, LX> &X, const NDArray<T,
   detail::pairwiseSqEuclideanThresholdedMaterialized(X, Y, radiusSq, pool, emit);
 }
 
+/**
+ * @brief Symmetric variant of @ref pairwiseSqEuclideanThresholded for the @c X == Y case.
+ *
+ * Adjacency over a single point cloud is symmetric: @c ||x_i - x_j||^2 = @c ||x_j - x_i||^2,
+ * so half the @c (i, j) pairs the general entry would compute are mirrors of the other half.
+ * This entry skips the lower-triangular work entirely and invokes @p emit exactly once per
+ * surviving upper-triangular cell, with @c row <= col always. The caller is responsible for
+ * any mirror push (typically @c adj[row].push(col) plus @c adj[col].push(row) when
+ * @c row != col), which keeps the kernel agnostic to the consumer's adjacency layout.
+ *
+ * Falls back to a scalar materialised path that walks only @c j >= i when the AVX2 fast path
+ * is ineligible (wrong type, strided view, tiny @c d, AVX2 off).
+ *
+ * @tparam T    Element type (@c float or @c double).
+ * @tparam LX   Layout tag of @p X.
+ * @tparam Emit @c std::invocable<std::size_t, std::size_t> callable.
+ * @param X        Point matrix (n x d).
+ * @param radiusSq Non-negative squared radius; interpreted as @c r*r.
+ * @param pool     Parallelism injection forwarded to the selected path.
+ * @param emit     Callback invoked once per upper-triangular surviving @c (row, col) with
+ *                 @c row <= col; the caller mirrors as needed.
+ */
+template <class T, Layout LX = Layout::Contig, class Emit>
+  requires std::invocable<Emit &, std::size_t, std::size_t>
+void pairwiseSqEuclideanThresholdedSymmetric(const NDArray<T, 2, LX> &X, T radiusSq, Pool pool,
+                                             Emit &&emit) {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "pairwiseSqEuclideanThresholdedSymmetric<T> requires T to be float or double");
+
+  const std::size_t n = X.dim(0);
+  if (n == 0) {
+    return;
+  }
+
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float> && LX == Layout::Contig) {
+    if (detail::canUseFusedThreshold(X, X)) {
+      NDArray<T, 1> xNorms({n});
+      detail::rowNormsSq(X, xNorms, pool);
+      detail::pairwiseThresholdOuterAvx2F32Symmetric(X, xNorms, radiusSq, pool, emit);
+      return;
+    }
+  }
+#endif
+
+  // Scalar fallback: walk only j >= i and forward each surviving upper-triangular cell to the
+  // caller. Mirrors the @c pairwiseSqEuclideanThresholdedMaterialized contract for the
+  // non-symmetric case; the caller's emit is responsible for any adj-side mirror push.
+  auto runRowRange = [&](std::size_t lo, std::size_t hi) {
+    for (std::size_t i = lo; i < hi; ++i) {
+      for (std::size_t j = i; j < n; ++j) {
+        const T distSq = detail::sqEuclideanRow<T, LX, LX>(X, i, X, j);
+        if (distSq <= radiusSq) {
+          emit(i, j);
+        }
+      }
+    }
+  };
+
+  if (pool.shouldParallelize(n * n / 2, 64, 2) && pool.pool != nullptr) {
+    pool.pool
+        ->submit_blocks(std::size_t{0}, n,
+                        [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
+        .wait();
+  } else {
+    runRowRange(0, n);
+  }
+}
+
 } // namespace clustering::math

@@ -213,6 +213,169 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
   }
 }
 
+/**
+ * @brief Symmetric AVX2 f32 specialization of the fused threshold outer driver.
+ *
+ * Symmetric counterpart to @ref pairwiseThresholdOuterAvx2F32 for the @c X == @c Y case (the
+ * eps-neighbour graph DBSCAN consumes is symmetric, so half the pairs are mirrors of the other
+ * half). Iterates the chunk / M-tile / panel nest as the non-symmetric driver but skips every
+ * M-tile / panel pair that lies strictly below the diagonal: tile @c (iBase, jBase) is
+ * processed iff @c jBase + kNr > iBase, which collapses tile count from @c n*m / (Mr*Nr) to
+ * roughly half. Diagonal-straddling tiles are processed in full and the @p emit wrapper handles
+ * the per-cell @c (row > col) skip.
+ *
+ * @p emit is invoked once per surviving cell with @c (row, col) where @c row <= col always; the
+ * caller is responsible for any mirror push (@c adj[row].push(col) plus @c adj[col].push(row)
+ * when @c row != col) so this driver can stay agnostic to the consumer's adjacency layout.
+ *
+ * @tparam Emit @c std::invocable<std::size_t, std::size_t> callable.
+ * @param X           Data matrix (n x d), contiguous, 32-byte aligned.
+ * @param xRowNormsSq Row-1 array of @c ||x_i||^2, length n.
+ * @param radiusSq    Non-negative squared radius.
+ * @param pool        Parallelism injection; fans out over row chunks when @c shouldParallelize.
+ * @param emit        Callback invoked for each surviving @c (row, col) pair with @c row <= col.
+ */
+template <class Emit>
+inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layout::Contig> &X,
+                                                   const NDArray<float, 1> &xRowNormsSq,
+                                                   float radiusSq, Pool pool, Emit &&emit) {
+  constexpr std::size_t kMr = kKernelMr<float>;
+  constexpr std::size_t kNr = kKernelNr<float>;
+
+  const std::size_t n = X.dim(0);
+  const std::size_t d = X.dim(1);
+
+  if (n == 0) {
+    return;
+  }
+
+  CLUSTERING_ALWAYS_ASSERT(d <= kThresholdMaxD);
+
+  const std::size_t nPanels = (n + kNr - 1) / kNr;
+  const std::size_t bpanelSize = kNr * d;
+  const std::size_t bpackSize = nPanels * bpanelSize;
+  const std::size_t yNormsPaddedSize = nPanels * kNr;
+
+  std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> bpackedStorage(bpackSize);
+  std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> yNormsPackedStorage(
+      yNormsPaddedSize);
+
+  const auto yTransposed = X.t();
+  const auto yDesc = ::clustering::detail::describeMatrix(yTransposed);
+  for (std::size_t p = 0; p < nPanels; ++p) {
+    const std::size_t jBase = p * kNr;
+    const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
+    float *panelOut = bpackedStorage.data() + (p * bpanelSize);
+    packB<float>(yDesc, 0, d, jBase, nc, panelOut);
+  }
+  packYColNormsSq<float>(xRowNormsSq.data(), n, yNormsPackedStorage.data());
+
+  const std::size_t chunkCount = (n + kThresholdChunkRows - 1) / kThresholdChunkRows;
+
+  auto runOneChunk = [&](std::size_t chunkIdx) {
+    const std::size_t iChunkBase = chunkIdx * kThresholdChunkRows;
+    const std::size_t chunkRows =
+        (iChunkBase + kThresholdChunkRows <= n) ? kThresholdChunkRows : (n - iChunkBase);
+    const std::size_t mTilesInChunk = (chunkRows + kMr - 1) / kMr;
+
+    const auto xDesc = ::clustering::detail::describeMatrix(X);
+
+    alignas(32) std::array<float, kThresholdChunkRows * kThresholdMaxD> apPacked;
+    alignas(32) std::array<float, kThresholdChunkRows> xNormsPacked;
+    for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
+      const std::size_t iBase = iChunkBase + (tileIdx * kMr);
+      const std::size_t mc =
+          (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
+      float *tileSlot = apPacked.data() + (tileIdx * kMr * d);
+      packA<float>(xDesc, iBase, mc, 0, d, tileSlot);
+      for (std::size_t r = 0; r < mc; ++r) {
+        xNormsPacked[(tileIdx * kMr) + r] = xRowNormsSq(iBase + r);
+      }
+      for (std::size_t r = mc; r < kMr; ++r) {
+        xNormsPacked[(tileIdx * kMr) + r] = 0.0F;
+      }
+    }
+
+    for (std::size_t panelBase = 0; panelBase < nPanels; panelBase += kThresholdPanelGroup) {
+      const std::size_t panelEnd = std::min(panelBase + kThresholdPanelGroup, nPanels);
+      for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
+        const std::size_t iBase = iChunkBase + (tileIdx * kMr);
+        const std::size_t mc =
+            (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
+        const float *tileA = apPacked.data() + (tileIdx * kMr * d);
+        const float *tileNorms = xNormsPacked.data() + (tileIdx * kMr);
+
+        // Strictly-below-diagonal panels (entire panel column-range ends at or before the
+        // tile's first row) carry no information the upper-half traversal will not already
+        // cover. The earliest panel that can carry an upper-half cell is @c iBase / kNr: panel
+        // @c p covers cols @c [p*kNr, p*kNr + kNr), so we need @c (p+1)*kNr > iBase, i.e.,
+        // @c p >= iBase / kNr (integer divide). This is the @c symmetric prune.
+        const std::size_t pSkip = iBase / kNr;
+        const std::size_t pStart = (panelBase > pSkip) ? panelBase : pSkip;
+        if (pStart >= panelEnd) {
+          continue;
+        }
+
+        // Strictly-upper panels start where the panel's first column is past the tile's last
+        // row, i.e. @c jBase >= iBase + mc, equivalently @c p >= ceil((iBase + mc) / kNr).
+        // For panels in @c [pStart, pStrictUpper) at least one in-tile cell has @c row > col
+        // (the diagonal-straddling band), so the kernel may emit cells the symmetric mirror
+        // already covered. Wrap @p emit with a @c row <= col filter for those tiles. Strictly
+        // upper panels skip the filter entirely -- the per-cell branch only matters in the
+        // narrow diagonal band, so the ordinary case stays at zero overhead.
+        const std::size_t pStrictUpper = (iBase + mc + kNr - 1) / kNr;
+
+        auto filteredEmit = [&emit](std::size_t row, std::size_t col) {
+          if (row <= col) {
+            emit(row, col);
+          }
+        };
+
+        // pDiagEnd may fall below pStart when the entire panel group sits strictly above the
+        // diagonal -- the M-tile's diagonal-straddling band ended in an earlier group. Clamp
+        // both loops to start at pStart so we never traverse pruned panels.
+        const std::size_t pDiagEnd = std::clamp(pStrictUpper, pStart, panelEnd);
+        for (std::size_t p = pStart; p < pDiagEnd; ++p) {
+          const std::size_t jBase = p * kNr;
+          const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
+          const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
+          const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
+          gemmKernel8x6Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
+                                        nc, radiusSq, filteredEmit);
+        }
+        for (std::size_t p = pDiagEnd; p < panelEnd; ++p) {
+          const std::size_t jBase = p * kNr;
+          const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
+          const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
+          const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
+          gemmKernel8x6Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
+                                        nc, radiusSq, emit);
+        }
+      }
+    }
+  };
+
+  // Symmetric prune halves the per-chunk tile count on average, but distribution across chunks
+  // is heavily front-loaded (chunk 0 still processes ~all panels per M-tile; chunk N-1 processes
+  // only the diagonal band). Use the same pool gate as the non-symmetric driver; rely on
+  // @c BS::thread_pool's block submission to slice chunks evenly. Worker imbalance at high
+  // @c n_jobs is a follow-up; the @c n_jobs=1 path this targets is unaffected.
+  if (pool.shouldParallelize(n * n / 2, 64, 2) && pool.pool != nullptr) {
+    pool.pool
+        ->submit_blocks(std::size_t{0}, chunkCount,
+                        [&](std::size_t lo, std::size_t hi) {
+                          for (std::size_t c = lo; c < hi; ++c) {
+                            runOneChunk(c);
+                          }
+                        })
+        .wait();
+  } else {
+    for (std::size_t c = 0; c < chunkCount; ++c) {
+      runOneChunk(c);
+    }
+  }
+}
+
 #endif // CLUSTERING_USE_AVX2
 
 } // namespace clustering::math::detail
