@@ -305,6 +305,35 @@ public:
     return {std::span<const T>(bounds, m_dim), std::span<const T>(bounds + m_dim, m_dim)};
   }
 
+  /**
+   * @brief Permutation from reordered-slot index to original point index.
+   *
+   * Element @c k is the original row index of the point stored at reordered slot @c k. A leaf
+   * with @c m_index = base and @c m_dim = count owns slots @c [base, base + count); its
+   * original indices are @c permutation[base .. base + count - 1]. Stable for the tree's
+   * lifetime; pointer invalidation follows the tree's move and destruction.
+   *
+   * @return Length- @c N span over the permutation buffer.
+   */
+  [[nodiscard]] std::span<const std::size_t> indexPermutation() const noexcept {
+    return {m_indices.data(), m_indices.size()};
+  }
+
+  /**
+   * @brief Points in reordered (tree-build) order as a flat row-major buffer.
+   *
+   * The element at flat offset @c (slot * d + j) is the @c j-th coordinate of the point stored
+   * at reordered slot @c slot; this equals @c originalPoints(permutation[slot], j). Consumers
+   * that already have a @c KDTreeNode in hand can index through this buffer contiguously rather
+   * than chasing the permutation; leaf ranges are therefore a @c count x d block of neighbouring
+   * cache lines with no scatter on the leaf scan.
+   *
+   * @return Length- @c N*d span over the reordered-points buffer.
+   */
+  [[nodiscard]] std::span<const T> reorderedPoints() const noexcept {
+    return {m_points_reordered.data(), m_points_reordered.size()};
+  }
+
   /// Root of the tree; @c nullptr for an empty point set.
   [[nodiscard]] const KDTreeNode *root() const noexcept { return m_root; }
 

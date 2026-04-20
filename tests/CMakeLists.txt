@@ -28,6 +28,7 @@ add_executable(
     gemm_threading_test.cpp
     hdbscan_test.cpp
     hdbscan_prim_mst_test.cpp
+    hdbscan_boruvka_mst_test.cpp
     nn_descent_test.cpp
     kmeans_lloyd_test.cpp
     kmeans_seeder_dispatch_test.cpp
