@@ -129,6 +129,16 @@ TEST(HdbscanReset, RestoresEmptyState) {
   EXPECT_TRUE(h.condensedTree().empty());
 }
 
+TEST(HdbscanReset, DefaultAutoBackendCompilesAndResets) {
+  // Pins the default-path reset compilation. The variant-held NnDescent backend's
+  // move-assignability is required for HDBSCAN::reset to build under the default
+  // MstBackend = AutoMstBackend<T>. Without this test, the default path can
+  // regress silently as CI never compiles it.
+  clustering::HDBSCAN<float> h(3);
+  h.reset();
+  EXPECT_EQ(h.nClusters(), 0u);
+}
+
 // ---------------------------------------------------------------------------
 // Fit-entry preconditions: every precondition fires the always-assert before any work begins.
 // ---------------------------------------------------------------------------

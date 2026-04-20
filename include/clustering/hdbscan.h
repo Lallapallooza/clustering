@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -20,7 +19,9 @@
 #include "clustering/hdbscan/detail/glosh.h"
 #include "clustering/hdbscan/detail/leaf_extract.h"
 #include "clustering/hdbscan/detail/single_linkage.h"
+#include "clustering/hdbscan/mst_backend.h"
 #include "clustering/hdbscan/mst_output.h"
+#include "clustering/hdbscan/policy/auto_mst_backend.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
@@ -38,25 +39,6 @@ enum class ClusterSelectionMethod : std::uint8_t {
   kLeaf, ///< Leaf-cluster selection; every condensed-tree leaf becomes a cluster.
 };
 
-/**
- * @brief Contract for an MST backend satisfying the frozen @ref MstOutput shape.
- *
- * A backend is default-constructible and exposes a single @c run entry point that consumes the
- * input dataset, the @c minSamples parameter, and a worker-pool handle, and writes its result
- * into a caller-provided @ref MstOutput. Backends own their private scratch and may amortize
- * shape-indexed buffers across calls; per the HDBSCAN class invariant, data-dependent indices
- * (KDTree, kNN graph) are rebuilt per fit.
- *
- * @tparam B Candidate backend type.
- * @tparam T Element type of the point cloud.
- */
-template <class B, class T>
-concept MstBackendStrategy = std::default_initializable<B> &&
-                             requires(B &backend, const NDArray<T, 2> &X, std::size_t minSamples,
-                                      math::Pool pool, MstOutput<T> &out) {
-                               { backend.run(X, minSamples, pool, out) };
-                             };
-
 } // namespace clustering::hdbscan
 
 namespace clustering {
@@ -67,8 +49,10 @@ namespace clustering {
  * HDBSCAN* extends DBSCAN with a hierarchical condensation step that auto-selects density
  * thresholds, produces per-cluster stability, and yields GLOSH outlier scores as a byproduct.
  * The MST boundary is the only template axis; everything downstream (condensed tree, cluster
- * extraction, outlier scoring) is monomorphic. Callers pin a specific backend via @p MstBackend
- * to control the time / memory / approximation trade-off.
+ * extraction, outlier scoring) is monomorphic. The default @p MstBackend is
+ * @ref hdbscan::AutoMstBackend, which dispatches between Prim, Boruvka, and NN-Descent on the
+ * input shape; callers who want to pin a specific backend may supply it as the second template
+ * argument.
  *
  * @note @c HDBSCAN does NOT own @p X. The caller must keep the @c NDArray alive for the duration
  *       of every @ref run call. Data-dependent indices (KDTree, kNN graph) are rebuilt on every
@@ -83,10 +67,11 @@ namespace clustering {
  *
  * @tparam T          Element type. Only @c float is supported in this class; a @c double
  *                    specialization is out of scope.
- * @tparam MstBackend Backend satisfying @ref hdbscan::MstBackendStrategy. Must be pinned
- *                    explicitly by the caller.
+ * @tparam MstBackend Backend satisfying @ref hdbscan::MstBackendStrategy. Defaults to
+ *                    @ref hdbscan::AutoMstBackend which picks Prim, Boruvka, or NN-Descent on
+ *                    input shape.
  */
-template <class T, class MstBackend>
+template <class T, class MstBackend = hdbscan::AutoMstBackend<T>>
   requires hdbscan::MstBackendStrategy<MstBackend, T>
 class HDBSCAN {
   static_assert(std::is_same_v<T, float>,
