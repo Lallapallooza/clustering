@@ -355,19 +355,13 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
     }
   };
 
-  // Symmetric prune halves the per-chunk tile count on average, but distribution across chunks
-  // is heavily front-loaded (chunk 0 still processes ~all panels per M-tile; chunk N-1 processes
-  // only the diagonal band). Use the same pool gate as the non-symmetric driver; rely on
-  // @c BS::thread_pool's block submission to slice chunks evenly. Worker imbalance at high
-  // @c n_jobs is a follow-up; the @c n_jobs=1 path this targets is unaffected.
+  // Symmetric prune leaves per-chunk work linearly front-loaded (chunk 0 processes ~all panels
+  // per M-tile; the last chunk processes only the diagonal band). Contiguous-block partitioning
+  // would hand worker 0 an ~nWorkers-fold larger slice than the last worker. Submit one task per
+  // chunk so the pool's queue naturally work-steals the triangle -- worker imbalance collapses
+  // to the chunk-granularity floor.
   if (pool.shouldParallelize(n * n / 2, 64, 2) && pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, chunkCount,
-                        [&](std::size_t lo, std::size_t hi) {
-                          for (std::size_t c = lo; c < hi; ++c) {
-                            runOneChunk(c);
-                          }
-                        })
+    pool.pool->submit_sequence(std::size_t{0}, chunkCount, [&](std::size_t c) { runOneChunk(c); })
         .wait();
   } else {
     for (std::size_t c = 0; c < chunkCount; ++c) {
