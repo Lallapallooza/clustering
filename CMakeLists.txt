@@ -107,6 +107,15 @@ if(CLUSTERING_BUILD_BENCHMARK)
     )
     clustering_enable_tidy(kmeans_benchmark)
 
+    add_executable(dbscan_benchmark benchmark/dbscan_benchmark.cpp)
+    target_link_libraries(
+        dbscan_benchmark
+        benchmark::benchmark
+        clustering_header_lib
+        clustering_warnings
+    )
+    clustering_enable_tidy(dbscan_benchmark)
+
     # OpenBLAS is optional: when available the benchmark adds a comparative
     # cblas_sgemm fixture next to ours. pkg-config reliably reports the include
     # dir on every distro that ships openblas.pc (Nix, Debian, Arch, Homebrew),

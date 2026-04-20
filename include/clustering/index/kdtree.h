@@ -4,11 +4,13 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <numeric>
-#include <stack>
 #include <vector>
 
-#include "clustering/math/distance.h"
+#include "clustering/always_assert.h"
+#include "clustering/math/detail/avx2_helpers.h"
+#include "clustering/math/detail/radius_scan.h"
 #include "clustering/math/thread.h"
 #include "clustering/memory/linear_alloc.h"
 #include "clustering/ndarray.h"
@@ -16,25 +18,39 @@
 namespace clustering {
 
 /**
- * @brief Represents a node in a KDTree.
+ * @brief Node in a @ref KDTree, sharing the same struct shape between internals and leaves.
  *
- * @details
- * KDTreeNode contains essential information about a node in a KDTree.
- * For internal nodes: m_index is the point index, m_dim is the split dimension,
- * and m_left/m_right point to children.
- * For leaf nodes: m_index is the start offset into the shared indices array,
- * m_dim is the count of points in the leaf, and m_left/m_right are both nullptr.
- * A node is a leaf when m_left == nullptr && m_right == nullptr.
- * This struct is separate from the KDTree class to facilitate usage in different allocators.
+ * Internal node: @c m_index is the pivot's slot in the owning tree's reordered point buffer,
+ * @c m_dim is the split dimension, and @c m_left / @c m_right point to children.
+ *
+ * Leaf node: @c m_index is the start offset into the same reordered buffer, @c m_dim is the
+ * count of points packed at that offset, and @c m_left == @c m_right == @c nullptr.
+ *
+ * The leaf-vs-internal test is @c m_left == nullptr && m_right == nullptr. The struct is
+ * declared outside @ref KDTree so the allocator can bump-allocate fixed-size slots without
+ * seeing the tree's template parameters.
  */
 struct KDTreeNode {
-  std::size_t m_index; ///< For internal: point index. For leaf: offset into m_indices.
-  std::size_t m_dim;   ///< For internal: split dimension. For leaf: count of points.
-  KDTreeNode *m_left;  ///< Pointer to the left child (nullptr for leaf nodes)
-  KDTreeNode *m_right; ///< Pointer to the right child (nullptr for leaf nodes)
+  /// Internal: pivot slot in the tree's reordered point buffer. Leaf: base offset into the
+  /// same buffer (leaf points live at slots @c [m_index, m_index + m_dim)).
+  std::size_t m_index;
+  /// Internal: split dimension. Leaf: point count packed at @c m_index.
+  std::size_t m_dim;
+  /// Left child, or @c nullptr on a leaf.
+  KDTreeNode *m_left;
+  /// Right child, or @c nullptr on a leaf.
+  KDTreeNode *m_right;
 };
 
-enum class KDTreeDistanceType : std::uint8_t { kEucledian };
+/**
+ * @brief Distance metric a @ref KDTree builds pruning bounds under.
+ *
+ * Additional flavours (Manhattan, Cosine, etc.) would extend this enum and dispatch new
+ * overloads of the pivot-to-child inequality used during pruning.
+ */
+enum class KDTreeDistanceType : std::uint8_t {
+  kEucledian ///< Squared Euclidean; radii and comparisons run on squared distances.
+};
 
 /**
  * @brief Implements a KDTree data structure.
@@ -65,7 +81,7 @@ template <class T, KDTreeDistanceType distanceType = KDTreeDistanceType::kEucled
           std::size_t LeafSize = 16, class AllocT = LinearAllocator<KDTreeNode>>
 class KDTree {
 public:
-  using value_type = T; ///< value_type is the type of the points in the KDTree
+  using value_type = T; ///< Element type of the indexed point cloud.
 
   /**
    * @brief Constructs a KDTree using a given set of points.
@@ -80,10 +96,28 @@ public:
    * manage the array's lifecycle.
    */
   KDTree(const NDArray<T, 2> &points)
-      : m_allocator(calculatePoolSize(points.dim(0))), m_points(points) {
-    m_indices.resize(points.dim(0));
+      : m_allocator(calculatePoolSize(points.dim(0))), m_points(points), m_dim(points.dim(1)) {
+    CLUSTERING_ALWAYS_ASSERT(points.isContiguous());
+    const std::size_t n = points.dim(0);
+    m_indices.resize(n);
     std::iota(m_indices.begin(), m_indices.end(), 0);
-    m_root = build(0, m_indices.size(), 0);
+    m_root = build(0, n, 0);
+    // Materialize points in tree-build order. After @ref build rewrites @c m_indices into a
+    // permutation matching the tree layout, a leaf's points live at @c m_points_reordered slots
+    // @c [leaf.m_index, leaf.m_index + leaf.m_dim). Contiguous access there replaces the
+    // scatter-indirection @c m_points[m_indices[k]] had, which at low d was the cache-miss
+    // ceiling: every leaf-brute-force iteration landed on a random row of @c m_points.
+    m_points_reordered.resize(n * m_dim);
+    const T *src = points.data();
+    T *dst = m_points_reordered.data();
+    for (std::size_t k = 0; k < n; ++k) {
+      const std::size_t src_row = m_indices[k];
+      const T *s = src + (src_row * m_dim);
+      T *d = dst + (k * m_dim);
+      for (std::size_t j = 0; j < m_dim; ++j) {
+        d[j] = s[j];
+      }
+    }
   }
 
   /**
@@ -102,7 +136,15 @@ public:
                                  std::int64_t limit = -1) const {
     std::vector<std::size_t> indices;
     const T radius_sq = radius * radius;
-    query(m_root, query_point, radius_sq, indices, limit);
+    std::vector<KDTreeNode *> stack;
+    stack.reserve(kDefaultStackReserve);
+    // Copy the borrowed row into a scratch buffer so the core walker can assume a contiguous
+    // `d`-element block regardless of the source layout. The copy is d stores -- free at d=2.
+    std::vector<T> qbuf(m_dim);
+    for (std::size_t k = 0; k < m_dim; ++k) {
+      qbuf[k] = query_point[k];
+    }
+    queryImpl(m_root, qbuf.data(), radius_sq, indices, stack, limit);
     return indices;
   }
 
@@ -125,22 +167,19 @@ public:
       return adj;
     }
 
-    const std::size_t d = m_points.dim(1);
     const T radius_sq = radius * radius;
 
     auto runRange = [&](std::size_t lo, std::size_t hi) {
-      NDArray<T, 1> q({d});
-      std::vector<std::size_t> hits;
+      // Reuse the traversal stack across every query in this chunk. Tree depth stays below
+      // log2(n / LeafSize) + a few for spilled internal pushes, so kDefaultStackReserve rarely
+      // grows past its initial capacity; clearing keeps the allocation alive between queries.
+      std::vector<KDTreeNode *> stack;
+      stack.reserve(kDefaultStackReserve);
+      const T *sourceData = m_points.data();
       for (std::size_t i = lo; i < hi; ++i) {
-        for (std::size_t k = 0; k < d; ++k) {
-          q[k] = m_points[i][k];
-        }
-        hits.clear();
-        query(m_root, q, radius_sq, hits, /*limit=*/-1);
-        adj[i].reserve(hits.size());
-        for (const std::size_t h : hits) {
-          adj[i].push_back(static_cast<std::int32_t>(h));
-        }
+        // @p i iterates the source ordering; @c sourceData + i*m_dim is the caller's row.
+        const T *qp = sourceData + (i * m_dim);
+        queryImpl(m_root, qp, radius_sq, adj[i], stack, /*limit=*/-1);
       }
     };
 
@@ -250,7 +289,7 @@ private:
                      });
 
     KDTreeNode *node = m_allocator.allocate();
-    *node = {.m_index = m_indices[median],
+    *node = {.m_index = median, // reordered slot of the pivot
              .m_dim = dim,
              .m_left = build(start, median, depth + 1),
              .m_right = build(median + 1, end, depth + 1)};
@@ -259,28 +298,37 @@ private:
   }
 
   /**
-   * @brief Searches the KDTree for points within a specified radius of a query point.
+   * @brief Core iterative range-search driver.
    *
-   * This method implements an efficient search algorithm using a stack to manage traversal
-   * of the KDTree nodes. It checks each node's distance to the query point and accumulates
-   * the indices of points falling within the specified radius. The search is optimized by
-   * pruning branches of the tree that cannot contain points within the search radius.
+   * Takes a contiguous @c d-element query pointer and a caller-owned traversal stack so the
+   * adjacency sweep can amortize the stack buffer across every query in a chunk. @p indices is
+   * an output buffer of any integral type the caller wants labels in (rank-1 adjacency wants
+   * @c std::int32_t; the public one-shot wrapper wants @c std::size_t). @p limit preserves the
+   * behaviour of the historical overload: @c -1 emits everything, otherwise stop once the
+   * output reaches the cap.
    *
-   * @param root Root node of the KDTree or current node in recursive calls.
-   * @param query_point The point around which the search is performed.
-   * @param radius The radius within which to search for points.
-   * @param indices Vector to store the indices of points found within the search radius.
-   * @param limit Optional limit on the number of points to find. If -1, no limit is applied.
+   * @tparam OutIdx Integral type used to store hit indices. The cast from @c std::size_t is
+   *                explicit so downstream narrowing is localized here, not in callers.
+   *
+   * @param root      Root node of the subtree to search.
+   * @param qp        Pointer to the contiguous query point; size-@c m_dim.
+   * @param radius_sq Squared radius; comparisons are squared-distance.
+   * @param indices   Output vector of hit indices.
+   * @param stack     Caller-owned traversal scratch; cleared at the start of each call, reused
+   *                  across subsequent calls within a range chunk.
+   * @param limit     @c -1 for unbounded; otherwise stop once @c indices.size() reaches it.
    */
-  void query(KDTreeNode *root, const NDArray<T, 1> &query_point, T radius_sq,
-             std::vector<std::size_t> &indices, int64_t limit = -1) const {
+  template <class OutIdx>
+  void queryImpl(KDTreeNode *root, const T *qp, T radius_sq, std::vector<OutIdx> &indices,
+                 std::vector<KDTreeNode *> &stack, std::int64_t limit = -1) const {
     if (root == nullptr) {
       return;
     }
 
-    std::vector<KDTreeNode *> stack;
-    stack.reserve(256);
+    stack.clear();
     stack.push_back(root);
+
+    const T *reorderedBase = m_points_reordered.data();
 
     while (!stack.empty()) {
       const KDTreeNode *node = stack.back();
@@ -294,28 +342,44 @@ private:
         break;
       }
 
-      // Leaf node: brute-force all points in the range
+      // Leaf node: brute-force all points in the range. @c m_points_reordered lays points in
+      // tree-build order, so a leaf's entries are a contiguous @c count x d block -- one or
+      // two cache lines at small @c d. @ref math::detail::radiusScan dispatches into a SIMD
+      // kernel when @c d matches a batched width (today @c f32, @c d == 2) and otherwise
+      // falls back to the scalar @ref sqEuclideanRowPtr per-row primitive.
       if (node->m_left == nullptr && node->m_right == nullptr) {
-        for (std::size_t i = 0; i < node->m_dim; ++i) {
-          const std::size_t idx = m_indices[node->m_index + i];
-          T dist_sq = distanceSquared(query_point, idx);
-          if (dist_sq <= radius_sq) {
-            indices.push_back(idx);
+        const std::size_t base = node->m_index;
+        const std::size_t count = node->m_dim;
+        const T *leafPts = reorderedBase + (base * m_dim);
+        const bool isBounded = (limit != -1);
+        const std::size_t cap =
+            isBounded ? static_cast<std::size_t>(limit) : std::numeric_limits<std::size_t>::max();
+        math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, [&](std::size_t i) noexcept {
+          if (indices.size() >= cap) {
+            return;
           }
-          if (limit != -1 && indices.size() == static_cast<std::size_t>(limit)) {
-            break;
-          }
+          indices.push_back(static_cast<OutIdx>(m_indices[base + i]));
+        });
+        if (isBounded && indices.size() >= cap) {
+          break;
         }
         continue;
       }
 
-      // Internal node: check the split point and traverse children
-      T dist_sq = distanceSquared(query_point, node->m_index);
+      // Internal node: check the split point and traverse children. @c node->m_index is the
+      // pivot's slot in @c m_points_reordered, so the pivot's row lives at
+      // @c reorderedBase + slot * m_dim. The original point index (needed for @c indices)
+      // comes from @c m_indices[slot].
+      const std::size_t pivotSlot = node->m_index;
+      const std::size_t splitDim = node->m_dim;
+      const T *pivotRow = reorderedBase + (pivotSlot * m_dim);
+      const T dist_sq = math::detail::sqEuclideanRowPtr(qp, pivotRow, m_dim);
       if (dist_sq <= radius_sq) {
-        indices.push_back(node->m_index);
+        indices.push_back(static_cast<OutIdx>(m_indices[pivotSlot]));
       }
 
-      T diff = query_point[node->m_dim] - m_points[node->m_index][node->m_dim];
+      const T pivotCoord = pivotRow[splitDim];
+      const T diff = qp[splitDim] - pivotCoord;
       if (diff < 0) {
         if (node->m_left != nullptr) {
           stack.push_back(node->m_left);
@@ -334,29 +398,21 @@ private:
     }
   }
 
-  /**
-   * @brief Calculates the distance between a query point and a point in a KDTree.
-   *
-   * Routes through @c clustering::math::distance::pointwiseSq; the CPO's @c SqEuclideanTag
-   * overload owns the AVX2 / scalar dispatch, including the 8-lane floor and the 32-byte
-   * alignment check on both operands.
-   *
-   * @param query_point A reference to an NDArray representing the query point.
-   * @param index The index of the point in the KDTree to compare with the query point.
-   * @return The squared Euclidean distance between the query point and the specified point.
-   */
-  T distanceSquared(const NDArray<T, 1> &query_point, std::size_t index) const noexcept {
-    if constexpr (distanceType == KDTreeDistanceType::kEucledian) {
-      return math::distance::pointwiseSq(math::distance::SqEuclideanTag{}, query_point,
-                                         m_points.row(index));
-    }
-  }
+  /// Initial capacity for the per-chunk traversal stack. Tree depth stays below
+  /// @c log2(n / LeafSize) in the balanced case; 64 slots absorb the worst-case spillover
+  /// from unbalanced subtrees so the vector almost never grows past this reserve.
+  static constexpr std::size_t kDefaultStackReserve = 64;
 
-  AllocT m_allocator; ///< Allocator for the KDTree
+  AllocT m_allocator; ///< Bump-allocator for @ref KDTreeNode instances owned by the tree.
 
-  KDTreeNode *m_root = nullptr;       ///< Root of the KDTree
-  const NDArray<T, 2> &m_points;      ///< NDArray of points in the KDTree
-  std::vector<std::size_t> m_indices; ///< Shared index array for build
+  KDTreeNode *m_root = nullptr;       ///< Root of the tree; @c nullptr for an empty point set.
+  const NDArray<T, 2> &m_points;      ///< Borrowed view of the caller-owned point cloud.
+  std::size_t m_dim = 0;              ///< Cached dimension count (@c m_points.dim(1)).
+  std::vector<std::size_t> m_indices; ///< Permutation: @c m_indices[k] is the original point
+                                      ///< index of the point at reordered slot @c k.
+  std::vector<T> m_points_reordered;  ///< Points in tree-build order; row @c k is
+                                      ///< @c m_points[m_indices[k]]. Makes each leaf's
+                                      ///< coordinates a contiguous @c count x d block.
 };
 
 } // namespace clustering
