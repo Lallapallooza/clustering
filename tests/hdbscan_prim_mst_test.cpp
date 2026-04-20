@@ -8,7 +8,7 @@
 #include <random>
 #include <vector>
 
-#include "clustering/hdbscan.h"
+#include "clustering/hdbscan/mst_backend.h"
 #include "clustering/hdbscan/policy/prim_mst_backend.h"
 #include "clustering/math/dsu.h"
 #include "clustering/math/equality.h"

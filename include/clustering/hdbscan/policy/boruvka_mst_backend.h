@@ -9,8 +9,8 @@
 #include <vector>
 
 #include "clustering/always_assert.h"
-#include "clustering/hdbscan.h"
 #include "clustering/hdbscan/detail/boruvka_traversal.h"
+#include "clustering/hdbscan/mst_output.h"
 #include "clustering/index/kdtree.h"
 #include "clustering/math/dsu.h"
 #include "clustering/math/thread.h"

@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "clustering/always_assert.h"
-#include "clustering/hdbscan.h"
+#include "clustering/hdbscan/mst_output.h"
 #include "clustering/index/nn_descent.h"
 #include "clustering/math/dsu.h"
 #include "clustering/math/thread.h"

@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "clustering/always_assert.h"
-#include "clustering/hdbscan.h"
+#include "clustering/hdbscan/mst_output.h"
 #include "clustering/index/kdtree.h"
 #include "clustering/math/heap.h"
 #include "clustering/math/pairwise.h"
