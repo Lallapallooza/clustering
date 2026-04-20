@@ -27,6 +27,7 @@ add_executable(
     gemm_backend_dispatch_test.cpp
     gemm_threading_test.cpp
     hdbscan_test.cpp
+    hdbscan_glosh_test.cpp
     hdbscan_prim_mst_test.cpp
     hdbscan_boruvka_mst_test.cpp
     hdbscan_nn_descent_mst_test.cpp
