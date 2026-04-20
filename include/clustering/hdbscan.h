@@ -1,7 +1,9 @@
 #pragma once
 
 #include <BS_thread_pool.hpp>
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -9,9 +11,16 @@
 #include <optional>
 #include <span>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "clustering/always_assert.h"
+#include "clustering/hdbscan/detail/condensed_tree.h"
+#include "clustering/hdbscan/detail/eom_extract.h"
+#include "clustering/hdbscan/detail/glosh.h"
+#include "clustering/hdbscan/detail/leaf_extract.h"
+#include "clustering/hdbscan/detail/single_linkage.h"
+#include "clustering/hdbscan/mst_output.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
@@ -27,39 +36,6 @@ namespace clustering::hdbscan {
 enum class ClusterSelectionMethod : std::uint8_t {
   kEom,  ///< Excess-of-mass selection (the published default).
   kLeaf, ///< Leaf-cluster selection; every condensed-tree leaf becomes a cluster.
-};
-
-/**
- * @brief One edge of the minimum spanning tree of mutual-reachability distances.
- *
- * Endpoints are @c std::int32_t because the pipeline contract caps @c N at the signed 32-bit
- * range. The weight is the mutual-reachability distance between the two endpoints under the
- * configured @c minSamples.
- *
- * @tparam T Element type of the point cloud. Only @c float is supported; a @c double
- *         specialization is out of scope.
- */
-template <class T> struct MstEdge {
-  std::int32_t u = 0;
-  std::int32_t v = 0;
-  T weight = T{};
-};
-
-/**
- * @brief Frozen output contract of every MST backend.
- *
- * The MST boundary is the one axis of variation across backends; everything downstream
- * (single-linkage tree, condensed tree, cluster extraction, outlier scoring) is monomorphic and
- * reads from this shape. Fields default to well-defined empty values so a @c MstOutput produced
- * by the default constructor is already in a valid "no fit yet" state.
- *
- * @tparam T Element type of the point cloud.
- */
-template <class T> struct MstOutput {
-  /// The @c N - 1 MST edges, in insertion order.
-  std::vector<MstEdge<T>> edges;
-  /// Per-point core distance (length @c N; self-excluded kNN distance at @c minSamples).
-  NDArray<T, 1> coreDistances{std::array<std::size_t, 1>{0}};
 };
 
 /**
@@ -186,11 +162,75 @@ public:
     CLUSTERING_ALWAYS_ASSERT(n <=
                              static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()));
 
-    (void)m_backend;
-    (void)m_mstOutput;
-    (void)m_pool;
-    (void)m_method;
-    (void)m_nJobs;
+    // Lazy pool spawn: the MST backend is the only phase that can parallelise at all; post-MST is
+    // serial by contract. Size the work gate by the backend's dominant shape (N * N) so small
+    // inputs never pay the thread-create cost.
+    if (!m_pool.has_value() &&
+        math::shouldSpawnPool(n * n, m_nJobs, /*minOpsPerWorker=*/1U << 15)) {
+      m_pool.emplace(m_nJobs);
+    }
+    const math::Pool pool{m_pool.has_value() ? &*m_pool : nullptr};
+
+    // Phase 1: MST via the pinned backend. The backend writes edges and core distances into
+    // `m_mstOutput`.
+    m_backend.run(X, effectiveMinSamples, pool, m_mstOutput);
+
+    // Convert squared distances to linear distances before the post-MST pipeline consumes them.
+    // The backends store squared Euclidean internally (avoids an @c sqrt per pair-distance); the
+    // MST structure is invariant under @c d -> @c sqrt(d) (monotone) but the condensed-tree
+    // stability DP compares absolute lambda values whose outcome is not invariant under that
+    // transform. Linearising here aligns the lambda scale with the reference implementation and
+    // with outlier-score bounds users expect.
+    {
+      const std::size_t nCore = m_mstOutput.coreDistances.dim(0);
+      T *coreData = m_mstOutput.coreDistances.data();
+      for (std::size_t i = 0; i < nCore; ++i) {
+        coreData[i] = std::sqrt(coreData[i]);
+      }
+      for (auto &edge : m_mstOutput.edges) {
+        edge.weight = std::sqrt(edge.weight);
+      }
+    }
+
+    // Phase 2: build the single-linkage dendrogram from the MST edges.
+    hdbscan::detail::SingleLinkageTree<T> slt;
+    hdbscan::detail::buildSingleLinkageTree(m_mstOutput, n, slt);
+
+    // Phase 3: condense the dendrogram under `minClusterSize`.
+    hdbscan::detail::CondensedTree<T> condensed;
+    hdbscan::detail::condenseTree(slt, n, m_minClusterSize, condensed);
+
+    // Phase 4: cluster extraction (EOM or leaf).
+    std::vector<std::int32_t> labels;
+    if (m_method == hdbscan::ClusterSelectionMethod::kEom) {
+      hdbscan::detail::extractEom(condensed, n, labels);
+    } else {
+      hdbscan::detail::extractLeaf(condensed, n, labels);
+    }
+
+    // Phase 5: GLOSH outlier scores.
+    std::vector<T> scores;
+    hdbscan::detail::computeGlosh(condensed, n, labels, scores);
+
+    // Finalise result accessors. The label array lands in the public NDArray buffer; ditto the
+    // outlier-score array. The condensed tree is retained in its parallel-array form so the
+    // public view can borrow from it without an additional copy.
+    m_labels = NDArray<std::int32_t, 1>(std::array<std::size_t, 1>{n});
+    std::int32_t maxLabel = -1;
+    for (std::size_t i = 0; i < n; ++i) {
+      m_labels(i) = labels[i];
+      maxLabel = std::max(maxLabel, labels[i]);
+    }
+    m_outlierScores = NDArray<T, 1>(std::array<std::size_t, 1>{n});
+    for (std::size_t i = 0; i < n; ++i) {
+      m_outlierScores(i) = scores[i];
+    }
+    m_nClusters = (maxLabel < 0) ? std::size_t{0} : static_cast<std::size_t>(maxLabel) + 1;
+
+    m_ctParent = std::move(condensed.parent);
+    m_ctChild = std::move(condensed.child);
+    m_ctLambda = std::move(condensed.lambdaVal);
+    m_ctChildSize = std::move(condensed.childSize);
   }
 
   /// Length-n assignment; @c -1 marks noise. Empty on a freshly-constructed or just- @ref reset
