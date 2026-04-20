@@ -5,6 +5,7 @@ add_executable(
     ndarray_test.cpp
     ndarray_integer_allowlist_test.cpp
     matrix_desc_test.cpp
+    math_bounded_max_heap_test.cpp
     math_centroid_shift_test.cpp
     math_distance_test.cpp
     math_dsu_test.cpp
@@ -23,6 +24,7 @@ add_executable(
     gemm_mutability_death_test.cpp
     gemm_backend_dispatch_test.cpp
     gemm_threading_test.cpp
+    hdbscan_test.cpp
     kmeans_lloyd_test.cpp
     kmeans_seeder_dispatch_test.cpp
     kmeans_alloc_counter_test.cpp

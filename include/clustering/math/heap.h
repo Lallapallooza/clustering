@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "clustering/math/detail/heap_ops.h"
+
 namespace clustering {
 
 /**
@@ -34,7 +36,7 @@ public:
    */
   void push(Key key, Val val) {
     m_heap.emplace_back(std::move(key), std::move(val));
-    siftUp(m_heap.size() - 1);
+    math::detail::siftUp(m_heap, m_heap.size() - 1, minOnKey);
   }
 
   /**
@@ -63,7 +65,7 @@ public:
     }
     m_heap.pop_back();
     if (!m_heap.empty()) {
-      siftDown(0);
+      math::detail::siftDown(m_heap, 0, minOnKey);
     }
   }
 
@@ -82,39 +84,12 @@ public:
   [[nodiscard]] bool empty() const noexcept { return m_heap.empty(); }
 
 private:
+  /// Min-heap ordering on the key component. Comes-before means smaller key sits closer to root.
+  static bool minOnKey(const std::pair<Key, Val> &a, const std::pair<Key, Val> &b) noexcept {
+    return a.first < b.first;
+  }
+
   std::vector<std::pair<Key, Val>> m_heap;
-
-  void siftUp(std::size_t pos) noexcept {
-    while (pos > 0) {
-      const std::size_t parent = (pos - 1) / 2;
-      if (m_heap[pos].first < m_heap[parent].first) {
-        std::swap(m_heap[pos], m_heap[parent]);
-        pos = parent;
-      } else {
-        return;
-      }
-    }
-  }
-
-  void siftDown(std::size_t pos) noexcept {
-    const std::size_t n = m_heap.size();
-    while (true) {
-      const std::size_t left = (2 * pos) + 1;
-      const std::size_t right = left + 1;
-      std::size_t smallest = pos;
-      if (left < n && m_heap[left].first < m_heap[smallest].first) {
-        smallest = left;
-      }
-      if (right < n && m_heap[right].first < m_heap[smallest].first) {
-        smallest = right;
-      }
-      if (smallest == pos) {
-        return;
-      }
-      std::swap(m_heap[pos], m_heap[smallest]);
-      pos = smallest;
-    }
-  }
 };
 
 /**

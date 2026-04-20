@@ -26,9 +26,9 @@ public:
   /**
    * @brief Construct @p n singleton components numbered @c [0, n).
    *
-   * @param n Element count; each element starts as its own parent with rank 0.
+   * @param n Element count; each element starts as its own parent with rank 0 and size 1.
    */
-  explicit UnionFind(std::size_t n) : m_parent(n), m_rank(n, 0), m_components(n) {
+  explicit UnionFind(std::size_t n) : m_parent(n), m_rank(n, 0), m_size(n, 1), m_components(n) {
     for (std::size_t i = 0; i < n; ++i) {
       m_parent[i] = static_cast<Idx>(i);
     }
@@ -78,10 +78,13 @@ public:
     }
     if (m_rank[ra] < m_rank[rb]) {
       m_parent[ra] = rb;
+      m_size[rb] += m_size[ra];
     } else if (m_rank[ra] > m_rank[rb]) {
       m_parent[rb] = ra;
+      m_size[ra] += m_size[rb];
     } else {
       m_parent[rb] = ra;
+      m_size[ra] += m_size[rb];
       ++m_rank[ra];
     }
     --m_components;
@@ -115,9 +118,27 @@ public:
    */
   [[nodiscard]] std::size_t size() const noexcept { return m_parent.size(); }
 
+  /**
+   * @brief Population of the component whose root is @p root.
+   *
+   * The caller must pass a root index (typically obtained from @ref find); passing a non-root is
+   * undefined by contract. Size is maintained at the root on every @ref unite: when trees merge,
+   * the winning root accumulates the losing root's size so the figure stays accurate without a
+   * tree walk at query time.
+   *
+   * @param root Root index as returned by @ref find.
+   * @return Number of elements under @p root's component.
+   */
+  [[nodiscard]] std::size_t componentSize(Idx root) const noexcept {
+    assert(static_cast<std::size_t>(root) < m_parent.size() &&
+           "UnionFind::componentSize index out of range");
+    return m_size[root];
+  }
+
 private:
   std::vector<Idx> m_parent;
   std::vector<std::uint8_t> m_rank;
+  std::vector<std::size_t> m_size;
   std::size_t m_components;
 };
 
