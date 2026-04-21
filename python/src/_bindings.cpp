@@ -1,15 +1,19 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <vector>
 
 #include "clustering/dbscan.h"
+#include "clustering/hdbscan.h"
 #include "clustering/kmeans.h"
 #include "clustering/ndarray.h"
 
@@ -17,8 +21,10 @@
 
 namespace nb = nanobind;
 using clustering::DBSCAN;
+using clustering::HDBSCAN;
 using clustering::KMeans;
 using clustering::NDArray;
+using clustering::hdbscan::ClusterSelectionMethod;
 using clustering::python::borrowFromNumpyContig;
 using clustering::python::borrowFromNumpyContigReadOnly;
 using clustering::python::borrowFromNumpyStrided;
@@ -141,6 +147,83 @@ kmeans_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> da
                          algo.nIter(), algo.converged());
 }
 
+static std::tuple<nb::ndarray<nb::numpy, std::int32_t, nb::ndim<1>>,
+                  nb::ndarray<nb::numpy, float, nb::ndim<1>>, std::size_t>
+hdbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> data,
+                std::size_t min_cluster_size, std::size_t min_samples, const std::string &method,
+                int n_jobs) {
+  const std::size_t jobs = (n_jobs <= 0) ? std::size_t{0} : static_cast<std::size_t>(n_jobs);
+
+  const std::size_t N = data.shape(0);
+  const std::size_t D = data.shape(1);
+
+  if (min_cluster_size < 2) {
+    throw nb::value_error("min_cluster_size must be >= 2");
+  }
+  if (D == 0 && N > 0) {
+    throw nb::value_error("data must have d >= 1");
+  }
+  if (N > 0 && N < min_cluster_size) {
+    throw nb::value_error("data must have at least min_cluster_size rows");
+  }
+  const std::size_t effective_min_samples = (min_samples == 0) ? min_cluster_size : min_samples;
+  if (N > 0 && effective_min_samples >= N) {
+    throw nb::value_error("min_samples (or min_cluster_size when min_samples=0) must be < N");
+  }
+  constexpr std::size_t int32_max =
+      static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
+  if (N > int32_max) {
+    throw nb::value_error("N exceeds int32 max");
+  }
+
+  ClusterSelectionMethod selectionMethod{};
+  if (method == "eom") {
+    selectionMethod = ClusterSelectionMethod::kEom;
+  } else if (method == "leaf") {
+    selectionMethod = ClusterSelectionMethod::kLeaf;
+  } else {
+    throw nb::value_error("method must be either 'eom' or 'leaf'");
+  }
+
+  // Borrow the numpy buffer directly when it is 32-byte aligned: several AVX2 tiers assume
+  // 32-byte aligned loads on @p X through the @c NDArray::isAligned<32>() gate. Borrowing a
+  // loosely-aligned numpy array would force the dispatcher down fallback paths whose
+  // interactions are less thoroughly exercised. Align-gated borrow captures the common case
+  // (numpy contiguous arrays from @c make_blobs, @c astype, etc. on x86_64 glibc land on
+  // 32-byte boundaries here) without exposing the unaligned fallback.
+  constexpr std::size_t kAvx2Align = 32;
+  const bool dataAligned = (reinterpret_cast<std::uintptr_t>(data.data()) % kAvx2Align) == 0;
+  NDArray<float, 2> xOwned({0, 0});
+  auto X = [&] {
+    if (dataAligned) {
+      return clustering::python::borrowFromNumpyContig<float>(data);
+    }
+    xOwned = NDArray<float, 2>({N, D});
+    std::memcpy(xOwned.data(), data.data(), N * D * sizeof(float));
+    return NDArray<float, 2, clustering::Layout::Contig>::borrow(xOwned.data(), {N, D});
+  }();
+
+  HDBSCAN<float> algo(min_cluster_size, min_samples, selectionMethod, jobs);
+  {
+    nb::gil_scoped_release release;
+    algo.run(X);
+  }
+
+  // Detach labels and outlier scores into fresh owned buffers so the solver remains reusable and
+  // the capsule has full ownership of the numpy-visible storage (matches the DBSCAN per-call
+  // copy pattern).
+  NDArray<std::int32_t, 1> labels_out({N});
+  NDArray<float, 1> scores_out({N});
+  if (N > 0) {
+    std::memcpy(labels_out.data(), algo.labels().data(), N * sizeof(std::int32_t));
+    std::memcpy(scores_out.data(), algo.outlierScores().data(), N * sizeof(float));
+  }
+  auto labels_np = wrapAsNumpy<std::int32_t>(std::move(labels_out));
+  auto scores_np = wrapAsNumpy<float>(std::move(scores_out));
+
+  return std::make_tuple(std::move(labels_np), std::move(scores_np), algo.nClusters());
+}
+
 static nb::ndarray<nb::numpy, float, nb::ndim<2>>
 roundtrip_zero_copy(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> arr) {
   auto view = borrowFromNumpyContig<float>(arr);
@@ -212,6 +295,14 @@ NB_MODULE(_clustering, m) {
         "(labels, centroids, inertia, n_iter, converged) where labels is int32 (N,), "
         "centroids is float32 (k, D), inertia is float64, n_iter is the iteration count, "
         "and converged is True iff the centroid shift fell at or below tol.");
+
+  m.def("hdbscan", &hdbscan_binding, nb::arg("data"), nb::arg("min_cluster_size") = 5,
+        nb::arg("min_samples") = 0, nb::arg("method") = "eom", nb::arg("n_jobs") = -1,
+        "Run HDBSCAN with the auto-dispatched MST backend. Returns a tuple "
+        "(labels, outlier_scores, n_clusters) where labels is int32 (N,) with -1 marking "
+        "noise, outlier_scores is float32 (N,) in [0, 1], and n_clusters is the total "
+        "cluster count. min_samples = 0 resolves to min_cluster_size at fit time. "
+        "method must be 'eom' (excess-of-mass, the default) or 'leaf'.");
 
   m.def("_roundtrip_zero_copy", &roundtrip_zero_copy, nb::arg("data"),
         "Test helper: borrow contiguous f32 array, copy into Owned NDArray, return as numpy.");
