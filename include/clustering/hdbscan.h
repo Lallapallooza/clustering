@@ -65,6 +65,15 @@ namespace clustering {
  *       values (an empty label array, empty outlier-score array, zero cluster count, and an
  *       empty condensed-tree view).
  *
+ * @note Labels and outlier scores follow the Campello 2015 formula over Euclidean
+ *       mutual-reachability distances, matching the reference implementation.
+ *
+ * @par Thread safety
+ * A single @c HDBSCAN instance is not safe to drive concurrently; @ref run mutates internal
+ * state. Separate instances on distinct inputs are safe when each instance spawns its own
+ * internal pool (the default). The internal pool obeys a no-nested-dispatch invariant:
+ * worker tasks never re-submit to the pool.
+ *
  * @tparam T          Element type. Only @c float is supported in this class; a @c double
  *                    specialization is out of scope.
  * @tparam MstBackend Backend satisfying @ref hdbscan::MstBackendStrategy. Defaults to
