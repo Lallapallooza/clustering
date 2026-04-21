@@ -93,6 +93,9 @@ inline void extractEom(const CondensedTree<T> &tree, std::size_t n,
 
   // DP: a cluster is "chosen" if its own stability is at least the sum of its children's chosen
   // stabilities. Processing in reverse cluster-id order guarantees children finish before parents.
+  // The root cluster (cIdx == 0) is never chosen: choosing the root collapses every point into a
+  // single cluster labelled 0, which the Campello 2015 FORC algorithm explicitly forbids. Its
+  // subtree stability is still propagated so the walk below routes around it.
   std::vector<T> subtreeStab(static_cast<std::size_t>(numClusters), T{0});
   std::vector<std::uint8_t> chosen(static_cast<std::size_t>(numClusters), 0U);
   for (std::int32_t cIdx = numClusters - 1; cIdx >= 0; --cIdx) {
@@ -101,7 +104,7 @@ inline void extractEom(const CondensedTree<T> &tree, std::size_t n,
       sumChildren += subtreeStab[clusterIdx(childCluster)];
     }
     const T own = stability[static_cast<std::size_t>(cIdx)];
-    if (own >= sumChildren) {
+    if (cIdx != 0 && own >= sumChildren) {
       chosen[static_cast<std::size_t>(cIdx)] = 1U;
       subtreeStab[static_cast<std::size_t>(cIdx)] = own;
     } else {
