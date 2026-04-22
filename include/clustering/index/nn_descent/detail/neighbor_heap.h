@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "clustering/math/detail/avx2_helpers.h"
+
 namespace clustering::index::nn_descent::detail {
 
 /**
@@ -68,39 +70,40 @@ public:
     const std::size_t base = static_cast<std::size_t>(i) * m_k;
     const std::size_t sz = m_sizes[static_cast<std::size_t>(i)];
 
-    // Duplicate scan. Linear over current size (<= k) -- k is small enough that the scan is
-    // cache-resident and cheaper than a side-band map.
-    for (std::size_t s = 0; s < sz; ++s) {
-      if (m_idx[base + s] == j) {
+    // Gate the O(k) dedup scan on admission eligibility. At steady state most pushes are
+    // rejected because the heap is full and the candidate is worse than the current root; for
+    // those the root compare is O(1) and the scan would be pure overhead. The scan runs only
+    // on the admit path, where it remains cheap (cache-resident, k small).
+    if (sz >= m_k) {
+      if (m_k == 0) {
         return false;
       }
-    }
-
-    if (sz < m_k) {
-      // Room in the heap: unconditional insert, sift up.
-      m_dist[base + sz] = sqDist;
-      m_idx[base + sz] = j;
-      m_isNew[base + sz] = 1;
-      siftUp(base, sz);
-      m_sizes[static_cast<std::size_t>(i)] = sz + 1;
-      return true;
-    }
-    if (m_k == 0) {
-      return false;
-    }
-
-    // Full heap: admit only when the candidate is strictly smaller than the root (or equal with
-    // a smaller index per the deterministic tie-break).
-    const T rootDist = m_dist[base];
-    const std::int32_t rootIdx = m_idx[base];
-    if (sqDist < rootDist || (sqDist == rootDist && j < rootIdx)) {
+      const T rootDist = m_dist[base];
+      const std::int32_t rootIdx = m_idx[base];
+      if (!(sqDist < rootDist || (sqDist == rootDist && j < rootIdx))) {
+        return false;
+      }
+      // Admit path: confirm the candidate is not already present before overwriting the root.
+      if (math::detail::containsInt32(m_idx.data() + base, m_k, j)) {
+        return false;
+      }
       m_dist[base] = sqDist;
       m_idx[base] = j;
       m_isNew[base] = 1;
       siftDown(base, m_k);
       return true;
     }
-    return false;
+
+    // Heap not yet full: admit unless the candidate is already present.
+    if (math::detail::containsInt32(m_idx.data() + base, sz, j)) {
+      return false;
+    }
+    m_dist[base + sz] = sqDist;
+    m_idx[base + sz] = j;
+    m_isNew[base + sz] = 1;
+    siftUp(base, sz);
+    m_sizes[static_cast<std::size_t>(i)] = sz + 1;
+    return true;
   }
 
   /// Number of neighbors currently retained for node @p i.
