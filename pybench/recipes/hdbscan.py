@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 from _clustering import hdbscan as cpp_hdbscan
 from sklearn.cluster import HDBSCAN
 
 from pybench.recipe import DatasetSpec, Recipe
+
+
+# Scale vMF concentration with dim so clusters stay separable past the default
+# kappa=20's collapse point (intra/inter separation -> 1.0 at d >= 64).
+_HDBSCAN_BASE_DATASET = DatasetSpec(n_features=2, centers=20, cluster_std=3.0)
+
+
+def _hdbscan_dataset_for_dim(d: int) -> DatasetSpec:
+    scaled_kappa = max(_HDBSCAN_BASE_DATASET.vmf_kappa, float(d) * 2.0)
+    return replace(_HDBSCAN_BASE_DATASET, n_features=d, vmf_kappa=scaled_kappa)
 
 
 def _ours(
@@ -57,8 +69,9 @@ recipe = Recipe(
     param_grid={"n_jobs": [1, 4, 16]},
     default_sizes=(5000, 25000, 100000),
     default_dims=(2, 8, 32, 64, 128),
-    dataset=DatasetSpec(n_features=2, centers=20, cluster_std=3.0),
-    ari_threshold=0.80,
+    dataset=_HDBSCAN_BASE_DATASET,
+    dataset_for_dim=_hdbscan_dataset_for_dim,
+    ari_threshold=0.98,
     n_runs=3,
     tags=("density", "hierarchical"),
 )

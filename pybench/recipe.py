@@ -49,6 +49,11 @@ class Recipe:
     # "knee" replaces it with the k-distance knee (Ester 1996 + Satopaa
     # 2011) computed on the generated fixture.
     eps_policy: EpsPolicy = "fixed"
+    # Optional per-dim DatasetSpec override. When set, the runner calls this with the
+    # target dim and uses the returned spec instead of only replacing `n_features`. Recipes
+    # whose fixture parameters (e.g. vMF kappa) have to scale with dim to keep cluster
+    # structure meaningful wire this in place of the default n_features-only shim.
+    dataset_for_dim: Callable[[int], DatasetSpec] | None = None
 
 
 @dataclass(frozen=True)

@@ -195,8 +195,11 @@ def run_one(
         params = dict(recipe.default_params)
 
     dataset = recipe.dataset
-    if dims is not None and dims != dataset.n_features:
-        dataset = replace(dataset, n_features=dims)
+    if dims is not None:
+        if recipe.dataset_for_dim is not None:
+            dataset = recipe.dataset_for_dim(dims)
+        elif dims != dataset.n_features:
+            dataset = replace(dataset, n_features=dims)
 
     data = make_data(size, dataset)
 
