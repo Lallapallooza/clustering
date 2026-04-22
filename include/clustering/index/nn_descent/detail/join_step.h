@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -102,19 +103,28 @@ template <class T> struct JoinStep {
       }
     }
 
-    std::mutex bankMutex;
+    // Bank mutex sharding by target node. Two pushes to different targets touch disjoint
+    // heap slots in the bank and are independent; sharding by @c target % kShardCount lets
+    // disjoint-target pushes from different workers proceed in parallel instead of serializing
+    // on a single mutex.
+    constexpr std::size_t kShardCount = 64;
+    std::array<std::mutex, kShardCount> bankShards;
     std::atomic<std::size_t> totalUpdates{0};
 
+    const bool serial = (pool.pool == nullptr);
+
     auto runRange = [&](std::size_t lo, std::size_t hi) {
-      // Per-worker candidate buffer. Each entry is a (target, candidate, sqDist) triple flushed
-      // under the bank mutex at chunk end. Re-used across nodes in the chunk to amortize alloc.
+      // Parallel-path staging buffer, flushed under the bank mutex at the end of each node to
+      // keep peak occupancy at O(k^2) and the mutex hold bounded per flush.
       struct Cand {
         std::int32_t target;
         std::int32_t candidate;
         T sqDist;
       };
       std::vector<Cand> cands;
-      cands.reserve(64);
+      if (!serial) {
+        cands.reserve(8 * k * k);
+      }
 
       // Fused forward + reverse neighbor list per node. Deduplication within the merged list is
       // handled by the bank's push uniqueness check; we can push duplicates cheaply because the
@@ -123,6 +133,18 @@ template <class T> struct JoinStep {
       std::vector<std::int32_t> mergedOld;
       mergedNew.reserve(4 * k);
       mergedOld.reserve(4 * k);
+
+      std::size_t localUpdates = 0;
+
+      auto emit = [&](std::int32_t target, std::int32_t candidate, T sqDist) {
+        if (serial) {
+          if (bank.push(target, candidate, sqDist)) {
+            ++localUpdates;
+          }
+        } else {
+          cands.push_back(Cand{target, candidate, sqDist});
+        }
+      };
 
       for (std::size_t uSize = lo; uSize < hi; ++uSize) {
         mergedNew.clear();
@@ -143,8 +165,8 @@ template <class T> struct JoinStep {
             }
             const T *pb = data + (static_cast<std::size_t>(vb) * d);
             const T sqDist = math::detail::sqEuclideanRowPtr(pa, pb, d);
-            cands.push_back(Cand{va, vb, sqDist});
-            cands.push_back(Cand{vb, va, sqDist});
+            emit(va, vb, sqDist);
+            emit(vb, va, sqDist);
           }
         }
         // new x old: every cross pair where the new endpoint has not yet been compared to the
@@ -157,24 +179,34 @@ template <class T> struct JoinStep {
             }
             const T *pb = data + (static_cast<std::size_t>(vb) * d);
             const T sqDist = math::detail::sqEuclideanRowPtr(pa, pb, d);
-            cands.push_back(Cand{va, vb, sqDist});
-            cands.push_back(Cand{vb, va, sqDist});
+            emit(va, vb, sqDist);
+            emit(vb, va, sqDist);
           }
+        }
+
+        // Per-node flush for the parallel path. Cands are grouped by shard (target %
+        // kShardCount) so each shard's mutex is acquired at most once per flush and
+        // disjoint-target workers make progress concurrently.
+        if (!serial && !cands.empty()) {
+          std::array<std::vector<const Cand *>, kShardCount> buckets;
+          for (const Cand &c : cands) {
+            buckets[static_cast<std::size_t>(c.target) % kShardCount].push_back(&c);
+          }
+          for (std::size_t s = 0; s < kShardCount; ++s) {
+            if (buckets[s].empty()) {
+              continue;
+            }
+            const std::scoped_lock lock(bankShards[s]);
+            for (const Cand *c : buckets[s]) {
+              if (bank.push(c->target, c->candidate, c->sqDist)) {
+                ++localUpdates;
+              }
+            }
+          }
+          cands.clear();
         }
       }
 
-      // Flush the chunk's candidates under the bank mutex. Under low-to-moderate contention this
-      // is much cheaper than per-push locking; admissions are pure CPU so the critical section
-      // is short and the outer loop is the primary parallelism.
-      std::size_t localUpdates = 0;
-      {
-        const std::scoped_lock lock(bankMutex);
-        for (const Cand &c : cands) {
-          if (bank.push(c.target, c.candidate, c.sqDist)) {
-            ++localUpdates;
-          }
-        }
-      }
       totalUpdates.fetch_add(localUpdates, std::memory_order_relaxed);
     };
 
