@@ -28,7 +28,10 @@ namespace clustering::hdbscan {
  */
 struct NnDescentMstConfig {
   /// Extra neighbours per node on top of @c minSamples; the kNN graph is built with
-  /// @c k = minSamples + kExtra. Larger values trade build time for MRD edge density.
+  /// @c k = minSamples + kExtra. Sized for Dong 2011's @c k = 15 recall target at default
+  /// @c min_samples = 5. Larger values trade build time for MRD-edge coverage; raise this
+  /// when the input is near-uniform and the MRD-MST topology depends on edges beyond each
+  /// point's 15 nearest.
   std::size_t kExtra = 10;
   /// Iteration cap on the NN-Descent join loop; forwarded to @c NnDescentIndex.
   std::size_t maxIter = 10;
