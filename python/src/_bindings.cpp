@@ -151,7 +151,7 @@ static std::tuple<nb::ndarray<nb::numpy, std::int32_t, nb::ndim<1>>,
                   nb::ndarray<nb::numpy, float, nb::ndim<1>>, std::size_t>
 hdbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> data,
                 std::size_t min_cluster_size, std::size_t min_samples, const std::string &method,
-                int n_jobs) {
+                int n_jobs, const std::string &min_samples_convention) {
   const std::size_t jobs = (n_jobs <= 0) ? std::size_t{0} : static_cast<std::size_t>(n_jobs);
 
   const std::size_t N = data.shape(0);
@@ -166,9 +166,31 @@ hdbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> d
   if (N > 0 && N < min_cluster_size) {
     throw nb::value_error("data must have at least min_cluster_size rows");
   }
-  const std::size_t effective_min_samples = (min_samples == 0) ? min_cluster_size : min_samples;
+
+  using clustering::hdbscan::MinSamplesConvention;
+  MinSamplesConvention convention{};
+  if (min_samples_convention == "sklearn") {
+    convention = MinSamplesConvention::kSklearn;
+  } else if (min_samples_convention == "campello") {
+    convention = MinSamplesConvention::kCampello;
+  } else {
+    throw nb::value_error("min_samples_convention must be 'sklearn' or 'campello'");
+  }
+
+  const std::size_t requested_min_samples = (min_samples == 0) ? min_cluster_size : min_samples;
+  // Under the sklearn convention the query point counts as one of the neighbours, so the
+  // non-self neighbour count the backend sees is requested - 1; that must be >= 1, hence
+  // requested >= 2. Campello passes through untouched.
+  const std::size_t effective_min_samples = (convention == MinSamplesConvention::kSklearn)
+                                                ? requested_min_samples - 1
+                                                : requested_min_samples;
+  if (convention == MinSamplesConvention::kSklearn && requested_min_samples < 2) {
+    throw nb::value_error(
+        "min_samples must be >= 2 under the sklearn convention (the query point counts as one "
+        "of the neighbours); pass min_samples_convention='campello' to use min_samples=1");
+  }
   if (N > 0 && effective_min_samples >= N) {
-    throw nb::value_error("min_samples (or min_cluster_size when min_samples=0) must be < N");
+    throw nb::value_error("effective min_samples must be < N after applying the convention");
   }
   constexpr std::size_t int32_max =
       static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
@@ -203,7 +225,7 @@ hdbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> d
     return NDArray<float, 2, clustering::Layout::Contig>::borrow(xOwned.data(), {N, D});
   }();
 
-  HDBSCAN<float> algo(min_cluster_size, min_samples, selectionMethod, jobs);
+  HDBSCAN<float> algo(min_cluster_size, min_samples, selectionMethod, jobs, convention);
   {
     nb::gil_scoped_release release;
     algo.run(X);
@@ -298,11 +320,17 @@ NB_MODULE(_clustering, m) {
 
   m.def("hdbscan", &hdbscan_binding, nb::arg("data"), nb::arg("min_cluster_size") = 5,
         nb::arg("min_samples") = 0, nb::arg("method") = "eom", nb::arg("n_jobs") = -1,
+        nb::arg("min_samples_convention") = "sklearn",
         "Run HDBSCAN with the auto-dispatched MST backend. Returns a tuple "
         "(labels, outlier_scores, n_clusters) where labels is int32 (N,) with -1 marking "
         "noise, outlier_scores is float32 (N,) in [0, 1], and n_clusters is the total "
         "cluster count. min_samples = 0 resolves to min_cluster_size at fit time. "
-        "method must be 'eom' (excess-of-mass, the default) or 'leaf'.");
+        "method must be 'eom' (excess-of-mass, the default) or 'leaf'. "
+        "min_samples_convention selects the neighbour-count semantics: 'sklearn' (default) "
+        "treats the query point itself as one of the min_samples neighbours (matches "
+        "scikit-learn and the hdbscan package); 'campello' counts only non-self neighbours "
+        "(literal Campello 2015 definition). The two differ by one neighbour and produce "
+        "different MSTs on high-dimensional near-uniform data.");
 
   m.def("_roundtrip_zero_copy", &roundtrip_zero_copy, nb::arg("data"),
         "Test helper: borrow contiguous f32 array, copy into Owned NDArray, return as numpy.");

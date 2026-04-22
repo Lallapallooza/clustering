@@ -39,6 +39,25 @@ enum class ClusterSelectionMethod : std::uint8_t {
   kLeaf, ///< Leaf-cluster selection; every condensed-tree leaf becomes a cluster.
 };
 
+/**
+ * @brief Semantics of the @c minSamples parameter at core-distance extraction.
+ *
+ * Campello 2015 defines @c core_k(p) as the distance from @c p to its @c k-th nearest neighbour
+ * excluding @c p itself. scikit-learn and the original @c hdbscan package count @c p itself as
+ * one of the @c k neighbours, so for a given @c min_samples = k those implementations return
+ * what Campello would call @c core_{k-1}. Both conventions are widely deployed and produce
+ * different MSTs on high-dimensional near-uniform inputs; the enum is the API boundary between
+ * them.
+ */
+enum class MinSamplesConvention : std::uint8_t {
+  /// @c minSamples counts the query point itself as one of the @c k neighbours. The core
+  /// distance returned is the Campello @c core_{minSamples-1}. Matches scikit-learn and the
+  /// @c hdbscan package.
+  kSklearn,
+  /// @c minSamples counts only non-self neighbours, matching Campello 2015 directly.
+  kCampello,
+};
+
 } // namespace clustering::hdbscan
 
 namespace clustering {
@@ -67,6 +86,11 @@ namespace clustering {
  *
  * @note Labels and outlier scores follow the Campello 2015 formula over Euclidean
  *       mutual-reachability distances, matching the reference implementation.
+ *
+ * @note The @c minSamples argument is interpreted per @ref hdbscan::MinSamplesConvention. The
+ *       default (@c kSklearn) treats the query point itself as one of the @c minSamples
+ *       neighbours; pass @c kCampello to count non-self neighbours only. The two conventions
+ *       differ by one neighbour and produce different MSTs on high-dimensional inputs.
  *
  * @par Thread safety
  * A single @c HDBSCAN instance is not safe to drive concurrently; @ref run mutates internal
@@ -108,19 +132,25 @@ public:
    * @brief Construct a reusable HDBSCAN fitter.
    *
    * @param minClusterSize The smallest allowable cluster; must be at least 2.
-   * @param minSamples     Neighbour count used to compute core distances. A value of @c 0 is a
-   *                       sentinel meaning "resolve to @c minClusterSize at fit time"; the fit
-   *                       entry asserts the resolved value is positive and strictly less than
+   * @param minSamples     Neighbour count used to compute core distances, interpreted per
+   *                       @p convention. A value of @c 0 is a sentinel meaning "resolve to
+   *                       @c minClusterSize at fit time"; the fit entry asserts the resolved
+   *                       value is valid for the active convention and strictly less than
    *                       @c N.
    * @param method         Cluster selection method; defaults to excess-of-mass.
    * @param nJobs          Worker count for the internal thread pool. A value of @c 0 is clamped
    *                       upward to @c std::thread::hardware_concurrency().
+   * @param convention     Interpretation of @p minSamples at core-distance extraction. See
+   *                       @ref hdbscan::MinSamplesConvention.
    */
-  explicit HDBSCAN(std::size_t minClusterSize, std::size_t minSamples = 0,
-                   hdbscan::ClusterSelectionMethod method = hdbscan::ClusterSelectionMethod::kEom,
-                   std::size_t nJobs = 0)
+  explicit HDBSCAN(
+      std::size_t minClusterSize, std::size_t minSamples = 0,
+      hdbscan::ClusterSelectionMethod method = hdbscan::ClusterSelectionMethod::kEom,
+      std::size_t nJobs = 0,
+      hdbscan::MinSamplesConvention convention = hdbscan::MinSamplesConvention::kSklearn)
       : m_minClusterSize(minClusterSize), m_minSamples(minSamples), m_method(method),
-        m_nJobs(math::clampedJobCount(nJobs)), m_labels({0}), m_outlierScores({0}) {
+        m_nJobs(math::clampedJobCount(nJobs)), m_convention(convention), m_labels({0}),
+        m_outlierScores({0}) {
     CLUSTERING_ALWAYS_ASSERT(minClusterSize >= 2);
     // Defer pool construction to @ref run: at small shapes every hot phase gates serial, and
     // spawning nJobs workers in the ctor burns thread-create overhead that the fit never
@@ -149,7 +179,18 @@ public:
 
     CLUSTERING_ALWAYS_ASSERT(m_minClusterSize >= 2);
 
-    const std::size_t effectiveMinSamples = (m_minSamples == 0) ? m_minClusterSize : m_minSamples;
+    // Translate the user-facing @c minSamples to the non-self neighbour count the MST backends
+    // consume. Under the scikit-learn convention the query point counts as one of the neighbours
+    // and we feed the backend one less; under Campello we pass it through.
+    const std::size_t requestedMinSamples = (m_minSamples == 0) ? m_minClusterSize : m_minSamples;
+    if (m_convention == hdbscan::MinSamplesConvention::kSklearn) {
+      CLUSTERING_ALWAYS_ASSERT(requestedMinSamples >= 2);
+    } else {
+      CLUSTERING_ALWAYS_ASSERT(requestedMinSamples >= 1);
+    }
+    const std::size_t effectiveMinSamples =
+        (m_convention == hdbscan::MinSamplesConvention::kSklearn) ? requestedMinSamples - 1
+                                                                  : requestedMinSamples;
     CLUSTERING_ALWAYS_ASSERT(effectiveMinSamples >= 1);
     CLUSTERING_ALWAYS_ASSERT(effectiveMinSamples < n);
     CLUSTERING_ALWAYS_ASSERT(n >= m_minClusterSize);
@@ -268,6 +309,7 @@ private:
   std::size_t m_minSamples;
   hdbscan::ClusterSelectionMethod m_method;
   std::size_t m_nJobs;
+  hdbscan::MinSamplesConvention m_convention;
   /// Lazy worker pool. Emplaced inside @ref run on the first call whose shape clears
   /// @ref math::shouldSpawnPool; reused across subsequent runs so repeat fits on the same
   /// @c HDBSCAN instance skip the thread-spawn cost.

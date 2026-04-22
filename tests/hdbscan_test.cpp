@@ -153,8 +153,10 @@ TEST(HdbscanFitDeath, MinSamplesGeOrEqualsNAborts) {
 
 TEST(HdbscanFitDeath, NLessThanMinClusterSizeAborts) {
   // N = 2, minClusterSize = 3: the N >= minClusterSize precondition fires.
+  // minSamples = 2 is the minimum valid value under the default sklearn convention (the query
+  // point counts as one of the two neighbours, leaving one non-self neighbour for the backend).
   GTEST_FLAG_SET(death_test_style, "threadsafe");
-  Hdb h(3, /*minSamples=*/1);
+  Hdb h(3, /*minSamples=*/2);
   const NDArray<float, 2> X({2, 2});
   EXPECT_DEATH(h.run(X), "always-assert failed: n >= m_minClusterSize");
 }
