@@ -7,6 +7,7 @@ add_executable(
     ndarray_test.cpp
     ndarray_integer_allowlist_test.cpp
     matrix_desc_test.cpp
+    math_aabb_test.cpp
     math_bounded_max_heap_test.cpp
     math_centroid_shift_test.cpp
     math_distance_test.cpp

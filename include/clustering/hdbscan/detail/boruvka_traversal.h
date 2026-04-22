@@ -9,42 +9,12 @@
 
 #include "clustering/always_assert.h"
 #include "clustering/index/kdtree.h"
+#include "clustering/math/aabb.h"
 #include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
 namespace clustering::hdbscan::detail {
-
-/**
- * @brief Squared gap distance between a point and an axis-aligned box.
- *
- * Per dimension, either the point is inside the extent (zero gap) or the gap is the signed
- * distance to the nearer face. Strict lower bound on the squared Euclidean distance from the
- * point to any point within the box.
- *
- * @tparam T Scalar element type.
- *
- * @param point  Pointer to the @c d-coordinate query point.
- * @param boxMin Min-coords of the box; length @c d.
- * @param boxMax Max-coords of the box; length @c d.
- * @return Squared point-to-AABB gap distance.
- */
-template <class T>
-[[nodiscard]] inline T pointAabbGapSq(const T *point, std::span<const T> boxMin,
-                                      std::span<const T> boxMax) noexcept {
-  const std::size_t d = boxMin.size();
-  T sum = T{0};
-  for (std::size_t j = 0; j < d; ++j) {
-    T gap = T{0};
-    if (point[j] < boxMin[j]) {
-      gap = boxMin[j] - point[j];
-    } else if (point[j] > boxMax[j]) {
-      gap = point[j] - boxMax[j];
-    }
-    sum += gap * gap;
-  }
-  return sum;
-}
 
 /**
  * @brief Per-component candidate edge with the lowest-weight out-of-component candidate so far.
@@ -149,7 +119,7 @@ void singlePointScan(TraversalCtx<T> &ctx, std::int32_t origI, std::int32_t comp
 
     const T bound = ctx.bestW[compI];
     auto [nmin, nmax] = ctx.tree->nodeBounds(node);
-    const T gapSq = pointAabbGapSq<T>(rowI, nmin, nmax);
+    const T gapSq = math::pointAabbGapSq<T>(rowI, nmin, nmax);
     if (gapSq >= bound) {
       continue;
     }

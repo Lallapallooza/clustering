@@ -6,12 +6,14 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <random>
 #include <vector>
 
 #include "clustering/hdbscan/mst_backend.h"
 #include "clustering/hdbscan/policy/boruvka_mst_backend.h"
 #include "clustering/hdbscan/policy/prim_mst_backend.h"
+#include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/dsu.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
@@ -339,4 +341,81 @@ TEST(BoruvkaTsanStress, LargeInputCompletesUnderSanitizer) {
 
   EXPECT_EQ(out.edges.size(), n - 1);
   EXPECT_EQ(out.coreDistances.dim(0), n);
+}
+
+// ---------------------------------------------------------------------------
+// nJobs=1 self-determinism: at a single-worker pool the traversal must produce bit-identical
+// outputs across two independent runs of the same input. Bit-equivalence on every
+// (u, v, weight) triple, so ints compare with EXPECT_EQ and the float weight compares via the
+// exact integer bit-pattern.
+// ---------------------------------------------------------------------------
+
+TEST(BoruvkaMstSelfDeterminism, NJobs1RepeatRunsBitIdentical) {
+  const std::size_t n = 200;
+  const std::size_t d = 8;
+  const auto X = makeBlobGaussian(/*blobs=*/4, /*perBlob=*/n / 4, d, 0xDE7E1A11ULL);
+
+  BoruvkaMstBackend<float> backendA;
+  MstOutput<float> outA;
+  backendA.run(X, /*minSamples=*/3, Pool{}, outA);
+
+  BoruvkaMstBackend<float> backendB;
+  MstOutput<float> outB;
+  backendB.run(X, /*minSamples=*/3, Pool{}, outB);
+
+  ASSERT_EQ(outA.edges.size(), outB.edges.size());
+  ASSERT_EQ(outA.edges.size(), n - 1);
+  for (std::size_t i = 0; i < outA.edges.size(); ++i) {
+    EXPECT_EQ(outA.edges[i].u, outB.edges[i].u) << "i=" << i;
+    EXPECT_EQ(outA.edges[i].v, outB.edges[i].v) << "i=" << i;
+    // Bit-identical contract for the float weight: compare the IEEE-754 bit pattern, not the
+    // numerical value, so a rounding drift one ulp apart fails this test.
+    std::uint32_t bitsA = 0;
+    std::uint32_t bitsB = 0;
+    const float weightA = outA.edges[i].weight;
+    const float weightB = outB.edges[i].weight;
+    std::memcpy(&bitsA, &weightA, sizeof(bitsA));
+    std::memcpy(&bitsB, &weightB, sizeof(bitsB));
+    EXPECT_EQ(bitsA, bitsB) << "i=" << i << " weightA=" << weightA << " weightB=" << weightB;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// d=32 Prim-agreement at n=400, minSamples=5: total-weight match within the existing tolerance,
+// plus the per-edge MRD-consistency check (every output edge weight equals
+// max(squared_dist(u,v), coreDist[u], coreDist[v]) within the same tolerance, with squared_dist
+// computed via the same kernel the algorithm uses). Mirrors the existing d in {2, 8, 16}
+// fixtures.
+// ---------------------------------------------------------------------------
+
+TEST(BoruvkaMstPrimAgreement, TotalWeightMatchesAtDim32Small) {
+  const TotalWeightCase cse{
+      .n = 400, .d = 32, .minSamples = 5, .seed = 0xB0A0D32005ULL, .name = "dim32-n400-k5"};
+  compareTotalWeightsCase(cse);
+
+  // Per-edge MRD-consistency check on the Boruvka output. The algorithm computes the edge
+  // weight as max(squared_dist(u, v), coreDist[u], coreDist[v]) using the same SIMD kernel as
+  // the test below; ULP drift in the horizontal reduction is bounded by the same tolerance the
+  // total-weight check uses.
+  const auto X = makeBlobGaussian(/*blobs=*/4, /*perBlob=*/cse.n / 4, cse.d, cse.seed);
+  BoruvkaMstBackend<float> backend;
+  MstOutput<float> out;
+  backend.run(X, cse.minSamples, Pool{}, out);
+
+  ASSERT_EQ(out.edges.size(), cse.n - 1);
+  for (std::size_t i = 0; i < out.edges.size(); ++i) {
+    const auto u = static_cast<std::size_t>(out.edges[i].u);
+    const auto v = static_cast<std::size_t>(out.edges[i].v);
+    const float *rowU = X.data() + (u * cse.d);
+    const float *rowV = X.data() + (v * cse.d);
+    const float sq = clustering::math::detail::sqEuclideanRowPtr(rowU, rowV, cse.d);
+    const float coreU = out.coreDistances(u);
+    const float coreV = out.coreDistances(v);
+    const float expected = std::max({sq, coreU, coreV});
+    const float tol =
+        static_cast<float>(1e-5 * std::max(1.0, std::abs(static_cast<double>(expected))));
+    EXPECT_NEAR(out.edges[i].weight, expected, tol)
+        << "i=" << i << " u=" << u << " v=" << v << " sq=" << sq << " coreU=" << coreU
+        << " coreV=" << coreV;
+  }
 }
