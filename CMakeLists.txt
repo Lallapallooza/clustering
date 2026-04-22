@@ -107,6 +107,15 @@ if(CLUSTERING_BUILD_BENCHMARK)
     )
     clustering_enable_tidy(kmeans_benchmark)
 
+    add_executable(nn_descent_benchmark benchmark/nn_descent_benchmark.cpp)
+    target_link_libraries(
+        nn_descent_benchmark
+        benchmark::benchmark
+        clustering_header_lib
+        clustering_warnings
+    )
+    clustering_enable_tidy(nn_descent_benchmark)
+
     add_executable(dbscan_benchmark benchmark/dbscan_benchmark.cpp)
     target_link_libraries(
         dbscan_benchmark
