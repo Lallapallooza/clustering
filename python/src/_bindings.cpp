@@ -14,6 +14,10 @@
 
 #include "clustering/dbscan.h"
 #include "clustering/hdbscan.h"
+#include "clustering/hdbscan/policy/auto_mst_backend.h"
+#include "clustering/hdbscan/policy/boruvka_mst_backend.h"
+#include "clustering/hdbscan/policy/nn_descent_mst_backend.h"
+#include "clustering/hdbscan/policy/prim_mst_backend.h"
 #include "clustering/kmeans.h"
 #include "clustering/ndarray.h"
 
@@ -151,7 +155,7 @@ static std::tuple<nb::ndarray<nb::numpy, std::int32_t, nb::ndim<1>>,
                   nb::ndarray<nb::numpy, float, nb::ndim<1>>, std::size_t>
 hdbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> data,
                 std::size_t min_cluster_size, std::size_t min_samples, const std::string &method,
-                int n_jobs, const std::string &min_samples_convention) {
+                int n_jobs, const std::string &min_samples_convention, const std::string &backend) {
   const std::size_t jobs = (n_jobs <= 0) ? std::size_t{0} : static_cast<std::size_t>(n_jobs);
 
   const std::size_t N = data.shape(0);
@@ -225,25 +229,44 @@ hdbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> d
     return NDArray<float, 2, clustering::Layout::Contig>::borrow(xOwned.data(), {N, D});
   }();
 
-  HDBSCAN<float> algo(min_cluster_size, min_samples, selectionMethod, jobs, convention);
-  {
-    nb::gil_scoped_release release;
-    algo.run(X);
-  }
-
-  // Detach labels and outlier scores into fresh owned buffers so the solver remains reusable and
-  // the capsule has full ownership of the numpy-visible storage (matches the DBSCAN per-call
-  // copy pattern).
   NDArray<std::int32_t, 1> labels_out({N});
   NDArray<float, 1> scores_out({N});
-  if (N > 0) {
-    std::memcpy(labels_out.data(), algo.labels().data(), N * sizeof(std::int32_t));
-    std::memcpy(scores_out.data(), algo.outlierScores().data(), N * sizeof(float));
+  std::size_t n_clusters = 0;
+  auto run_with = [&](auto &&algo) {
+    {
+      nb::gil_scoped_release release;
+      algo.run(X);
+    }
+    if (N > 0) {
+      std::memcpy(labels_out.data(), algo.labels().data(), N * sizeof(std::int32_t));
+      std::memcpy(scores_out.data(), algo.outlierScores().data(), N * sizeof(float));
+    }
+    n_clusters = algo.nClusters();
+  };
+  if (backend == "auto") {
+    HDBSCAN<float, clustering::hdbscan::AutoMstBackend<float>> algo(
+        min_cluster_size, min_samples, selectionMethod, jobs, convention);
+    run_with(algo);
+  } else if (backend == "prim") {
+    HDBSCAN<float, clustering::hdbscan::PrimMstBackend<float>> algo(
+        min_cluster_size, min_samples, selectionMethod, jobs, convention);
+    run_with(algo);
+  } else if (backend == "boruvka") {
+    HDBSCAN<float, clustering::hdbscan::BoruvkaMstBackend<float>> algo(
+        min_cluster_size, min_samples, selectionMethod, jobs, convention);
+    run_with(algo);
+  } else if (backend == "nn_descent") {
+    HDBSCAN<float, clustering::hdbscan::NnDescentMstBackend<float>> algo(
+        min_cluster_size, min_samples, selectionMethod, jobs, convention);
+    run_with(algo);
+  } else {
+    throw nb::value_error("backend must be one of {'auto', 'prim', 'boruvka', 'nn_descent'}");
   }
+
   auto labels_np = wrapAsNumpy<std::int32_t>(std::move(labels_out));
   auto scores_np = wrapAsNumpy<float>(std::move(scores_out));
 
-  return std::make_tuple(std::move(labels_np), std::move(scores_np), algo.nClusters());
+  return std::make_tuple(std::move(labels_np), std::move(scores_np), n_clusters);
 }
 
 static nb::ndarray<nb::numpy, float, nb::ndim<2>>
@@ -320,17 +343,24 @@ NB_MODULE(_clustering, m) {
 
   m.def("hdbscan", &hdbscan_binding, nb::arg("data"), nb::arg("min_cluster_size") = 5,
         nb::arg("min_samples") = 0, nb::arg("method") = "eom", nb::arg("n_jobs") = -1,
-        nb::arg("min_samples_convention") = "sklearn",
-        "Run HDBSCAN with the auto-dispatched MST backend. Returns a tuple "
-        "(labels, outlier_scores, n_clusters) where labels is int32 (N,) with -1 marking "
-        "noise, outlier_scores is float32 (N,) in [0, 1], and n_clusters is the total "
-        "cluster count. min_samples = 0 resolves to min_cluster_size at fit time. "
+        nb::arg("min_samples_convention") = "sklearn", nb::arg("backend") = "auto",
+        "Run HDBSCAN. Returns a tuple (labels, outlier_scores, n_clusters) where labels is "
+        "int32 (N,) with -1 marking noise, outlier_scores is float32 (N,) in [0, 1], and "
+        "n_clusters is the total cluster count. min_samples = 0 resolves to min_cluster_size "
+        "at fit time. "
         "method must be 'eom' (excess-of-mass, the default) or 'leaf'. "
         "min_samples_convention selects the neighbour-count semantics: 'sklearn' (default) "
         "treats the query point itself as one of the min_samples neighbours (matches "
         "scikit-learn and the hdbscan package); 'campello' counts only non-self neighbours "
         "(literal Campello 2015 definition). The two differ by one neighbour and produce "
-        "different MSTs on high-dimensional near-uniform data.");
+        "different MSTs on high-dimensional near-uniform data. "
+        "backend selects the MST algorithm: 'auto' (default) dispatches on input shape "
+        "per the rules documented on AutoMstBackend; 'prim' materialises the dense (n*n) "
+        "mutual-reachability matrix and runs Prim (exact, memory-bounded by the 256 MiB "
+        "budget, so n <= ~8192); 'boruvka' runs KDTree-accelerated Boruvka rounds (exact, "
+        "scales to large n at low-to-moderate d); 'nn_descent' builds an approximate kNN "
+        "graph then runs Kruskal with a connectivity fallback (approximate, best at large "
+        "n and high d where the exact backends are too slow).");
 
   m.def("_roundtrip_zero_copy", &roundtrip_zero_copy, nb::arg("data"),
         "Test helper: borrow contiguous f32 array, copy into Owned NDArray, return as numpy.");
