@@ -417,10 +417,10 @@ TEST(HdbscanAutoBackend, DispatcherTotalityGrid) {
   const std::array<Case, 9> cases = {{
       {.n = 500, .d = dLo, .expectedArm = kBoruvkaArm, .label = "N=500,d=dLo"},
       {.n = 500, .d = dMid, .expectedArm = kPrimArm, .label = "N=500,d=dMid"},
-      {.n = 500, .d = dHi, .expectedArm = kPrimArm, .label = "N=500,d=dHi"},
+      {.n = 500, .d = dHi, .expectedArm = kNnDescentArm, .label = "N=500,d=dHi"},
       {.n = nIn, .d = dLo, .expectedArm = kBoruvkaArm, .label = "N=primIn,d=dLo"},
       {.n = nIn, .d = dMid, .expectedArm = kPrimArm, .label = "N=primIn,d=dMid"},
-      {.n = nIn, .d = dHi, .expectedArm = kPrimArm, .label = "N=primIn,d=dHi"},
+      {.n = nIn, .d = dHi, .expectedArm = kNnDescentArm, .label = "N=primIn,d=dHi"},
       {.n = nOut, .d = dLo, .expectedArm = kBoruvkaArm, .label = "N=primOut,d=dLo"},
       {.n = nOut, .d = dMid, .expectedArm = kBoruvkaArm, .label = "N=primOut,d=dMid"},
       {.n = nOut, .d = dHi, .expectedArm = kNnDescentArm, .label = "N=primOut,d=dHi"},

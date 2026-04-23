@@ -24,7 +24,7 @@ namespace clustering::hdbscan {
  * @c 256 MiB which comfortably accommodates @c n <= 8192 at @c float precision; the auto
  * dispatcher's Prim threshold must satisfy this invariant at its tuned default.
  */
-inline constexpr std::size_t kPrimMrdMatrixByteBudget = std::size_t{256} << 20;
+inline constexpr std::size_t kPrimMrdMatrixByteBudget = std::size_t{512} << 20;
 
 /**
  * @brief Dense, exact minimum-spanning-tree backend over the mutual-reachability distance.

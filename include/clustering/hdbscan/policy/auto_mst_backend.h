@@ -141,7 +141,11 @@ private:
       if (!std::holds_alternative<BoruvkaMstBackend<T>>(m_held)) {
         m_held.template emplace<BoruvkaMstBackend<T>>();
       }
-    } else if (primFitsBudget(n)) {
+    } else if (d <= boruvkaDimCeil && primFitsBudget(n)) {
+      // Prim's dense MRD matrix beats both Boruvka and NN-Descent in the @c d <= 60 band
+      // when @c n is small enough for the matrix to fit. Above @c boruvkaDimCeil the dense
+      // build's wall is dominated by the @c d-wide pairwise compute and NN-Descent (with the
+      // optimised disconnect fallback) wins; the cap keeps Prim out of that regime.
       if (!std::holds_alternative<PrimMstBackend<T>>(m_held)) {
         m_held.template emplace<PrimMstBackend<T>>();
       }
