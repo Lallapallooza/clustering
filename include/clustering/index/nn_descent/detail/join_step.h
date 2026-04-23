@@ -64,43 +64,137 @@ template <class T> struct JoinStep {
     const T *data = X.data();
 
     // Partition each node's neighbors into "new" (admitted last iteration) and "old" for this
-    // iteration's local-join. Both lists are flattened into a single (sorted-by-node) buffer.
-    std::vector<std::vector<std::int32_t>> newList(n);
-    std::vector<std::vector<std::int32_t>> oldList(n);
-    for (std::size_t i = 0; i < n; ++i) {
-      const auto ii = static_cast<std::int32_t>(i);
-      const std::size_t sz = bank.sizeAt(ii);
-      newList[i].reserve(sz);
-      oldList[i].reserve(sz);
-      for (std::size_t s = 0; s < sz; ++s) {
-        const std::int32_t nb = bank.idxAt(ii, s);
-        if (bank.isNew(ii, s)) {
-          newList[i].push_back(nb);
-        } else {
-          oldList[i].push_back(nb);
+    // iteration's local-join in a CSR-style packed layout. Two pairs of (offset, length) arrays
+    // (one for new, one for old) point into a single contiguous buffer per epoch. The buffer
+    // length per node is at most @c k, so a flat (n * k) allocation upper-bounds storage and the
+    // exact length per node is recorded in @c newLen[i] / @c oldLen[i].
+    std::vector<std::int32_t> newBuf(n * k);
+    std::vector<std::int32_t> oldBuf(n * k);
+    std::vector<std::int32_t> newLen(n, 0);
+    std::vector<std::int32_t> oldLen(n, 0);
+
+    auto buildForwardRange = [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i) {
+        const auto ii = static_cast<std::int32_t>(i);
+        const std::size_t sz = bank.sizeAt(ii);
+        std::int32_t *newRow = newBuf.data() + (i * k);
+        std::int32_t *oldRow = oldBuf.data() + (i * k);
+        std::int32_t nl = 0;
+        std::int32_t ol = 0;
+        for (std::size_t s = 0; s < sz; ++s) {
+          const std::int32_t nb = bank.idxAt(ii, s);
+          if (bank.isNew(ii, s)) {
+            newRow[nl++] = nb;
+          } else {
+            oldRow[ol++] = nb;
+          }
         }
+        newLen[i] = nl;
+        oldLen[i] = ol;
       }
+    };
+
+    if (pool.shouldParallelize(n, 256, 2) && pool.pool != nullptr) {
+      pool.pool->submit_blocks(std::size_t{0}, n, buildForwardRange).wait();
+    } else {
+      buildForwardRange(0, n);
     }
 
     // Age the bank's epoch so the next call sees only freshly-admitted entries as "new." The
     // snapshot above captured this iteration's new set; subsequent admissions retag entries.
     bank.ageEpoch();
 
-    // Build reverse neighbor lists: for each node u, include every node v that has u among its
-    // k-nearest. Local-join explores both forward and reverse neighbors per Dong 2011.
-    std::vector<std::vector<std::int32_t>> reverseNew(n);
-    std::vector<std::vector<std::int32_t>> reverseOld(n);
-    for (std::size_t u = 0; u < n; ++u) {
-      for (const std::int32_t v : newList[u]) {
-        if (v >= 0 && std::cmp_less(v, n)) {
-          reverseNew[static_cast<std::size_t>(v)].push_back(static_cast<std::int32_t>(u));
+    // Build reverse neighbor lists in CSR form. Forward (i -> v) becomes reverse (v -> i). Two
+    // passes: counting (atomic increments per v) followed by scatter (atomic-fetch-add to claim
+    // a slot per v). Output is two CSR-style buffers (offsets, indices) per epoch.
+    std::vector<std::atomic<std::int32_t>> revNewCnt(n);
+    std::vector<std::atomic<std::int32_t>> revOldCnt(n);
+    auto countRange = [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t u = lo; u < hi; ++u) {
+        const std::int32_t nl = newLen[u];
+        const std::int32_t *newRow = newBuf.data() + (u * k);
+        for (std::int32_t s = 0; s < nl; ++s) {
+          const std::int32_t v = newRow[s];
+          if (v >= 0 && std::cmp_less(v, n)) {
+            revNewCnt[static_cast<std::size_t>(v)].fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+        const std::int32_t ol = oldLen[u];
+        const std::int32_t *oldRow = oldBuf.data() + (u * k);
+        for (std::int32_t s = 0; s < ol; ++s) {
+          const std::int32_t v = oldRow[s];
+          if (v >= 0 && std::cmp_less(v, n)) {
+            revOldCnt[static_cast<std::size_t>(v)].fetch_add(1, std::memory_order_relaxed);
+          }
         }
       }
-      for (const std::int32_t v : oldList[u]) {
-        if (v >= 0 && std::cmp_less(v, n)) {
-          reverseOld[static_cast<std::size_t>(v)].push_back(static_cast<std::int32_t>(u));
+    };
+
+    if (pool.shouldParallelize(n, 256, 2) && pool.pool != nullptr) {
+      pool.pool->submit_blocks(std::size_t{0}, n, countRange).wait();
+    } else {
+      countRange(0, n);
+    }
+
+    // Prefix sum to convert per-v counts to CSR offsets. Serial; n integer adds is cheap.
+    std::vector<std::int32_t> revNewOffsets(n + 1, 0);
+    std::vector<std::int32_t> revOldOffsets(n + 1, 0);
+    {
+      std::int32_t accNew = 0;
+      std::int32_t accOld = 0;
+      for (std::size_t v = 0; v < n; ++v) {
+        revNewOffsets[v] = accNew;
+        revOldOffsets[v] = accOld;
+        accNew += revNewCnt[v].load(std::memory_order_relaxed);
+        accOld += revOldCnt[v].load(std::memory_order_relaxed);
+      }
+      revNewOffsets[n] = accNew;
+      revOldOffsets[n] = accOld;
+    }
+
+    std::vector<std::int32_t> revNewIdx(static_cast<std::size_t>(revNewOffsets[n]));
+    std::vector<std::int32_t> revOldIdx(static_cast<std::size_t>(revOldOffsets[n]));
+
+    // Reset the per-v counters; we'll reuse them as fetch-add cursors during scatter so each
+    // worker writes into a unique slot of the CSR index buffer.
+    for (std::size_t v = 0; v < n; ++v) {
+      revNewCnt[v].store(0, std::memory_order_relaxed);
+      revOldCnt[v].store(0, std::memory_order_relaxed);
+    }
+
+    auto scatterRange = [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t u = lo; u < hi; ++u) {
+        const std::int32_t nl = newLen[u];
+        const std::int32_t *newRow = newBuf.data() + (u * k);
+        for (std::int32_t s = 0; s < nl; ++s) {
+          const std::int32_t v = newRow[s];
+          if (v >= 0 && std::cmp_less(v, n)) {
+            const auto vSize = static_cast<std::size_t>(v);
+            const auto slot =
+                static_cast<std::size_t>(revNewCnt[vSize].fetch_add(1, std::memory_order_relaxed));
+            revNewIdx[static_cast<std::size_t>(revNewOffsets[vSize]) + slot] =
+                static_cast<std::int32_t>(u);
+          }
+        }
+        const std::int32_t ol = oldLen[u];
+        const std::int32_t *oldRow = oldBuf.data() + (u * k);
+        for (std::int32_t s = 0; s < ol; ++s) {
+          const std::int32_t v = oldRow[s];
+          if (v >= 0 && std::cmp_less(v, n)) {
+            const auto vSize = static_cast<std::size_t>(v);
+            const auto slot =
+                static_cast<std::size_t>(revOldCnt[vSize].fetch_add(1, std::memory_order_relaxed));
+            revOldIdx[static_cast<std::size_t>(revOldOffsets[vSize]) + slot] =
+                static_cast<std::int32_t>(u);
+          }
         }
       }
+    };
+
+    if (pool.shouldParallelize(n, 256, 2) && pool.pool != nullptr) {
+      pool.pool->submit_blocks(std::size_t{0}, n, scatterRange).wait();
+    } else {
+      scatterRange(0, n);
     }
 
     // Bank mutex sharding by target node. Two pushes to different targets touch disjoint
@@ -149,10 +243,16 @@ template <class T> struct JoinStep {
       for (std::size_t uSize = lo; uSize < hi; ++uSize) {
         mergedNew.clear();
         mergedOld.clear();
-        mergedNew.insert(mergedNew.end(), newList[uSize].begin(), newList[uSize].end());
-        mergedNew.insert(mergedNew.end(), reverseNew[uSize].begin(), reverseNew[uSize].end());
-        mergedOld.insert(mergedOld.end(), oldList[uSize].begin(), oldList[uSize].end());
-        mergedOld.insert(mergedOld.end(), reverseOld[uSize].begin(), reverseOld[uSize].end());
+        const std::int32_t *newRow = newBuf.data() + (uSize * k);
+        const std::int32_t *oldRow = oldBuf.data() + (uSize * k);
+        mergedNew.insert(mergedNew.end(), newRow, newRow + newLen[uSize]);
+        const std::int32_t *revNewRow = revNewIdx.data() + revNewOffsets[uSize];
+        const std::int32_t revNewSize = revNewOffsets[uSize + 1] - revNewOffsets[uSize];
+        mergedNew.insert(mergedNew.end(), revNewRow, revNewRow + revNewSize);
+        mergedOld.insert(mergedOld.end(), oldRow, oldRow + oldLen[uSize]);
+        const std::int32_t *revOldRow = revOldIdx.data() + revOldOffsets[uSize];
+        const std::int32_t revOldSize = revOldOffsets[uSize + 1] - revOldOffsets[uSize];
+        mergedOld.insert(mergedOld.end(), revOldRow, revOldRow + revOldSize);
 
         // new x new: every pair with both endpoints flagged new this iteration.
         for (std::size_t a = 0; a < mergedNew.size(); ++a) {
