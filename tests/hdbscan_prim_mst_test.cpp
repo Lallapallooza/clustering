@@ -272,9 +272,10 @@ TEST(PrimMstReference, TotalWeightAgreesWithKruskalOracle) {
 
 TEST(PrimMstBudgetDeath, OverBudgetShapeAborts) {
   GTEST_FLAG_SET(death_test_style, "threadsafe");
-  // Pick n so that n*n*sizeof(float) strictly exceeds the configured byte budget. At the
-  // current 512 MiB cap, n = 16384 lands at ~1 GiB and trips the assert by a comfortable margin.
-  constexpr std::size_t n = 16384;
+  // Pick n strictly above @c kPrimMaxN so the budget guard fires deterministically. At the
+  // current cap (16384) we use 17000 -- safely past the boundary without provoking allocator
+  // pressure on the test host.
+  constexpr std::size_t n = 17000;
   const NDArray<float, 2> X(std::array<std::size_t, 2>{n, 2});
   PrimMstBackend<float> backend;
   MstOutput<float> out;
