@@ -13,6 +13,7 @@
 #include "clustering/always_assert.h"
 #include "clustering/hdbscan/mst_output.h"
 #include "clustering/index/nn_descent.h"
+#include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/dsu.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
@@ -191,7 +192,7 @@ public:
     // minimum weight where i and j live in distinct components; weight uses the true squared
     // Euclidean distance computed row-by-row, then lifted by max with both core distances.
     if (uf.countComponents() > 1) {
-      resolveDisconnectedComponents(X, coreDistData, uf, out);
+      resolveDisconnectedComponents(X, coreDistData, pool, uf, out);
     }
   }
 
@@ -200,12 +201,17 @@ private:
    * @brief Walk every cross-component (i, j) pair to pick the minimum-weight MRD bridge per
    *        component pair, then Kruskal those bridges into the MST until connectivity is reached.
    *
+   * The per-pair best-bridge search uses the AVX2-accelerated @ref math::detail::sqEuclideanRowPtr
+   * for the inner distance kernel and parallelises over the (a, b) component-pair list via
+   * @ref math::Pool::submit_blocks. Each worker keeps a local best per pair and the owning thread
+   * publishes a single bridge per (a, b); no shared mutex on the hot path.
+   *
    * @c n_a * n_b * d scalar work per component pair; expected-rare on typical inputs where the
    * kNN graph at @c k = minSamples + kExtra already spans every point. Correctness is the
    * invariant: the spanning tree grows to @c n - 1 edges regardless of how many components the
    * fallback starts with.
    */
-  void resolveDisconnectedComponents(const NDArray<T, 2> &X, const T *coreDistData,
+  void resolveDisconnectedComponents(const NDArray<T, 2> &X, const T *coreDistData, math::Pool pool,
                                      UnionFind<std::uint32_t> &uf, MstOutput<T> &out) {
     const std::size_t n = X.dim(0);
     const std::size_t d = X.dim(1);
@@ -237,55 +243,96 @@ private:
         std::int32_t u;
         std::int32_t v;
       };
-      std::vector<Bridge> bridges;
-      bridges.reserve(members.size() * (members.size() - 1) / 2);
 
-      for (std::size_t a = 0; a < members.size(); ++a) {
+      // Materialise the live (a, b) work list before fan-out so the parallel body indexes a flat
+      // array. Skipping empty slots and slots that already share a root keeps the worker count
+      // honest after the first Kruskal round collapses components transitively.
+      struct PairIdx {
+        std::uint32_t a;
+        std::uint32_t b;
+      };
+      std::vector<PairIdx> pairs;
+      pairs.reserve(members.size() * (members.size() - 1) / 2);
+      for (std::uint32_t a = 0; a < static_cast<std::uint32_t>(members.size()); ++a) {
         if (members[a].empty()) {
           continue;
         }
-        for (std::size_t b = a + 1; b < members.size(); ++b) {
+        const std::uint32_t rootA = uf.find(members[a][0]);
+        for (std::uint32_t b = a + 1; b < static_cast<std::uint32_t>(members.size()); ++b) {
           if (members[b].empty()) {
             continue;
           }
-          // If the two component slots now share a root (after a Kruskal in a prior iteration),
-          // skip the pair.
-          if (uf.find(members[a][0]) == uf.find(members[b][0])) {
+          if (uf.find(members[b][0]) == rootA) {
             continue;
           }
-          T bestW = std::numeric_limits<T>::infinity();
-          std::int32_t bestU = 0;
-          std::int32_t bestV = 0;
-          for (const std::uint32_t ia : members[a]) {
-            const T coreI = coreDistData[ia];
-            const T *rowI = X.data() + (static_cast<std::size_t>(ia) * d);
-            for (const std::uint32_t jb : members[b]) {
-              const T coreJ = coreDistData[jb];
-              const T *rowJ = X.data() + (static_cast<std::size_t>(jb) * d);
-              T sq = T{0};
-              for (std::size_t t = 0; t < d; ++t) {
-                const T diff = rowI[t] - rowJ[t];
-                sq += diff * diff;
-              }
-              T w = sq;
-              if (coreI > w) {
-                w = coreI;
-              }
-              if (coreJ > w) {
-                w = coreJ;
-              }
-              if (w < bestW) {
-                bestW = w;
-                bestU = static_cast<std::int32_t>(ia);
-                bestV = static_cast<std::int32_t>(jb);
-              }
-            }
-          }
-          if (bestW != std::numeric_limits<T>::infinity()) {
-            bridges.push_back(Bridge{bestW, bestU, bestV});
-          }
+          pairs.push_back(PairIdx{a, b});
         }
       }
+
+      std::vector<Bridge> bridges(pairs.size(), Bridge{std::numeric_limits<T>::infinity(), 0, 0});
+
+      auto computePair = [&](std::size_t pairIdx) noexcept {
+        const auto &p = pairs[pairIdx];
+        const auto &memA = members[p.a];
+        const auto &memB = members[p.b];
+        T bestW = std::numeric_limits<T>::infinity();
+        std::int32_t bestU = 0;
+        std::int32_t bestV = 0;
+        for (const std::uint32_t ia : memA) {
+          const T coreI = coreDistData[ia];
+          const T *rowI = X.data() + (static_cast<std::size_t>(ia) * d);
+          for (const std::uint32_t jb : memB) {
+            const T coreJ = coreDistData[jb];
+            const T *rowJ = X.data() + (static_cast<std::size_t>(jb) * d);
+            const T sq = math::detail::sqEuclideanRowPtr(rowI, rowJ, d);
+            T w = sq;
+            if (coreI > w) {
+              w = coreI;
+            }
+            if (coreJ > w) {
+              w = coreJ;
+            }
+            if (w < bestW) {
+              bestW = w;
+              bestU = static_cast<std::int32_t>(ia);
+              bestV = static_cast<std::int32_t>(jb);
+            }
+          }
+        }
+        bridges[pairIdx] = Bridge{bestW, bestU, bestV};
+      };
+
+      // Cost per pair scales with @c |memA| * |memB| * d; the gate uses the largest pair as a
+      // proxy because per-pair work is wildly heterogeneous and underestimating any single big
+      // pair would leave one worker stuck while others finish.
+      std::size_t maxPairOps = 0;
+      for (const auto &p : pairs) {
+        const std::size_t ops = members[p.a].size() * members[p.b].size() * d;
+        maxPairOps = std::max(maxPairOps, ops);
+      }
+      const std::size_t totalPairOps = maxPairOps * pairs.size();
+      if (pool.pool != nullptr && pool.shouldParallelizeWork(totalPairOps)) {
+        pool.pool
+            ->submit_blocks(std::size_t{0}, pairs.size(),
+                            [&](std::size_t lo, std::size_t hi) {
+                              for (std::size_t i = lo; i < hi; ++i) {
+                                computePair(i);
+                              }
+                            })
+            .wait();
+      } else {
+        for (std::size_t i = 0; i < pairs.size(); ++i) {
+          computePair(i);
+        }
+      }
+
+      // Drop the infinity sentinel before the sort so Kruskal never sees an unset slot. In
+      // practice every pair admits at least one finite bridge (cross-component points exist).
+      bridges.erase(std::remove_if(bridges.begin(), bridges.end(),
+                                   [](const Bridge &br) {
+                                     return br.weight == std::numeric_limits<T>::infinity();
+                                   }),
+                    bridges.end());
 
       // Sort bridges ascending by weight and Kruskal them into the MST. A bridge whose endpoints
       // are already merged (via a prior bridge in the same round) is skipped by union-find.
