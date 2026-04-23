@@ -47,10 +47,68 @@ template <class T> struct TraversalCtx {
   std::size_t d;                        ///< Dimension of the point cloud.
   std::span<const std::int32_t> compOf; ///< Per-point component root.
   const T *coreDist;                    ///< Length-n core-distance (squared) buffer.
-  T *bestW;                             ///< Length-n worker-local component bests.
-  std::int32_t *bestU;                  ///< Length-n worker-local endpoint u.
-  std::int32_t *bestV;                  ///< Length-n worker-local endpoint v.
+  /// Per-node "single component" id: @c >=0 if every point under the node belongs to one
+  /// component, @c -1 if the subtree spans multiple. Indexed by @c KDTreeNode::m_id. Recomputed
+  /// once per Boruvka round; lets the walker skip subtrees that cannot supply an out-of-component
+  /// candidate for the current query. Becomes very effective in late rounds when components
+  /// have grown to enclose most points.
+  const std::int32_t *nodeSingleComp;
+  T *bestW;            ///< Length-n worker-local component bests.
+  std::int32_t *bestU; ///< Length-n worker-local endpoint u.
+  std::int32_t *bestV; ///< Length-n worker-local endpoint v.
 };
+
+/**
+ * @brief Recursive post-order walk that fills @p nodeSingleComp.
+ *
+ * Returns the single component id when every point under @p node belongs to one component, or
+ * @c -1 when the subtree is mixed. The same value lands in @p nodeSingleComp[node->m_id] for
+ * the traversal to consume.
+ */
+template <class T>
+std::int32_t computeNodeSingleComp(const KDTreeNode *node, std::span<const std::size_t> perm,
+                                   std::span<const std::int32_t> compOf,
+                                   std::vector<std::int32_t> &nodeSingleComp) noexcept {
+  if (node == nullptr) {
+    return std::int32_t{-1};
+  }
+  const auto nodeId = static_cast<std::size_t>(node->m_id);
+
+  const bool isLeaf = (node->m_left == nullptr && node->m_right == nullptr);
+  if (isLeaf) {
+    const std::size_t base = node->m_index;
+    const std::size_t count = node->m_dim;
+    if (count == 0) {
+      nodeSingleComp[nodeId] = std::int32_t{-1};
+      return std::int32_t{-1};
+    }
+    const std::int32_t first = compOf[perm[base]];
+    for (std::size_t p = 1; p < count; ++p) {
+      if (compOf[perm[base + p]] != first) {
+        nodeSingleComp[nodeId] = std::int32_t{-1};
+        return std::int32_t{-1};
+      }
+    }
+    nodeSingleComp[nodeId] = first;
+    return first;
+  }
+
+  const std::int32_t pivotComp = compOf[perm[node->m_index]];
+  const std::int32_t leftComp =
+      computeNodeSingleComp<T>(node->m_left, perm, compOf, nodeSingleComp);
+  const std::int32_t rightComp =
+      computeNodeSingleComp<T>(node->m_right, perm, compOf, nodeSingleComp);
+
+  std::int32_t result = pivotComp;
+  if (node->m_left != nullptr && leftComp != pivotComp) {
+    result = std::int32_t{-1};
+  }
+  if (result != std::int32_t{-1} && node->m_right != nullptr && rightComp != pivotComp) {
+    result = std::int32_t{-1};
+  }
+  nodeSingleComp[nodeId] = result;
+  return result;
+}
 
 /**
  * @brief Compute the MRD weight for a point pair and update the query point's best edge.
@@ -97,15 +155,16 @@ inline void updateBestForPair(TraversalCtx<T> &ctx, std::int32_t origI, std::int
  */
 template <class T>
 void singlePointScan(TraversalCtx<T> &ctx, std::int32_t origI, std::int32_t compI, T coreI,
-                     const T *rowI, const KDTreeNode *root) noexcept {
+                     const T *rowI, const KDTreeNode *root,
+                     std::vector<const KDTreeNode *> &stack) noexcept {
   if (root == nullptr) {
     return;
   }
 
-  // Caller-owned traversal stack pattern matches the KDTree's radius-query driver. Reserve a
-  // generous default so the branch-heavy pivots don't realloc mid-walk.
-  std::vector<const KDTreeNode *> stack;
-  stack.reserve(std::size_t{64});
+  // Caller-owned scratch stack: reused across every @c singlePointScan invocation in this
+  // worker's @ref nearestOutComponent slice. Hoisting the allocation out of the per-point loop
+  // turns the round's ~n vector constructions into one per worker.
+  stack.clear();
   stack.push_back(root);
 
   const T *reordered = ctx.reorderedPts.data();
@@ -114,6 +173,15 @@ void singlePointScan(TraversalCtx<T> &ctx, std::int32_t origI, std::int32_t comp
     const KDTreeNode *node = stack.back();
     stack.pop_back();
     if (node == nullptr) {
+      continue;
+    }
+
+    // Subtree-level component prune: when every point under this node belongs to the query's
+    // own component, the subtree cannot supply an out-of-component candidate for this query.
+    // Skip the descent entirely. This dominates the late Boruvka rounds where 95%+ of subtrees
+    // are self-component for any given query.
+    const std::int32_t nodeComp = ctx.nodeSingleComp[node->m_id];
+    if (nodeComp == compI) {
       continue;
     }
 
@@ -192,8 +260,10 @@ void singlePointScan(TraversalCtx<T> &ctx, std::int32_t origI, std::int32_t comp
  */
 template <class T>
 void nearestOutComponent(const KDTree<T> &tree, std::span<const std::int32_t> componentOf,
-                         const NDArray<T, 1> &coreDist, math::Pool pool,
-                         std::vector<ComponentBestEdge<T>> &bestOut) {
+                         const NDArray<T, 1> &coreDist, const NDArray<std::int32_t, 2> &knnIdx,
+                         const NDArray<T, 2> &knnSqDist, math::Pool pool,
+                         std::vector<ComponentBestEdge<T>> &bestOut,
+                         bool allSingletonComponents = false) {
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
                 "nearestOutComponent requires T to be float or double");
 
@@ -210,6 +280,11 @@ void nearestOutComponent(const KDTree<T> &tree, std::span<const std::int32_t> co
   std::span<const std::size_t> perm = tree.indexPermutation();
   std::span<const T> reordered = tree.reorderedPoints();
 
+  // Populate the per-node single-component cache via one post-order walk. Cost is O(nodeCount)
+  // and lives outside the worker fan-out so the workers see a read-only buffer.
+  std::vector<std::int32_t> nodeSingleComp(tree.nodeCount(), std::int32_t{-1});
+  internal::computeNodeSingleComp<T>(root, perm, componentOf, nodeSingleComp);
+
   const std::size_t nWorkers = (pool.pool != nullptr) ? pool.workerCount() : std::size_t{1};
 
   // Per-worker best arrays. Each worker writes to its own slot per component; the merge at the
@@ -221,6 +296,60 @@ void nearestOutComponent(const KDTree<T> &tree, std::span<const std::int32_t> co
   std::vector<std::vector<std::int32_t>> workerV(nWorkers,
                                                  std::vector<std::int32_t>(n, std::int32_t{-1}));
 
+  // kNN-derived initial bound per component. Each point's kNN list (already in hand from the
+  // core-distance query) is the cheapest catalog of nearby candidates. For each point we walk
+  // its kNN entries, find the first cross-component neighbour, and use its MRD weight to seed
+  // the per-component bound. The KDTree walker below reads @c bestW as its AABB-prune
+  // threshold; a tighter starting threshold prunes far more subtrees before any distance work
+  // happens. Strictly correct: the seed is itself a real MRD candidate edge, so adopting it as
+  // both the bound and the (provisional) best is sound. Workers tighten further per slice.
+  const std::size_t kNN = knnIdx.dim(1);
+  const T *coreData = coreDist.data();
+  std::vector<T> seedW(n, std::numeric_limits<T>::max());
+  std::vector<std::int32_t> seedU(n, std::int32_t{-1});
+  std::vector<std::int32_t> seedV(n, std::int32_t{-1});
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::int32_t compI = componentOf[i];
+    const T coreI = coreData[i];
+    const auto compISize = static_cast<std::size_t>(compI);
+    // Walk every kNN entry rather than breaking on the first cross-component match: the MRD
+    // lift @c max(coreI, coreJ, sqDist) can make a slightly farther candidate the lower-MRD
+    // one when the closer candidate has a larger core distance. A tighter seed = more AABB
+    // pruning in the tree walk below.
+    for (std::size_t s = 0; s < kNN; ++s) {
+      const std::int32_t j = knnIdx(i, s);
+      if (j < 0 || std::cmp_equal(j, i)) {
+        continue;
+      }
+      const auto jSize = static_cast<std::size_t>(j);
+      const std::int32_t compJ = componentOf[jSize];
+      if (compJ == compI) {
+        continue;
+      }
+      T w = knnSqDist(i, s);
+      if (coreI > w) {
+        w = coreI;
+      }
+      const T coreJ = coreData[jSize];
+      if (coreJ > w) {
+        w = coreJ;
+      }
+      if (w < seedW[compISize]) {
+        seedW[compISize] = w;
+        seedU[compISize] = static_cast<std::int32_t>(i);
+        seedV[compISize] = j;
+      }
+    }
+  }
+  // Replicate the seed to every worker's local arrays so each worker's @c singlePointScan
+  // walks under the seeded bound from the very first node. The merge step at the end picks
+  // the best across workers; identical seeds across slots collapse harmlessly.
+  for (std::size_t w = 0; w < nWorkers; ++w) {
+    std::copy(seedW.begin(), seedW.end(), workerW[w].begin());
+    std::copy(seedU.begin(), seedU.end(), workerU[w].begin());
+    std::copy(seedV.begin(), seedV.end(), workerV[w].begin());
+  }
+
   auto runChunk = [&](std::size_t lo, std::size_t hi, std::size_t workerSlot) noexcept {
     internal::TraversalCtx<T> ctx{
         .tree = &tree,
@@ -229,17 +358,23 @@ void nearestOutComponent(const KDTree<T> &tree, std::span<const std::int32_t> co
         .d = dim,
         .compOf = componentOf,
         .coreDist = coreDist.data(),
+        .nodeSingleComp = nodeSingleComp.data(),
         .bestW = workerW[workerSlot].data(),
         .bestU = workerU[workerSlot].data(),
         .bestV = workerV[workerSlot].data(),
     };
+    // One scratch stack per worker per round, reused across every @c singlePointScan call in
+    // this slice. KDTree depth caps node visits at @c ~log2(n) plus the leaf points; @c 64 is
+    // a generous initial reserve that elides reallocs in the worst case for @c n <= 1e6.
+    std::vector<const KDTreeNode *> stack;
+    stack.reserve(std::size_t{64});
     const T *reorderedBase = reordered.data();
     for (std::size_t slot = lo; slot < hi; ++slot) {
       const auto origI = static_cast<std::int32_t>(perm[slot]);
       const std::int32_t compI = componentOf[origI];
       const T coreI = coreDist.data()[origI];
       const T *rowI = reorderedBase + (slot * dim);
-      internal::singlePointScan<T>(ctx, origI, compI, coreI, rowI, root);
+      internal::singlePointScan<T>(ctx, origI, compI, coreI, rowI, root, stack);
     }
   };
 
@@ -252,6 +387,7 @@ void nearestOutComponent(const KDTree<T> &tree, std::span<const std::int32_t> co
   // out-of-component leaf candidates -- concretely ~16 * d comparisons per leaf hit plus a
   // handful of AABB gaps. The parallelism gate uses @c 64 as the per-slot minimum chunk so
   // very small inputs stay serial.
+  (void)allSingletonComponents;
   const bool useParallel =
       (pool.pool != nullptr) && (nWorkers > std::size_t{1}) && (n >= (nWorkers * std::size_t{64}));
   if (useParallel) {

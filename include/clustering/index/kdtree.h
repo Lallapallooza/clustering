@@ -334,6 +334,16 @@ public:
     return {m_points_reordered.data(), m_points_reordered.size()};
   }
 
+  /**
+   * @brief Total node count, equal to one past the largest @c m_id assigned during construction.
+   *
+   * Callers that side-table per-node state (e.g. the Boruvka per-round single-component cache)
+   * size their buffer to this count and index by @c node->m_id.
+   */
+  [[nodiscard]] std::size_t nodeCount() const noexcept {
+    return static_cast<std::size_t>(m_nextNodeId);
+  }
+
   /// Root of the tree; @c nullptr for an empty point set.
   [[nodiscard]] const KDTreeNode *root() const noexcept { return m_root; }
 

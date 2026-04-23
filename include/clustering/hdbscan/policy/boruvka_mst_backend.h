@@ -79,7 +79,6 @@ public:
     // downstream MRD weight and Prim oracle use the same scale.
     const auto kSigned = static_cast<std::int32_t>(minSamples);
     auto [knnIdx, knnSqDist] = tree.knnQuery(kSigned, pool);
-    (void)knnIdx;
     T *coreDistData = out.coreDistances.data();
     for (std::size_t i = 0; i < n; ++i) {
       coreDistData[i] = knnSqDist(i, minSamples - 1);
@@ -95,13 +94,18 @@ public:
     std::vector<std::int32_t> activeRoots;
     activeRoots.reserve(n);
 
+    bool firstRound = true;
     while (uf.countComponents() > 1) {
       for (std::size_t i = 0; i < n; ++i) {
         componentOf[i] = static_cast<std::int32_t>(uf.find(static_cast<std::uint32_t>(i)));
       }
 
+      // First-round fast path: every point is its own component; the kNN seed inside
+      // @c nearestOutComponent picks the right answer without a tree walk.
       detail::nearestOutComponent<T>(tree, std::span<const std::int32_t>(componentOf),
-                                     out.coreDistances, pool, bestPerComponent);
+                                     out.coreDistances, knnIdx, knnSqDist, pool, bestPerComponent,
+                                     /*allSingletonComponents=*/firstRound);
+      firstRound = false;
 
       // Collect unique root candidates that produced a finite best. A component without a
       // finite best on a >1-component graph would be a correctness failure -- the fan-out
