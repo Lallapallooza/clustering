@@ -12,16 +12,16 @@
 #include "clustering/hdbscan/mst_backend.h"
 #include "clustering/hdbscan/mst_output.h"
 #include "clustering/hdbscan/policy/auto_mst_backend.h"
-#include "clustering/hdbscan/policy/prim_mst_backend.h"
+#include "clustering/hdbscan/policy/boruvka_mst_backend.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
 using clustering::HDBSCAN;
 using clustering::NDArray;
 using clustering::hdbscan::AutoMstBackend;
+using clustering::hdbscan::BoruvkaMstBackend;
 using clustering::hdbscan::MstBackendStrategy;
 using clustering::hdbscan::MstOutput;
-using clustering::hdbscan::PrimMstBackend;
 using clustering::math::Pool;
 
 // Concept satisfaction: the dispatcher must itself satisfy @c MstBackendStrategy so
@@ -248,7 +248,8 @@ TEST(HdbscanAutoBackend, DefaultFitMatchesSklearnOnTwoMoons) {
   auto X = fix.toNdarray();
 
   // Default @c HDBSCAN<float> -- no explicit MstBackend -- so the dispatcher's arm is picked
-  // automatically. On a 200-point 2-D input the dispatcher selects the Prim arm.
+  // automatically. At @c d=2 the dispatcher selects Boruvka regardless of @c n: KDTree pruning
+  // is maximally effective at low @c d and beats Prim's dense-matrix overhead.
   HDBSCAN<float> h(5);
   h.run(X);
 
@@ -283,16 +284,16 @@ TEST(HdbscanAutoBackend, MstOutputShapeAfterRun) {
 // default-backend labels at a shape the dispatcher would route to that backend.
 // ---------------------------------------------------------------------------
 
-TEST(HdbscanAutoBackend, ExplicitPrimMatchesDefaultOnTwoMoons) {
-  // Two-moon shape sits below primNThreshold so the dispatcher picks Prim. Pinning Prim
-  // explicitly must therefore reproduce the default-backend labels.
+TEST(HdbscanAutoBackend, ExplicitBoruvkaMatchesDefaultOnTwoMoons) {
+  // Two-moon shape is @c d=2, so the dispatcher picks Boruvka. Pinning Boruvka explicitly must
+  // therefore reproduce the default-backend labels.
   const TwoMoonFixture fix;
   auto X = fix.toNdarray();
 
   HDBSCAN<float> hDefault(5);
   hDefault.run(X);
 
-  HDBSCAN<float, PrimMstBackend<float>> hPinned(5);
+  HDBSCAN<float, BoruvkaMstBackend<float>> hPinned(5);
   hPinned.run(X);
 
   std::vector<std::int32_t> defaultLabels(TwoMoonFixture::kN);
@@ -314,46 +315,87 @@ TEST(HdbscanAutoBackend, ExplicitPrimMatchesDefaultOnTwoMoons) {
 // Dispatch selection: specific (N, d) points map to the expected variant arm.
 // ---------------------------------------------------------------------------
 
-TEST(HdbscanAutoBackend, DispatcherPicksPrimOnSmallLowD) {
+TEST(HdbscanAutoBackend, DispatcherPicksBoruvkaOnSmallLowD) {
+  // At or below @c boruvkaLowDimCeil the dispatcher always picks Boruvka regardless of @c n:
+  // KDTree pruning is maximally effective at low @c d and dense-Prim's quadratic overhead does
+  // not amortise there.
   AutoMstBackend<float> backend;
-  EXPECT_EQ(backend.peekArm(/*n=*/1000, /*d=*/2), kPrimArm);
-}
-
-TEST(HdbscanAutoBackend, DispatcherPicksBoruvkaOnLargeNLowD) {
-  AutoMstBackend<float> backend;
-  EXPECT_EQ(backend.peekArm(/*n=*/AutoMstBackend<float>::primNThreshold + 1000, /*d=*/8),
+  EXPECT_EQ(backend.peekArm(/*n=*/1000, /*d=*/2), kBoruvkaArm);
+  EXPECT_EQ(backend.peekArm(/*n=*/500, /*d=*/AutoMstBackend<float>::boruvkaLowDimCeil),
             kBoruvkaArm);
 }
 
-TEST(HdbscanAutoBackend, DispatcherPicksNnDescentOnLargeNHighD) {
+TEST(HdbscanAutoBackend, DispatcherPicksPrimOnModerateNHighD) {
+  // Above @c boruvkaLowDimCeil and inside the Prim byte budget, the dense-MRD Prim backend wins
+  // because KDTree AABB pruning decays with @c d while the per-row pair kernel stays vectorised.
   AutoMstBackend<float> backend;
-  EXPECT_EQ(backend.peekArm(/*n=*/AutoMstBackend<float>::primNThreshold + 1000,
-                            /*d=*/AutoMstBackend<float>::boruvkaDimCeil + 10),
+  const std::size_t d = AutoMstBackend<float>::boruvkaLowDimCeil + 1;
+  EXPECT_EQ(backend.peekArm(/*n=*/500, d), kPrimArm);
+  EXPECT_EQ(backend.peekArm(/*n=*/5000, /*d=*/32), kPrimArm);
+}
+
+TEST(HdbscanAutoBackend, DispatcherPicksBoruvkaOnLargeNLowD) {
+  // Beyond the Prim byte budget Boruvka is the low-d answer: exact, KDTree-accelerated.
+  AutoMstBackend<float> backend;
+  std::size_t nBeyondPrim = 20000;
+  while (AutoMstBackend<float>::primFitsBudget(nBeyondPrim)) {
+    nBeyondPrim *= 2;
+  }
+  EXPECT_EQ(backend.peekArm(nBeyondPrim, /*d=*/8), kBoruvkaArm);
+}
+
+TEST(HdbscanAutoBackend, DispatcherPicksNnDescentOnLargeNHighD) {
+  // Beyond the Prim byte budget and above @c boruvkaDimCeil, NN-Descent is the only option.
+  AutoMstBackend<float> backend;
+  std::size_t nBeyondPrim = 20000;
+  while (AutoMstBackend<float>::primFitsBudget(nBeyondPrim)) {
+    nBeyondPrim *= 2;
+  }
+  EXPECT_EQ(backend.peekArm(nBeyondPrim, AutoMstBackend<float>::boruvkaDimCeil + 10),
             kNnDescentArm);
 }
 
 // ---------------------------------------------------------------------------
-// Threshold boundaries: N just below / at / above primNThreshold, d at / just above boruvkaDimCeil.
-// Each boundary point must resolve to exactly one backend (no gap).
+// Threshold boundaries: @c d at / just above @c boruvkaLowDimCeil and @c boruvkaDimCeil; @c n
+// straddling the Prim byte budget. Each boundary point must resolve to exactly one backend.
 // ---------------------------------------------------------------------------
 
-TEST(HdbscanAutoBackend, DispatcherBoundaryPrimThreshold) {
+TEST(HdbscanAutoBackend, DispatcherBoundaryBoruvkaLowDimCeil) {
   AutoMstBackend<float> backend;
-  EXPECT_EQ(backend.peekArm(AutoMstBackend<float>::primNThreshold - 1, /*d=*/4), kPrimArm);
-  EXPECT_EQ(backend.peekArm(AutoMstBackend<float>::primNThreshold, /*d=*/4), kBoruvkaArm);
+  // At or below low-d ceil: Boruvka regardless of @c n.
+  EXPECT_EQ(backend.peekArm(/*n=*/5000, AutoMstBackend<float>::boruvkaLowDimCeil), kBoruvkaArm);
+  // One above: Prim (still inside the byte budget at @c n=5000).
+  EXPECT_EQ(backend.peekArm(/*n=*/5000, AutoMstBackend<float>::boruvkaLowDimCeil + 1), kPrimArm);
+}
+
+TEST(HdbscanAutoBackend, DispatcherBoundaryPrimByteBudget) {
+  AutoMstBackend<float> backend;
+  std::size_t nOut = 8000;
+  while (AutoMstBackend<float>::primFitsBudget(nOut)) {
+    nOut += 200;
+  }
+  const std::size_t nIn = nOut - 200; // last @c n that fits, modulo step granularity.
+  EXPECT_TRUE(AutoMstBackend<float>::primFitsBudget(nIn));
+  EXPECT_FALSE(AutoMstBackend<float>::primFitsBudget(nOut));
+  const std::size_t d = AutoMstBackend<float>::boruvkaLowDimCeil + 1;
+  EXPECT_EQ(backend.peekArm(nIn, d), kPrimArm);
+  EXPECT_EQ(backend.peekArm(nOut, d), kBoruvkaArm);
 }
 
 TEST(HdbscanAutoBackend, DispatcherBoundaryBoruvkaDimCeil) {
-  const std::size_t n = AutoMstBackend<float>::primNThreshold + 100;
+  std::size_t n = 20000;
+  while (AutoMstBackend<float>::primFitsBudget(n)) {
+    n *= 2;
+  }
   AutoMstBackend<float> backend;
   EXPECT_EQ(backend.peekArm(n, AutoMstBackend<float>::boruvkaDimCeil), kBoruvkaArm);
   EXPECT_EQ(backend.peekArm(n, AutoMstBackend<float>::boruvkaDimCeil + 1), kNnDescentArm);
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch totality: a grid across the threshold boundaries covers the full (N, d) dispatch
-// surface. Every grid point routes to exactly one backend; no gap leaves a variant-monostate
-// arm. The grid straddles both thresholds in each direction.
+// Dispatch totality: a grid across the three thresholds covers the full (N, d) dispatch surface.
+// Every grid point routes to exactly one backend; no gap leaves a variant-monostate arm. The
+// grid straddles low-d ceil, Prim byte budget, and high-d ceil in each direction.
 // ---------------------------------------------------------------------------
 
 TEST(HdbscanAutoBackend, DispatcherTotalityGrid) {
@@ -363,19 +405,25 @@ TEST(HdbscanAutoBackend, DispatcherTotalityGrid) {
     std::size_t expectedArm;
     const char *label;
   };
-  const std::size_t ptNe = AutoMstBackend<float>::primNThreshold;
-  const std::size_t ptNlo = ptNe - 1;
-  const std::size_t dCe = AutoMstBackend<float>::boruvkaDimCeil;
-  const std::size_t dAbove = dCe + 1;
-  const std::array<Case, 8> cases = {{
-      {.n = 1000, .d = 2, .expectedArm = kPrimArm, .label = "N=1000,d=2"},
-      {.n = 1000, .d = dCe, .expectedArm = kPrimArm, .label = "N=1000,d=dCe"},
-      {.n = ptNlo, .d = 2, .expectedArm = kPrimArm, .label = "N=pt-1,d=2"},
-      {.n = ptNlo, .d = dCe, .expectedArm = kPrimArm, .label = "N=pt-1,d=dCe"},
-      {.n = ptNlo, .d = dAbove, .expectedArm = kPrimArm, .label = "N=pt-1,d=dCe+1"},
-      {.n = ptNe, .d = 2, .expectedArm = kBoruvkaArm, .label = "N=pt,d=2"},
-      {.n = ptNe, .d = dCe, .expectedArm = kBoruvkaArm, .label = "N=pt,d=dCe"},
-      {.n = ptNe, .d = dAbove, .expectedArm = kNnDescentArm, .label = "N=pt,d=dCe+1"},
+  const std::size_t dLo = AutoMstBackend<float>::boruvkaLowDimCeil;
+  const std::size_t dMid = AutoMstBackend<float>::boruvkaLowDimCeil + 1;
+  const std::size_t dHi = AutoMstBackend<float>::boruvkaDimCeil + 1;
+  // Find an @c n just inside and just outside the Prim byte budget.
+  std::size_t nOut = 8000;
+  while (AutoMstBackend<float>::primFitsBudget(nOut)) {
+    nOut += 200;
+  }
+  const std::size_t nIn = nOut - 200;
+  const std::array<Case, 9> cases = {{
+      {.n = 500, .d = dLo, .expectedArm = kBoruvkaArm, .label = "N=500,d=dLo"},
+      {.n = 500, .d = dMid, .expectedArm = kPrimArm, .label = "N=500,d=dMid"},
+      {.n = 500, .d = dHi, .expectedArm = kPrimArm, .label = "N=500,d=dHi"},
+      {.n = nIn, .d = dLo, .expectedArm = kBoruvkaArm, .label = "N=primIn,d=dLo"},
+      {.n = nIn, .d = dMid, .expectedArm = kPrimArm, .label = "N=primIn,d=dMid"},
+      {.n = nIn, .d = dHi, .expectedArm = kPrimArm, .label = "N=primIn,d=dHi"},
+      {.n = nOut, .d = dLo, .expectedArm = kBoruvkaArm, .label = "N=primOut,d=dLo"},
+      {.n = nOut, .d = dMid, .expectedArm = kBoruvkaArm, .label = "N=primOut,d=dMid"},
+      {.n = nOut, .d = dHi, .expectedArm = kNnDescentArm, .label = "N=primOut,d=dHi"},
   }};
   AutoMstBackend<float> backend;
   for (const auto &c : cases) {
@@ -390,10 +438,13 @@ TEST(HdbscanAutoBackend, DispatcherTotalityGrid) {
 
 TEST(HdbscanAutoBackend, ShapeStalenessReemplacementAcrossBoundary) {
   AutoMstBackend<float> backend;
-  EXPECT_EQ(backend.peekArm(/*n=*/1000, /*d=*/4), kPrimArm);
-  EXPECT_EQ(backend.peekArm(AutoMstBackend<float>::primNThreshold + 200, /*d=*/4), kBoruvkaArm);
-  EXPECT_EQ(backend.peekArm(AutoMstBackend<float>::primNThreshold + 200,
-                            AutoMstBackend<float>::boruvkaDimCeil + 5),
-            kNnDescentArm);
-  EXPECT_EQ(backend.peekArm(/*n=*/1000, /*d=*/4), kPrimArm);
+  EXPECT_EQ(backend.peekArm(/*n=*/1000, /*d=*/4), kBoruvkaArm);
+  EXPECT_EQ(backend.peekArm(/*n=*/1000, /*d=*/AutoMstBackend<float>::boruvkaLowDimCeil + 1),
+            kPrimArm);
+  std::size_t nBeyond = 20000;
+  while (AutoMstBackend<float>::primFitsBudget(nBeyond)) {
+    nBeyond *= 2;
+  }
+  EXPECT_EQ(backend.peekArm(nBeyond, AutoMstBackend<float>::boruvkaDimCeil + 5), kNnDescentArm);
+  EXPECT_EQ(backend.peekArm(/*n=*/1000, /*d=*/4), kBoruvkaArm);
 }

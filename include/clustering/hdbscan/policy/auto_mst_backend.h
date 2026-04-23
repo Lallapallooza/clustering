@@ -22,16 +22,20 @@ namespace clustering::hdbscan {
  * monomorphic and reads from @ref MstOutput.
  *
  * Selection rules, total over the full @c (N, d) domain:
- *   - @c N < @ref primNThreshold -> @ref PrimMstBackend (dense MRD matrix, exact).
- *   - @c N >= @ref primNThreshold and @c d <= @ref boruvkaDimCeil -> @ref BoruvkaMstBackend
- *     (KDTree-accelerated, exact).
- *   - @c N >= @ref primNThreshold and @c d > @ref boruvkaDimCeil -> @ref NnDescentMstBackend
+ *   - @c d <= @ref boruvkaLowDimCeil -> @ref BoruvkaMstBackend (KDTree pruning dominates at
+ *     every @c n; dense Prim's quadratic overhead does not amortise).
+ *   - @c d > @ref boruvkaLowDimCeil and @c N*N*sizeof(T) <= @ref kPrimMrdMatrixByteBudget ->
+ *     @ref PrimMstBackend (dense MRD matrix is cheap at moderate @c N and the per-row pair
+ *     kernel beats KDTree fan-out once AABB pruning decays with @c d).
+ *   - @c d <= @ref boruvkaDimCeil and Prim is out of budget -> @ref BoruvkaMstBackend
+ *     (KDTree-accelerated, exact; AABB pruning still fires enough at moderate @c d).
+ *   - @c d > @ref boruvkaDimCeil and Prim is out of budget -> @ref NnDescentMstBackend
  *     (approximate kNN-graph + Kruskal with a connectivity fallback).
  *
- * Thresholds are preprocessor-overridable via @c CLUSTERING_HDBSCAN_PRIM_N_THRESHOLD and
- * @c CLUSTERING_HDBSCAN_BORUVKA_DIM_CEIL. A compile-time invariant ties @ref primNThreshold to
- * the Prim backend's MRD-matrix byte budget (@ref kPrimMrdMatrixByteBudget) so no override
- * choice can push Prim above the documented memory ceiling.
+ * The dimensional ceiling is overridable via @c CLUSTERING_HDBSCAN_BORUVKA_DIM_CEIL. The low-d
+ * ceiling is overridable via @c CLUSTERING_HDBSCAN_BORUVKA_LOW_DIM_CEIL. The Prim regime is
+ * gated directly by the byte budget so no override choice can push Prim above the documented
+ * memory ceiling.
  *
  * Staleness uses an @c (n, d) shape tuple only, mirroring @c AutoSeeder. The dispatcher does
  * not cache data-dependent state across calls: every @c run rebuilds the held backend's
@@ -45,23 +49,25 @@ template <class T> class AutoMstBackend {
                 "AutoMstBackend<T> supports only float; a double specialization is out of scope.");
 
 public:
-#ifdef CLUSTERING_HDBSCAN_PRIM_N_THRESHOLD
+#ifdef CLUSTERING_HDBSCAN_BORUVKA_LOW_DIM_CEIL
   /**
-   * @brief Auto-dispatch threshold on @c n below which the exact dense-MRD Prim backend is
-   *        preferred; at or above this threshold the dispatch routes to Boruvka or NN-Descent on
-   *        dimension.
+   * @brief Low-dimensional ceiling at or below which Boruvka is preferred regardless of @c N.
    *
-   * Override with @c -DCLUSTERING_HDBSCAN_PRIM_N_THRESHOLD=<value>.
+   * KDTree AABB pruning is highly effective at low @c d, so the per-query fan-out of
+   * KDTree-Boruvka beats dense-MRD Prim even at small @c N. Above this ceiling the ranking
+   * inverts once Prim fits in its byte budget.
+   *
+   * Override with @c -DCLUSTERING_HDBSCAN_BORUVKA_LOW_DIM_CEIL=<value>.
    */
-  static constexpr std::size_t primNThreshold = CLUSTERING_HDBSCAN_PRIM_N_THRESHOLD;
+  static constexpr std::size_t boruvkaLowDimCeil = CLUSTERING_HDBSCAN_BORUVKA_LOW_DIM_CEIL;
 #else
-  static constexpr std::size_t primNThreshold = 5000;
+  static constexpr std::size_t boruvkaLowDimCeil = 16;
 #endif
 
 #ifdef CLUSTERING_HDBSCAN_BORUVKA_DIM_CEIL
   /**
    * @brief Dimensional ceiling above which the KDTree-based Boruvka backend gives way to the
-   *        NN-Descent approximate backend.
+   *        NN-Descent approximate backend (only consulted when Prim is out of byte budget).
    *
    * Override with @c -DCLUSTERING_HDBSCAN_BORUVKA_DIM_CEIL=<value>.
    */
@@ -70,12 +76,24 @@ public:
   static constexpr std::size_t boruvkaDimCeil = 60;
 #endif
 
-  // Budget guard: Prim must never be selected at an @c (N, d) combination whose dense MRD matrix
-  // would exceed its documented byte budget. The guard binds the dispatch threshold to the Prim
-  // backend's budget so no override choice can violate the memory invariant.
-  static_assert(primNThreshold * primNThreshold * sizeof(T) <= kPrimMrdMatrixByteBudget,
-                "primNThreshold^2 * sizeof(T) exceeds the Prim MRD-matrix byte budget; lower "
-                "CLUSTERING_HDBSCAN_PRIM_N_THRESHOLD or raise the Prim budget.");
+  static_assert(boruvkaLowDimCeil <= boruvkaDimCeil,
+                "boruvkaLowDimCeil must not exceed boruvkaDimCeil; the dispatch order assumes a "
+                "nested Boruvka regime at low d and a relaxed one at moderate d.");
+
+  /**
+   * @brief Whether the Prim regime applies at @p n under the dense-MRD byte budget.
+   *
+   * Prim materialises an @c n*n matrix of @c T, so the admissible set is @c n*n*sizeof(T) <=
+   * @ref kPrimMrdMatrixByteBudget. Exposed as a static helper so callers and tests share the
+   * exact boundary the dispatcher uses.
+   */
+  static constexpr bool primFitsBudget(std::size_t n) noexcept {
+    if (n == 0) {
+      return true;
+    }
+    constexpr std::size_t kNsqBudget = kPrimMrdMatrixByteBudget / sizeof(T);
+    return n <= kNsqBudget / n;
+  }
 
   AutoMstBackend() = default;
 
@@ -119,7 +137,11 @@ private:
     if (n == m_lastN && d == m_lastD) {
       return;
     }
-    if (n < primNThreshold) {
+    if (d <= boruvkaLowDimCeil) {
+      if (!std::holds_alternative<BoruvkaMstBackend<T>>(m_held)) {
+        m_held.template emplace<BoruvkaMstBackend<T>>();
+      }
+    } else if (primFitsBudget(n)) {
       if (!std::holds_alternative<PrimMstBackend<T>>(m_held)) {
         m_held.template emplace<PrimMstBackend<T>>();
       }
