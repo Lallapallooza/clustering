@@ -5,16 +5,22 @@ import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from pybench.charts.data import partition, payload_hash6
 from pybench.charts.figure import BuildFigureInputs, build_figure
 from pybench.charts.filenames import chart_filename
 from pybench.charts.gates import GateFailure, evaluate_gates
+from pybench.charts.labels_io import (
+    LabelCell,
+    labels_sidecar_filename_for_params,
+    save_labels,
+)
 from pybench.charts.meta import RunMetadata
 from pybench.charts.results_io import capture_metadata, load_results, save_results
 from pybench.recipe import Recipe, RunResult
 from pybench.recipes import all_recipes
-from pybench.runner import expand_param_grid, run_one
+from pybench.runner import LabelsBundle, expand_param_grid, run_one_with_labels
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +98,18 @@ def _build_parser() -> argparse.ArgumentParser:
             " cell."
         ),
     )
+    parser.add_argument(
+        "--no-labels",
+        dest="capture_labels",
+        action="store_false",
+        help=(
+            "Skip per-cell label capture and the per-partition @c .labels.npz sidecar that"
+            " @c pybench vis consumes. Default is ON (labels captured) and adds a single"
+            " @c int32[n] copy per implementation per cell plus one PCA/TruncatedSVD per"
+            " cell to produce the 2-D projection."
+        ),
+    )
+    parser.set_defaults(capture_labels=True)
     return parser
 
 
@@ -176,6 +194,78 @@ def _write_charts(
     return written
 
 
+def _labels_cell_key(result: RunResult) -> str:
+    """Build a deterministic cell key for a sidecar @c LabelCell entry.
+
+    Shape is @c "n={size}__d={dims}__jobs={n_jobs}"; when @c n_jobs is missing
+    from @c params, the @c jobs= segment is dropped. The key is only consumed
+    by @c pybench vis when rendering per-cell fixture views.
+    """
+    base = f"n={result.size}__d={result.dims}"
+    if "n_jobs" in result.params:
+        return f"{base}__jobs={result.params['n_jobs']}"
+    return base
+
+
+def _write_label_sidecars(
+    results: list[RunResult],
+    bundles: list[LabelsBundle],
+    out_dir: Path,
+) -> list[Path]:
+    """Group @p results + @p bundles by partition and write one sidecar each.
+
+    The sidecar filename shares the chart's @c hash6-prefix so both artifacts
+    sit next to each other on disk. Returns the list of written sidecar paths.
+    """
+    if len(results) != len(bundles):
+        raise ValueError(
+            f"results and bundles length mismatch: {len(results)} vs {len(bundles)}"
+        )
+
+    # Group into {(algo, non_njobs_params_tuple): (results_for_partition,
+    # bundles_for_partition)} so we can compute the per-partition hash6 that
+    # matches the chart filename.
+    groups: dict[
+        tuple[str, tuple[tuple[str, Any], ...]],
+        tuple[list[RunResult], list[LabelsBundle]],
+    ] = {}
+    from pybench.charts.data import PARTITION_EXCLUDED_PARAM_KEYS
+
+    for result, bundle in zip(results, bundles, strict=True):
+        non_njobs_params = tuple(
+            sorted(
+                (k, v)
+                for k, v in result.params.items()
+                if k not in PARTITION_EXCLUDED_PARAM_KEYS
+            )
+        )
+        key = (result.recipe_name, non_njobs_params)
+        r_list, b_list = groups.setdefault(key, ([], []))
+        r_list.append(result)
+        b_list.append(bundle)
+
+    written: list[Path] = []
+    for (algo, _), (part_results, part_bundles) in groups.items():
+        hash6 = payload_hash6(part_results)
+        # Build the sidecar filename using the first result's params so the
+        # chart and sidecar slugs stay aligned.
+        sidecar_name = labels_sidecar_filename_for_params(
+            algo, part_results[0].params, hash6
+        )
+        sidecar_path = out_dir / sidecar_name
+        cells: dict[str, LabelCell] = {}
+        for result, bundle in zip(part_results, part_bundles, strict=True):
+            cells[_labels_cell_key(result)] = LabelCell(
+                gt_labels=bundle.gt_labels,
+                ours_labels=bundle.ours_labels,
+                theirs_labels=bundle.theirs_labels,
+                projection_2d=bundle.projection_2d,
+            )
+        save_labels(sidecar_path, hash6, algo, cells)
+        written.append(sidecar_path)
+    return written
+
+
 def _run_live(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
     if args.algo:
         missing = [a for a in args.algo if a not in recipes]
@@ -190,6 +280,7 @@ def _run_live(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
 
     meta = capture_metadata()
     all_results: list[RunResult] = []
+    all_bundles: list[LabelsBundle] = []
     recipes_run: dict[str, Recipe] = {}
 
     for name, recipe in sorted(recipes.items()):
@@ -216,8 +307,13 @@ def _run_live(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
                         end=" ",
                         flush=True,
                     )
-                    result = run_one(
-                        recipe, size, dims=dim, params=params, ours_only=args.ours_only
+                    result, bundle = run_one_with_labels(
+                        recipe,
+                        size,
+                        dims=dim,
+                        params=params,
+                        ours_only=args.ours_only,
+                        capture_labels=args.capture_labels,
                     )
                     eps_info = ""
                     if "eps" in result.effective_params:
@@ -240,6 +336,8 @@ def _run_live(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
                             f"{eps_info}"
                         )
                     all_results.append(result)
+                    if bundle is not None:
+                        all_bundles.append(bundle)
 
     if not args.ours_only:
         ari_thresholds = {name: r.ari_threshold for name, r in recipes_run.items()}
@@ -255,6 +353,10 @@ def _run_live(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
     partitions = partition(all_results)
     written = _write_charts(partitions, meta, recipes_run, out_dir)
     print(f"Charts saved to {out_dir}/ ({len(written)} PNG(s))")
+
+    if args.capture_labels and all_bundles:
+        sidecars = _write_label_sidecars(all_results, all_bundles, out_dir)
+        print(f"Labels saved to {out_dir}/ ({len(sidecars)} sidecar(s))")
     return 0
 
 
