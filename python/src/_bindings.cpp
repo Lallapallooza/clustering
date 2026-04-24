@@ -355,12 +355,11 @@ NB_MODULE(_clustering, m) {
         "(literal Campello 2015 definition). The two differ by one neighbour and produce "
         "different MSTs on high-dimensional near-uniform data. "
         "backend selects the MST algorithm: 'auto' (default) dispatches on input shape "
-        "per the rules documented on AutoMstBackend; 'prim' materialises the dense (n*n) "
-        "mutual-reachability matrix and runs Prim (exact, memory-bounded by the 256 MiB "
-        "budget, so n <= ~8192); 'boruvka' runs KDTree-accelerated Boruvka rounds (exact, "
-        "scales to large n at low-to-moderate d); 'nn_descent' builds an approximate kNN "
-        "graph then runs Kruskal with a connectivity fallback (approximate, best at large "
-        "n and high d where the exact backends are too slow).");
+        "per the rules documented on AutoMstBackend; 'prim' runs streaming dense Prim "
+        "(exact, gated by a quadratic compute budget); 'boruvka' runs KDTree-accelerated "
+        "Boruvka rounds (exact, scales to large n at low-to-moderate d); 'nn_descent' "
+        "builds an approximate kNN graph then runs Kruskal with a connectivity fallback "
+        "(approximate, best at large n and high d where the exact backends are too slow).");
 
   m.def("_roundtrip_zero_copy", &roundtrip_zero_copy, nb::arg("data"),
         "Test helper: borrow contiguous f32 array, copy into Owned NDArray, return as numpy.");

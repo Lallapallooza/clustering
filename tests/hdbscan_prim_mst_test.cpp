@@ -264,6 +264,41 @@ TEST(PrimMstReference, TotalWeightAgreesWithKruskalOracle) {
   EXPECT_EQ(uf.componentSize(root), n);
 }
 
+TEST(PrimMstDenseCore, CoreDistancesAgreeWithReferenceAtDim32) {
+  const std::size_t n = 1100;
+  const std::size_t d = 32;
+  const std::size_t minSamples = 5;
+  const auto X = makeGaussianPoints(n, d, 0xD32C0A5EULL);
+
+  PrimMstBackend<float> backend;
+  MstOutput<float> out;
+  backend.run(X, minSamples, Pool{}, out);
+
+  ASSERT_EQ(out.edges.size(), n - 1);
+  ASSERT_EQ(out.coreDistances.dim(0), n);
+
+  const std::array<std::size_t, 9> rows = {0, 1, 17, 128, 257, 511, 777, 1023, 1099};
+  std::vector<float> rowDistances;
+  rowDistances.reserve(n - 1);
+  for (const std::size_t i : rows) {
+    rowDistances.clear();
+    const float *const rowI = X.data() + (i * d);
+    for (std::size_t j = 0; j < n; ++j) {
+      if (i == j) {
+        continue;
+      }
+      rowDistances.push_back(
+          clustering::math::detail::sqEuclideanRowPtr(rowI, X.data() + (j * d), d));
+    }
+    std::nth_element(rowDistances.begin(),
+                     rowDistances.begin() + static_cast<std::ptrdiff_t>(minSamples - 1),
+                     rowDistances.end());
+    const float expected = rowDistances[minSamples - 1];
+    const float tol = 1e-4F * std::max(1.0F, std::abs(expected));
+    EXPECT_NEAR(out.coreDistances(i), expected, tol) << "i=" << i;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Out-of-budget assertion: a shape whose MRD matrix exceeds kPrimMrdMatrixByteBudget fires
 // CLUSTERING_ALWAYS_ASSERT before allocating. Death test: size chosen so n*n*sizeof(float)
