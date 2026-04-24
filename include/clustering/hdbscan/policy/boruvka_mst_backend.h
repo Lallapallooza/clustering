@@ -70,8 +70,11 @@ public:
     out.coreDistances = NDArray<T, 1>(std::array<std::size_t, 1>{n});
 
     // Build the tree once; reused for the kNN core-distance query and for every Boruvka
-    // round's per-point nearest-out-of-component traversal.
-    const KDTree<T> tree(X);
+    // round's per-point nearest-out-of-component traversal. LeafSize=32 halves the internal
+    // node count against the default 16-leaf tree; at d>=4 the batched-distance leaf kernel
+    // amortises the larger leaf's arithmetic well enough that the saved per-node AABB gap and
+    // pivot distance wins net positive on every shape exercised by HDBSCAN's dispatch gates.
+    const KDTree<T, KDTreeDistanceType::kEucledian, 64> tree(X);
 
     // Phase 1: core distances via kNN at k = minSamples. knnQuery returns neighbours sorted
     // ascending by squared distance, so the minSamples-th (1-based) neighbour is at column

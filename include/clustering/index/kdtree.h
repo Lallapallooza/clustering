@@ -11,9 +11,11 @@
 #include <vector>
 
 #include "clustering/always_assert.h"
+#include "clustering/math/aabb.h"
 #include "clustering/math/detail/avx2_helpers.h"
-#include "clustering/math/detail/bounded_max_heap.h"
 #include "clustering/math/detail/radius_scan.h"
+#include "clustering/math/detail/sq_distances_block.h"
+#include "clustering/math/detail/top_k_neighbors.h"
 #include "clustering/math/thread.h"
 #include "clustering/memory/linear_alloc.h"
 #include "clustering/ndarray.h"
@@ -247,30 +249,20 @@ public:
     NDArray<T, 2> sqDists({n, kSz});
 
     auto runRange = [&](std::size_t lo, std::size_t hi) {
-      // Reuse the traversal stack and heap across every query in this chunk; both are reset at
-      // the head of each per-point walk.
+      // Reuse the traversal stack and top-k tracker across every query in this chunk; both are
+      // reset at the head of each per-point walk.
       std::vector<KDTreeNode *> stack;
       stack.reserve(kDefaultStackReserve);
-      math::detail::BoundedMaxHeap<T, std::int32_t> heap(kSz);
+      math::detail::TopKNeighbors<T, std::int32_t> topK(kSz);
       const T *sourceData = m_points.data();
       std::int32_t *idxOut = indices.data();
       T *distOut = sqDists.data();
       for (std::size_t i = lo; i < hi; ++i) {
         const auto iOriginal = static_cast<std::int32_t>(i);
         const T *qp = sourceData + (i * m_dim);
-        heap.clear();
-        knnQueryImpl(m_root, qp, iOriginal, heap, stack);
-        // Drain the heap into descending-distance order (root is largest), then reverse to get
-        // ascending order. Drain slots are written to the tail of the row so the reverse step is
-        // just index arithmetic.
-        std::size_t slot = heap.size();
-        while (slot > 0) {
-          --slot;
-          const auto &top = heap.top();
-          idxOut[(i * kSz) + slot] = top.second;
-          distOut[(i * kSz) + slot] = top.first;
-          heap.pop();
-        }
+        topK.clear();
+        knnQueryImpl(m_root, qp, iOriginal, topK, stack);
+        topK.drainAscending(distOut + (i * kSz), idxOut + (i * kSz));
       }
     };
 
@@ -557,22 +549,24 @@ private:
   }
 
   /**
-   * @brief Depth-first kNN walker with bounded-max-heap pruning.
+   * @brief Depth-first kNN walker with small top-@c k tracker pruning.
    *
-   * Pushes every candidate point into the heap, using the heap's largest-key entry as the
-   * pruning bound. Until the heap fills (holds @c k entries), the bound is
-   * @c std::numeric_limits<T>::max() and the walker accepts all subtrees; once full, subtrees
-   * whose minimum possible distance along the split axis exceeds the bound are skipped.
+   * Admits every candidate point to @p topK, whose retained worst-key serves as the pruning
+   * bound. Until the tracker fills (holds @c k entries), the bound is @c +inf and the walker
+   * accepts all subtrees; once full, subtrees whose minimum possible distance along the split
+   * axis exceeds the bound are skipped. The tracker's @c O(1) reject path on the common
+   * "new distance is not smaller than the current worst" case replaces the heap sift that
+   * dominated this walker's cycle budget at small @c k.
    *
    * @param root       Root node of the subtree to search.
    * @param qp         Pointer to the contiguous query point; size-@c m_dim.
    * @param selfIndex  Original-index slot to exclude from the result (the query's own row).
-   * @param heap       Caller-owned bounded max-heap; cleared by the public @ref knnQuery driver.
+   * @param topK       Caller-owned top-@c k tracker; cleared by the public @ref knnQuery driver.
    * @param stack      Caller-owned traversal scratch; cleared at the head of each call, reused
    *                   across subsequent calls within a range chunk.
    */
   void knnQueryImpl(KDTreeNode *root, const T *qp, std::int32_t selfIndex,
-                    math::detail::BoundedMaxHeap<T, std::int32_t> &heap,
+                    math::detail::TopKNeighbors<T, std::int32_t> &topK,
                     std::vector<KDTreeNode *> &stack) const {
     if (root == nullptr) {
       return;
@@ -591,42 +585,76 @@ private:
         continue;
       }
 
-      // Current pruning bound. Until the heap is full, accept everything; once full, the heap
-      // root's squared distance is the worst retained and serves as the upper bound.
-      const T bound =
-          (heap.size() < heap.capacity()) ? std::numeric_limits<T>::max() : heap.top().first;
+      // Current pruning bound. Until the tracker fills, accept everything; once full, the
+      // retained worst-key serves as the upper bound.
+      const T bound = topK.boundKey();
+
+      // AABB gap prune: the minimum possible squared distance from the query to any point
+      // under @c node is @c pointAabbGapSq against the subtree's bounding box. The parent's
+      // single-axis prune is a strictly weaker lower bound; at d>=4 the full-AABB gap skips
+      // subtrees the axis prune lets through, which at d=8 is the dominant share of the kNN
+      // walker's remaining internal-node visits.
+      if (bound != std::numeric_limits<T>::max()) {
+        auto [nmin, nmax] = this->nodeBounds(node);
+        const T gapSq = math::pointAabbGapSq<T>(qp, nmin, nmax);
+        if (gapSq >= bound) {
+          continue;
+        }
+      }
 
       if (node->m_left == nullptr && node->m_right == nullptr) {
-        // Leaf: walk the contiguous count x d block and push each candidate into the heap. Self-
-        // exclusion is by original index so a candidate is skipped iff it is the query row.
+        // Leaf: walk the contiguous count x d block and admit each candidate. Self-exclusion
+        // is by original index so a candidate is skipped iff it is the query row. Distances
+        // are computed in blocks of four so the horizontal-sum epilogue is shared across
+        // neighbours; the top-k admit then runs over the precomputed dsq vector.
         const std::size_t base = node->m_index;
         const std::size_t count = node->m_dim;
         const T *leafPts = reorderedBase + (base * m_dim);
+        std::array<T, LeafSize> dsqBuf{};
+        math::detail::sqDistancesAosBlock<T>(qp, leafPts, count, m_dim, dsqBuf.data());
+        // Batch-level prune: if every distance in the leaf exceeds the current worst retained
+        // bound, no candidate can enter the tracker. Scan for the minimum once; the common
+        // case at LeafSize=64 with k in [4, 32] is that every distance falls above the bound
+        // and the per-entry admit loop (self-exclude cmp, index load, topK.push) is skipped
+        // entirely. The scan runs scalar because LeafSize is known at compile time and the
+        // auto-vectoriser produces a tight min-reduce with no hsum epilogue of its own.
+        if (topK.full()) {
+          T minDsq = dsqBuf[0];
+          for (std::size_t i = 1; i < count; ++i) {
+            if (dsqBuf[i] < minDsq) {
+              minDsq = dsqBuf[i];
+            }
+          }
+          if (minDsq >= bound) {
+            continue;
+          }
+        }
         for (std::size_t i = 0; i < count; ++i) {
           const auto pointIdx = static_cast<std::int32_t>(m_indices[base + i]);
           if (pointIdx == selfIndex) {
             continue;
           }
-          const T dsq = math::detail::sqEuclideanRowPtr(qp, leafPts + (i * m_dim), m_dim);
-          heap.push(dsq, pointIdx);
+          topK.push(dsqBuf[i], pointIdx);
         }
         continue;
       }
 
-      // Internal: test the pivot, then descend near child first so the bound tightens before the
-      // far-child prune test. The pivot's pointwise distance competes with the heap directly.
+      // Internal: test the pivot, then descend near child first so the bound tightens before
+      // the far-child prune test. Compute the split-axis delta squared first so both the pivot
+      // admit and the descend-far gate can share it: the full d-wide pivot distance is at least
+      // the split-axis contribution, so a larger delta squared proves the pivot cannot enter
+      // the retained set and the d-wide hsum is skipped entirely.
       const std::size_t pivotSlot = node->m_index;
       const std::size_t splitDim = node->m_dim;
       const T *pivotRow = reorderedBase + (pivotSlot * m_dim);
       const auto pivotIdx = static_cast<std::int32_t>(m_indices[pivotSlot]);
-      if (pivotIdx != selfIndex) {
-        const T dist_sq = math::detail::sqEuclideanRowPtr(qp, pivotRow, m_dim);
-        heap.push(dist_sq, pivotIdx);
-      }
-
       const T pivotCoord = pivotRow[splitDim];
       const T diff = qp[splitDim] - pivotCoord;
       const T diffSq = diff * diff;
+      if (pivotIdx != selfIndex && diffSq <= bound) {
+        const T dist_sq = math::detail::sqEuclideanRowPtr(qp, pivotRow, m_dim);
+        topK.push(dist_sq, pivotIdx);
+      }
       // DFS descends near-first, far-second. Stack is LIFO, so push far before near.
       if (diff < 0) {
         if (diffSq <= bound && node->m_right != nullptr) {

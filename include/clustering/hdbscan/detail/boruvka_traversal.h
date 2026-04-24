@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -11,6 +12,7 @@
 #include "clustering/index/kdtree.h"
 #include "clustering/math/aabb.h"
 #include "clustering/math/detail/avx2_helpers.h"
+#include "clustering/math/detail/sq_distances_block.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
@@ -40,8 +42,8 @@ namespace internal {
  *
  * @tparam T Scalar element type.
  */
-template <class T> struct TraversalCtx {
-  const KDTree<T> *tree;
+template <class T, class Tree = KDTree<T>> struct TraversalCtx {
+  const Tree *tree;
   std::span<const std::size_t> perm;    ///< Reordered-slot -> original-index.
   std::span<const T> reorderedPts;      ///< Flat @c (n*d) reordered-points buffer.
   std::size_t d;                        ///< Dimension of the point cloud.
@@ -111,21 +113,20 @@ std::int32_t computeNodeSingleComp(const KDTreeNode *node, std::span<const std::
 }
 
 /**
- * @brief Compute the MRD weight for a point pair and update the query point's best edge.
+ * @brief MRD weight lift + per-component best update, given a precomputed squared distance.
  *
- * Inlined into the leaf walk so the hot loop over candidate @c j contains exactly the distance
- * kernel plus the three-way max and the per-component update -- no helper call frame. The
- * writes target @c ctx.bestW[compI] directly; concurrent updates to the same @c compI from
+ * Split from the distance compute so leaf walks can batch the @c d-wide squared-distance
+ * arithmetic across four neighbours at a time (amortising the horizontal-sum epilogue) while
+ * keeping the same-component short-circuit and the per-component update in a scalar loop.
+ * Writes target @c ctx.bestW[compI] directly; concurrent updates to the same @c compI from
  * different workers are ruled out by the per-worker slot contract.
  */
-template <class T>
-inline void updateBestForPair(TraversalCtx<T> &ctx, std::int32_t origI, std::int32_t compI, T coreI,
-                              const T *rowI, std::int32_t origJ, std::int32_t compJ,
-                              const T *rowJ) noexcept {
+template <class T, class Tree>
+inline void considerPairWithSq(TraversalCtx<T, Tree> &ctx, std::int32_t origI, std::int32_t compI,
+                               T coreI, std::int32_t origJ, std::int32_t compJ, T sq) noexcept {
   if (compI == compJ) {
     return;
   }
-  const T sq = math::detail::sqEuclideanRowPtr(rowI, rowJ, ctx.d);
   T mrd = sq;
   if (coreI > mrd) {
     mrd = coreI;
@@ -142,6 +143,20 @@ inline void updateBestForPair(TraversalCtx<T> &ctx, std::int32_t origI, std::int
   }
 }
 
+/// Thin wrapper: compute the squared distance on the fly and forward to
+/// @ref considerPairWithSq. Used for the internal-node pivot; a single per-node call cannot
+/// benefit from the four-at-a-time hsum batching so no kernel switch is needed.
+template <class T, class Tree>
+inline void updateBestForPair(TraversalCtx<T, Tree> &ctx, std::int32_t origI, std::int32_t compI,
+                              T coreI, const T *rowI, std::int32_t origJ, std::int32_t compJ,
+                              const T *rowJ) noexcept {
+  if (compI == compJ) {
+    return;
+  }
+  const T sq = math::detail::sqEuclideanRowPtr(rowI, rowJ, ctx.d);
+  considerPairWithSq<T, Tree>(ctx, origI, compI, coreI, origJ, compJ, sq);
+}
+
 /**
  * @brief Traverse the KDTree with a single query point, seeking the nearest out-of-component j.
  *
@@ -153,11 +168,20 @@ inline void updateBestForPair(TraversalCtx<T> &ctx, std::int32_t origI, std::int
  * The bound that prunes subtrees is @c ctx.bestW[compI]; it tightens monotonically as candidates
  * improve. No separate per-subtree cache is required.
  */
-template <class T>
-void singlePointScan(TraversalCtx<T> &ctx, std::int32_t origI, std::int32_t compI, T coreI,
+template <class T, class Tree>
+void singlePointScan(TraversalCtx<T, Tree> &ctx, std::int32_t origI, std::int32_t compI, T coreI,
                      const T *rowI, const KDTreeNode *root,
                      std::vector<const KDTreeNode *> &stack) noexcept {
   if (root == nullptr) {
+    return;
+  }
+  // MRD has a hard floor at @c coreI: every candidate edge weight equals
+  // @c max(sqDist, coreI, coreJ) >= coreI. When the running component bound is already at
+  // that floor, no walk finding can lower it, so the whole traversal is redundant. This fires
+  // on round 1 after the kNN-seed phase for any singleton whose nearest kNN neighbour lies
+  // strictly inside @c coreI (common on well-separated clusters) and saves the entire per-
+  // point fan-out for those points.
+  if (ctx.bestW[compI] <= coreI) {
     return;
   }
 
@@ -197,27 +221,53 @@ void singlePointScan(TraversalCtx<T> &ctx, std::int32_t origI, std::int32_t comp
       const std::size_t base = node->m_index;
       const std::size_t count = node->m_dim;
       const T *leafPts = reordered + (base * ctx.d);
+      // Batched squared-distance compute: four neighbours share one hsum tree, halving the
+      // per-distance reduction cost at d=8-16. Buffer sized for the largest @c LeafSize any
+      // HDBSCAN backend instantiates; the count-gated tail in @ref sqDistancesAosBlock caps
+      // stores at @p count so the extra slots cost only one stack-frame slot.
+      std::array<T, 64> dsqBuf{};
+      math::detail::sqDistancesAosBlock<T>(rowI, leafPts, count, ctx.d, dsqBuf.data());
+      // Batch-level prune: MRD >= sqDist, so if the minimum squared distance in the leaf is
+      // already at or above the running component bound, no pair in the leaf can improve it.
+      // Skip the per-pair MRD lift + component-best update in that case. Saves scanning up to
+      // 64 leaf entries at LeafSize=64 on any leaf the prune approves past the AABB gap but
+      // has uniformly large distances.
+      const T compBound = ctx.bestW[compI];
+      T minDsq = dsqBuf[0];
+      for (std::size_t p = 1; p < count; ++p) {
+        if (dsqBuf[p] < minDsq) {
+          minDsq = dsqBuf[p];
+        }
+      }
+      if (minDsq >= compBound) {
+        continue;
+      }
       for (std::size_t p = 0; p < count; ++p) {
         const auto origJ = static_cast<std::int32_t>(ctx.perm[base + p]);
         const std::int32_t compJ = ctx.compOf[origJ];
-        const T *rowJ = leafPts + (p * ctx.d);
-        updateBestForPair<T>(ctx, origI, compI, coreI, rowI, origJ, compJ, rowJ);
+        considerPairWithSq<T, Tree>(ctx, origI, compI, coreI, origJ, compJ, dsqBuf[p]);
       }
       continue;
     }
 
-    // Internal node: score the pivot first, then descend. The pivot row lives at the node's
-    // reordered slot; its original index comes through the permutation.
+    // Internal node: score the pivot, then descend. The pivot row lives at the node's
+    // reordered slot; its original index comes through the permutation. The pivot distance is
+    // only scored when the split-axis delta squared stays inside the current per-component
+    // bound -- since the full d-wide squared distance is at least the split-axis contribution,
+    // a larger split-axis delta proves the pivot cannot improve the bound and the d-wide kernel
+    // (an hsum-per-call) is skipped entirely.
     const std::size_t pivotSlot = node->m_index;
     const auto origJ = static_cast<std::int32_t>(ctx.perm[pivotSlot]);
     const std::int32_t compJ = ctx.compOf[origJ];
     const T *pivotRow = reordered + (pivotSlot * ctx.d);
-    updateBestForPair<T>(ctx, origI, compI, coreI, rowI, origJ, compJ, pivotRow);
-
-    // Descend near-first, far-second against the split axis. Push far before near so the stack
-    // pops near first. Distance along the split axis is a cheaper pre-prune than the full gap.
     const std::size_t splitDim = node->m_dim;
     const T diff = rowI[splitDim] - pivotRow[splitDim];
+    const T diffSq = diff * diff;
+    if (compJ != compI && diffSq <= ctx.bestW[compI]) {
+      updateBestForPair<T, Tree>(ctx, origI, compI, coreI, rowI, origJ, compJ, pivotRow);
+    }
+    // Descend near-first, far-second against the split axis. Push far before near so the stack
+    // pops near first. Distance along the split axis is a cheaper pre-prune than the full gap.
     if (diff < T{0}) {
       if (node->m_right != nullptr) {
         stack.push_back(node->m_right);
@@ -258,8 +308,8 @@ void singlePointScan(TraversalCtx<T> &ctx, std::int32_t origI, std::int32_t comp
  *                    minimum-MRD-weight edge leaving component @c c, or
  *                    @c ComponentBestEdge{+inf, -1, -1} when no candidate exists.
  */
-template <class T>
-void nearestOutComponent(const KDTree<T> &tree, std::span<const std::int32_t> componentOf,
+template <class T, class Tree>
+void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> componentOf,
                          const NDArray<T, 1> &coreDist, const NDArray<std::int32_t, 2> &knnIdx,
                          const NDArray<T, 2> &knnSqDist, math::Pool pool,
                          std::vector<ComponentBestEdge<T>> &bestOut,
@@ -351,7 +401,7 @@ void nearestOutComponent(const KDTree<T> &tree, std::span<const std::int32_t> co
   }
 
   auto runChunk = [&](std::size_t lo, std::size_t hi, std::size_t workerSlot) noexcept {
-    internal::TraversalCtx<T> ctx{
+    internal::TraversalCtx<T, Tree> ctx{
         .tree = &tree,
         .perm = perm,
         .reorderedPts = reordered,
@@ -374,7 +424,7 @@ void nearestOutComponent(const KDTree<T> &tree, std::span<const std::int32_t> co
       const std::int32_t compI = componentOf[origI];
       const T coreI = coreDist.data()[origI];
       const T *rowI = reorderedBase + (slot * dim);
-      internal::singlePointScan<T>(ctx, origI, compI, coreI, rowI, root, stack);
+      internal::singlePointScan<T, Tree>(ctx, origI, compI, coreI, rowI, root, stack);
     }
   };
 
