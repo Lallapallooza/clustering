@@ -15,7 +15,7 @@ namespace clustering::math::detail {
 /**
  * @brief Squared Euclidean distances from a single query to a contiguous AoS block of points.
  *
- * Writes @c out[0..count-1] = @c sum_k (query[k] - leaf[i*d + k])^2 for each @c i. Designed as
+ * Writes `out[0..count-1]` = @c sum_k (query[k] - leaf[i*d + k])^2 for each @c i. Designed as
  * the hot kernel of KDTree leaf brute-force scans (Boruvka per-round traversal, kNN walk).
  * Compared to calling @ref sqEuclideanRowPtr in a loop, this amortises the horizontal-sum
  * epilogue across four neighbours at a time: four independent @c ymm accumulators collapse

@@ -21,10 +21,10 @@ namespace clustering::math::detail {
  *
  * Mirrors @c gemmRunReference except @c packB is replaced by indexing into @p prepackedBp.
  * The pre-packed layout the caller must supply:
- *   - For each @c jcIdx in @c ceil(nDim / kNc<T>), each @c pcIdx in @c ceil(kDim / kKc<T>),
- *     in @c (jcIdx, pcIdx) row-major order, store a Goto-packed @c (kc x roundedNc) region
- *     produced by @c packB for that @c (jc, pc, nc, kc) quadruple.
- *   - @c roundedNc = @c ceil(currentNc / kKernelNr<T>) * kKernelNr<T>, i.e. the packer's
+ *   - For each @c jcIdx in `ceil(nDim / kNc<T>)`, each @c pcIdx in `ceil(kDim / kKc<T>)`,
+ *     in `(jcIdx, pcIdx)` row-major order, store a Goto-packed `(kc x roundedNc)` region
+ *     produced by @c packB for that `(jc, pc, nc, kc)` quadruple.
+ *   - @c roundedNc = `ceil(currentNc / kKernelNr<T>)` * kKernelNr<T>, i.e. the packer's
  *     panel-count times @c Nr, matching @c packB's output capacity exactly.
  *   - Total element count: for each @c jcIdx, @c kDim * roundedNc(jcIdx); summed across
  *     all @c jcIdx blocks.
@@ -41,7 +41,7 @@ namespace clustering::math::detail {
  * @param Cd Mutable descriptor of C.
  * @param alpha Scalar multiplier on @c A*B.
  * @param beta  Scalar multiplier on the prior @c C.
- * @param apArena Caller-owned scratch of capacity @c kMc<T>*kKc<T> elements (per worker slice).
+ * @param apArena Caller-owned scratch of capacity `kMc<T>`*kKc<T> elements (per worker slice).
  * @param pool   Parallelism injection. When @c pool.shouldParallelize is @c true, the Mc-tile
  *               loop fans out via @c submit_blocks; each task indexes its own arena slice via
  *               @c Pool::workerIndex(). Otherwise the function runs serial on slice 0.

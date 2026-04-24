@@ -14,12 +14,12 @@ namespace clustering::math::detail {
  * @brief Squared point-to-AABB gap distance for f32 via AVX2.
  *
  * Per dimension the scalar reference is @c gap = max(0, max(boxMin - p, p - boxMax)) and the
- * return is @c sum(gap^2). The vector form computes the two signed deltas in lane-parallel,
+ * return is `sum(gap^2)`. The vector form computes the two signed deltas in lane-parallel,
  * folds them into a single non-negative gap with a pair of @c max instructions, and accumulates
  * @c gap*gap into an FMA-driven 8-lane accumulator. The branch-free fold replaces the scalar
  * if/else-if chain, which was the dominant per-dimension cost in the kdtree-traversal hot loop.
  *
- * Processes @c d in @c ceil(d/8) ymm-wide tiles plus a scalar tail (where @c d % 8 != 0). The
+ * Processes @c d in `ceil(d/8)` ymm-wide tiles plus a scalar tail (where @c d % 8 != 0). The
  * tail loop matches the scalar reference exactly so dimensions entirely below 8 (e.g. @c d=2 or
  * @c d=4) get the same answer the scalar fallback would give. Loads are unaligned
  * (@c _mm256_loadu_ps); the kdtree's reordered points and node-bounds buffers are not aligned
@@ -29,7 +29,7 @@ namespace clustering::math::detail {
  * @param boxMin Length-@p d AABB minimum coordinates.
  * @param boxMax Length-@p d AABB maximum coordinates.
  * @param d      Number of dimensions.
- * @return @c sum_{j=0..d-1} max(0, max(boxMin[j]-point[j], point[j]-boxMax[j]))^2.
+ * @return `sum_{j=0..d-1}` max(0, max(boxMin[j]-point[j], point[j]-boxMax[j]))^2.
  */
 [[nodiscard]] inline float pointAabbGapSqAvx2F32(const float *__restrict__ point,
                                                  const float *__restrict__ boxMin,

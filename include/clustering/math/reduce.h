@@ -18,9 +18,9 @@ namespace clustering::math {
  * @c n is modest.
  *
  * @tparam T Element type; @c float or @c double.
- * @tparam L Layout tag; contiguous and strided inputs are both accepted via @c x(i).
- * @param x Rank-1 array; empty input returns @c T(0).
- * @return Sum of the elements, or @c T(0) for an empty input.
+ * @tparam L Layout tag; contiguous and strided inputs are both accepted via `x(i)`.
+ * @param x Rank-1 array; empty input returns `T(0)`.
+ * @return Sum of the elements, or `T(0)` for an empty input.
  */
 template <class T, Layout L> inline T sum(const NDArray<T, 1, L> &x) noexcept {
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
@@ -36,7 +36,7 @@ template <class T, Layout L> inline T sum(const NDArray<T, 1, L> &x) noexcept {
 /**
  * @brief Index of the first minimum in a rank-1 array.
  *
- * Strict @c < comparison during the scan: on ties the earliest index wins. Asserts the input is
+ * Strict `< comparison` during the scan: on ties the earliest index wins. Asserts the input is
  * non-empty; an empty argmin has no meaningful answer.
  *
  * @tparam T Element type; @c float or @c double.
@@ -64,7 +64,7 @@ template <class T, Layout L> inline std::size_t argmin(const NDArray<T, 1, L> &x
 /**
  * @brief Index of the first maximum in a rank-1 array.
  *
- * Mirror of @ref argmin with strict @c > comparison. Asserts non-empty input.
+ * Mirror of @ref argmin with strict `> comparison`. Asserts non-empty input.
  *
  * @tparam T Element type; @c float or @c double.
  * @tparam L Layout tag.
@@ -91,15 +91,15 @@ template <class T, Layout L> inline std::size_t argmax(const NDArray<T, 1, L> &x
 /**
  * @brief Indices of the top-@p k largest values, written in descending value order.
  *
- * Stages @c (value, index) pairs and calls @c std::partial_sort_copy with a comparator that
+ * Stages `(value, index)` pairs and calls @c std::partial_sort_copy with a comparator that
  * orders by value descending; equal values tie-break by index ascending so the output is stable
  * and deterministic. The output span is an @c std::span<std::size_t> rather than an
- * @c NDArray<std::size_t,1> because @c NDArray's element type must be @c float or @c double.
+ * `NDArray<std::size_t,1>` because @c NDArray's element type must be @c float or @c double.
  *
  * @tparam T Element type; @c float or @c double.
  * @tparam L Layout tag of the input.
  * @param x Rank-1 array of values to rank.
- * @param k Number of indices to emit; must satisfy @c k <= x.dim(0).
+ * @param k Number of indices to emit; must satisfy `k <= x`.dim(0).
  * @param outIdx Output buffer of exactly @c k positions; filled with indices sorted by
  *        descending value.
  */

@@ -32,7 +32,7 @@ namespace clustering::index {
  * compared to uniform-random seeding on real workloads; defaults here follow that pattern.
  *
  * @par Warm start
- * Rebuilding on the same @c (data pointer, @c n, @c d, @c k) tuple reuses the existing neighbor
+ * Rebuilding on the same `(data pointer, @c n, @c d, @c k)` tuple reuses the existing neighbor
  * graph as warm state. The join loop runs without RP-tree re-initialization, so the second
  * build converges measurably faster (typically in a single iteration). A different @c k, a
  * different input pointer, or a different shape forces a cold start (fresh bank + RP-tree init).
@@ -51,7 +51,9 @@ template <class T> class NnDescentIndex {
 public:
   /// Per-node kNN entry returned by @ref neighbors. Squared Euclidean distance carried as @c T.
   struct KnnEntry {
+    /// Neighbor point index.
     std::int32_t idx;
+    /// Squared Euclidean distance from the query to @c idx.
     T sqDist;
   };
 
@@ -77,7 +79,9 @@ public:
 
   NnDescentIndex(const NnDescentIndex &) = delete;
   NnDescentIndex &operator=(const NnDescentIndex &) = delete;
+  /// Defaulted move constructor; transfers the neighbor bank and scratch.
   NnDescentIndex(NnDescentIndex &&) = default;
+  /// Defaulted move assignment; transfers the neighbor bank and scratch.
   NnDescentIndex &operator=(NnDescentIndex &&) = default;
   ~NnDescentIndex() = default;
 
@@ -85,7 +89,7 @@ public:
    * @brief Build (or rebuild) the approximate kNN graph for @p X.
    *
    * Runs RP-tree initialization followed by the NN-Descent join loop. Rebuilding on the same
-   * @c (data pointer, @c n, @c d, @c k) tuple reuses the existing neighbors as warm state; any
+   * `(data pointer, @c n, @c d, @c k)` tuple reuses the existing neighbors as warm state; any
    * change triggers a cold start.
    *
    * @param X    Row-major @c n x d point matrix; must outlive the call but not the index.
@@ -110,8 +114,8 @@ public:
         m_neighborsView.assign(n, {});
         return;
       }
-      // Leaf limit sized to roughly @c 2k so the leaf-pair enumeration is @c O(k^2) per leaf,
-      // matching Dong 2011's recommendation. A minimum of @c max(2k, 8) keeps very small @c k
+      // Leaf limit sized to roughly @c 2k so the leaf-pair enumeration is `O(k^2)` per leaf,
+      // matching Dong 2011's recommendation. A minimum of `max(2k, 8)` keeps very small @c k
       // from degenerating into singleton leaves.
       const std::size_t leafLimit = std::max<std::size_t>(2 * m_k, 8);
       nn_descent::detail::RpTreeInit<T>::build(X, leafLimit, m_seed, *m_bank);
@@ -162,7 +166,7 @@ public:
    * @brief Whether the undirected k-NN graph covers every node in a single connected component.
    *
    * DFS over the union of forward and reverse edges from the published sorted view. Safe to call
-   * any time after @ref build; returns @c true trivially for @c n <= 1.
+   * any time after @ref build; returns @c true trivially for `n <= 1`.
    */
   [[nodiscard]] bool isConnected() const {
     const std::size_t n = m_neighborsView.size();

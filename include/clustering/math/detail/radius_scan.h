@@ -13,12 +13,12 @@ namespace clustering::math::detail {
 
 /**
  * @brief Scans @p count contiguous points (AoS, row-major with @p d floats per row) and
- *        calls @p emit(i) for each @c i in @c [0, count) whose squared distance to @p qp is
+ *        calls @p emit(i) for each @c i in `[0, count)` whose squared distance to @p qp is
  *        at most @p radius_sq.
  *
  * Dispatches to SIMD-specialized inner kernels when the build is AVX2-enabled and @p d clears
- * a width the kernel can exploit. Today the batched kernel exists for @c f32 at @c d == 2
- * (4 pairs per iteration via shuffle); every other @c (T, d) combination falls through to the
+ * a width the kernel can exploit. Today the batched kernel exists for @c f32 at `d == 2`
+ * (4 pairs per iteration via shuffle); every other `(T, d)` combination falls through to the
  * scalar-per-row loop driven by @ref sqEuclideanRowPtr. Keeping the fallback in the same header
  * lets downstream kernels take the shortcut without re-implementing the scalar baseline.
  *
@@ -34,7 +34,7 @@ namespace clustering::math::detail {
  * @param count      Number of candidate rows in the leaf.
  * @param d          Row length (also the stride in elements inside @p pts_aos).
  * @param radius_sq  Squared radius; comparisons are inclusive.
- * @param emit       Callback invoked with @c (std::size_t i) for each matching row.
+ * @param emit       Callback invoked with `(std::size_t i)` for each matching row.
  */
 template <class T, class EmitFn>
 inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::size_t d, T radius_sq,

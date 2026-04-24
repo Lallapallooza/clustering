@@ -22,8 +22,8 @@ namespace clustering::hdbscan::detail {
  * @brief Per-component candidate edge with the lowest-weight out-of-component candidate so far.
  *
  * Indexed by the component's representative root as returned by the caller-owned union-find.
- * Weight @c +inf (via @c std::numeric_limits<T>::max) marks "no candidate yet"; both endpoints
- * are @c -1 on an empty slot. Updated in place by @ref nearestOutComponent.
+ * Weight `+inf` (via @c std::numeric_limits<T>::max) marks "no candidate yet"; both endpoints
+ * are `-1` on an empty slot. Updated in place by @ref nearestOutComponent.
  */
 template <class T> struct ComponentBestEdge {
   T weight = std::numeric_limits<T>::max();
@@ -45,12 +45,12 @@ namespace internal {
 template <class T, class Tree = KDTree<T>> struct TraversalCtx {
   const Tree *tree;
   std::span<const std::size_t> perm;    ///< Reordered-slot -> original-index.
-  std::span<const T> reorderedPts;      ///< Flat @c (n*d) reordered-points buffer.
+  std::span<const T> reorderedPts;      ///< Flat `(n*d)` reordered-points buffer.
   std::size_t d;                        ///< Dimension of the point cloud.
   std::span<const std::int32_t> compOf; ///< Per-point component root.
   const T *coreDist;                    ///< Length-n core-distance (squared) buffer.
-  /// Per-node "single component" id: @c >=0 if every point under the node belongs to one
-  /// component, @c -1 if the subtree spans multiple. Indexed by @c KDTreeNode::m_id. Recomputed
+  /// Per-node "single component" id: `>=0` if every point under the node belongs to one
+  /// component, `-1` if the subtree spans multiple. Indexed by @c KDTreeNode::m_id. Recomputed
   /// once per Boruvka round; lets the walker skip subtrees that cannot supply an out-of-component
   /// candidate for the current query. Becomes very effective in late rounds when components
   /// have grown to enclose most points.
@@ -64,7 +64,7 @@ template <class T, class Tree = KDTree<T>> struct TraversalCtx {
  * @brief Recursive post-order walk that fills @p nodeSingleComp.
  *
  * Returns the single component id when every point under @p node belongs to one component, or
- * @c -1 when the subtree is mixed. The same value lands in @p nodeSingleComp[node->m_id] for
+ * `-1` when the subtree is mixed. The same value lands in @p nodeSingleComp[node->m_id] for
  * the traversal to consume.
  */
 template <class T>
@@ -176,7 +176,7 @@ void singlePointScan(TraversalCtx<T, Tree> &ctx, std::int32_t origI, std::int32_
     return;
   }
   // MRD has a hard floor at @c coreI: every candidate edge weight equals
-  // @c max(sqDist, coreI, coreJ) >= coreI. When the running component bound is already at
+  // `max(sqDist, coreI, coreJ)` >= coreI. When the running component bound is already at
   // that floor, no walk finding can lower it, so the whole traversal is redundant. This fires
   // on round 1 after the kNN-seed phase for any singleton whose nearest kNN neighbour lies
   // strictly inside @c coreI (common on well-separated clusters) and saves the entire per-
@@ -304,7 +304,7 @@ void singlePointScan(TraversalCtx<T, Tree> &ctx, std::int32_t origI, std::int32_
  * @param componentOf Per-point component root as returned by @ref UnionFind::find.
  * @param coreDist    Squared core distances; length @c n.
  * @param pool        Worker pool; @c nullptr runs single-threaded.
- * @param bestOut     One entry per component root; on return, @c bestOut[c] carries the
+ * @param bestOut     One entry per component root; on return, `bestOut[c]` carries the
  *                    minimum-MRD-weight edge leaving component @c c, or
  *                    @c ComponentBestEdge{+inf, -1, -1} when no candidate exists.
  */
@@ -363,7 +363,7 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
     const T coreI = coreData[i];
     const auto compISize = static_cast<std::size_t>(compI);
     // Walk every kNN entry rather than breaking on the first cross-component match: the MRD
-    // lift @c max(coreI, coreJ, sqDist) can make a slightly farther candidate the lower-MRD
+    // lift `max(coreI, coreJ, sqDist)` can make a slightly farther candidate the lower-MRD
     // one when the closer candidate has a larger core distance. A tighter seed = more AABB
     // pruning in the tree walk below.
     for (std::size_t s = 0; s < kNN; ++s) {
@@ -414,8 +414,8 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
         .bestV = workerV[workerSlot].data(),
     };
     // One scratch stack per worker per round, reused across every @c singlePointScan call in
-    // this slice. KDTree depth caps node visits at @c ~log2(n) plus the leaf points; @c 64 is
-    // a generous initial reserve that elides reallocs in the worst case for @c n <= 1e6.
+    // this slice. KDTree depth caps node visits at `~log2(n)` plus the leaf points; @c 64 is
+    // a generous initial reserve that elides reallocs in the worst case for `n <= 1e6`.
     std::vector<const KDTreeNode *> stack;
     stack.reserve(std::size_t{64});
     const T *reorderedBase = reordered.data();
@@ -429,7 +429,7 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
   };
 
   // Outer fan-out over original points in reordered order. Chunking by slot lets each worker
-  // pick up a dense @c (chunk * d) region of the reordered buffer, keeping per-worker memory
+  // pick up a dense `(chunk * d)` region of the reordered buffer, keeping per-worker memory
   // access largely contiguous in the point cloud. @ref math::Pool::shouldParallelize decides
   // whether the fan-out amortises task dispatch given the per-slot arithmetic cost.
   //
@@ -455,7 +455,7 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
     runChunk(0, n, /*workerSlot=*/0);
   }
 
-  // Merge per-worker bests into the output. @p bestOut starts at @c {+inf, -1, -1}; the merge
+  // Merge per-worker bests into the output. @p bestOut starts at `{+inf, -1, -1}`; the merge
   // compares each worker's candidate against the running best and takes the lower-weight one.
   // Ties are resolved by first-writer (stable across worker indices) so the output is
   // deterministic at a fixed pool size.

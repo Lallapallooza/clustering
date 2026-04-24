@@ -35,7 +35,7 @@ namespace detail {
 /**
  * @brief Work-unit partition for the label-grouped fold over @c n points into @c numBlocks bins.
  *
- * The partition maps @c [first_index, first_index + n) onto at most @c desired blocks with
+ * The partition maps `[first_index, first_index + n)` onto at most @c desired blocks with
  * near-equal size. Ascending-block-order reduction is the deterministic fold the label-
  * accumulation step relies on, which pins bit-identity across nJobs settings at @c n_jobs = 1.
  */
@@ -73,10 +73,10 @@ struct BlockPartition {
 /**
  * @brief Maximum @c d for the direct-compute argmin hot path.
  *
- * At @c d <= this threshold the fused argmin-GEMM driver's @c packA + packB overhead dominates
- * the handful of FMAs the microkernel performs, so the direct @c ||x - c||^2 formula with 8-row
+ * At `d <= this` threshold the fused argmin-GEMM driver's @c packA + packB overhead dominates
+ * the handful of FMAs the microkernel performs, so the direct `||x - c||^2` formula with 8-row
  * SIMD accumulators beats the packed-GEMM path. Measured on Zen5: crossover sits near
- * @c d == 8 where the two paths tie; below that the direct path wins by the pack cost.
+ * `d == 8` where the two paths tie; below that the direct path wins by the pack cost.
  */
 inline constexpr std::size_t kDirectArgminMaxD = 8;
 
@@ -88,9 +88,9 @@ inline constexpr std::size_t kDirectArgminMaxD = 8;
  * Runs the Lloyd iteration over caller-seeded centroids: assignment via the fused AVX2
  * argmin-GEMM hot path at @c d <= @c math::defaults::pairwiseArgminMaxD and the chunked
  * materialized fallback above it, label-grouped fold into per-cluster sums (Kahan-compensated
- * at @c n >= @ref kahanNThreshold), empty-cluster reseed against the current per-point
- * distance scratch, mean step, and convergence test on the Kahan-summed total squared shift.
- * All scratch buffers live inside the policy instance; no allocation fires between the first
+ * at @c n >= @ref LloydFusedGemm::kahanNThreshold), empty-cluster reseed against the current
+ * per-point distance scratch, mean step, and convergence test on the Kahan-summed total squared
+ * shift. All scratch buffers live inside the policy instance; no allocation fires between the first
  * assignment call and the convergence check of any iteration once the shape has been warmed.
  *
  * @tparam T Element type; @c float or @c double.
@@ -113,12 +113,13 @@ public:
    * @brief @c n threshold at which the centroid accumulator switches to the Kahan-compensated
    *        variant. Below this, the plain partial-sum + fold variant is used.
    *
-   * Compensation is load-bearing for the 1%-inertia gate at the @c (n=1e6, k=1000) corner where
+   * Compensation is load-bearing for the 1%-inertia gate at the `(n=1e6, k=1000)` corner where
    * per-cluster running totals are dominated by a large sum plus many small addends. Override
    * with @c -DCLUSTERING_KMEANS_KAHAN_N_THRESHOLD=<value>.
    */
   static constexpr std::size_t kahanNThreshold = CLUSTERING_KMEANS_KAHAN_N_THRESHOLD;
 #else
+  /// @c n threshold at which the centroid accumulator switches to Kahan-compensated summation.
   static constexpr std::size_t kahanNThreshold = 100000;
 #endif
 
@@ -136,7 +137,7 @@ public:
    *                  threshold as @c tol * mean(var(X, axis=0)) and compared against the
    *                  Kahan-summed per-centroid shift-squared.
    * @param pool      Parallelism injection.
-   * @param outLabels Length-n assignment; each entry in @c [0, k).
+   * @param outLabels Length-n assignment; each entry in `[0, k)`.
    * @param outInertia Kahan-summed @c f64 total of per-point squared distance to assignment.
    * @param outNIter  Iterations executed before @p tol or @p maxIter fired.
    * @param outConverged @c true iff iteration stopped because centroid shift fell at or below @p
@@ -225,7 +226,7 @@ public:
 
       // Empty-cluster reseed: furthest-point pass bounded by the counts scan. m_minDistSq still
       // holds the decomposed-formula residual from the assignment above; the noise tail is
-      // bounded by per-point @c ||c||^2 + ||x||^2 cancellation, smaller than the inter-blob
+      // bounded by per-point `||c||^2 + ||x||^2` cancellation, smaller than the inter-blob
       // distance the donor is selected against, so the argmax selection is preserved in
       // practice on benchmark data. The donor's minDistSq is zeroed so successive empties
       // cannot reseed to the same point.
@@ -283,8 +284,8 @@ private:
   /**
    * @brief Mean over columns of the per-column population variance of @p X.
    *
-   * Sklearn's @c _tolerance(X, tol) returns @c tol * mean(var(X, axis=0)); this is that
-   * @c mean(var(X, axis=0)) factor. Single pass of E[X^2] - E[X]^2 per column; O(n*d), cheap
+   * Sklearn's `_tolerance(X, tol)` returns @c tol * mean(var(X, axis=0)); this is that
+   * `mean(var(X, axis=0)`) factor. Single pass of E[X^2] - E[X]^2 per column; O(n*d), cheap
    * relative to even a single Lloyd iteration. Returns @c 0 when @p X is empty so callers fall
    * back to a @c tol of @c 0 and iterate to @c maxIter.
    */
@@ -489,10 +490,10 @@ private:
   }
 
   /**
-   * @brief Pack the centroid matrix into the tiled @c (jcIdx, pcIdx) layout matching
+   * @brief Pack the centroid matrix into the tiled `(jcIdx, pcIdx)` layout matching
    *        @c gemmRunPrepacked's walk.
    *
-   * Supports arbitrary @c d and @c k by splitting into @c kKc<T> and @c kNc<T> tiles
+   * Supports arbitrary @c d and @c k by splitting into `kKc<T>` and `kNc<T>` tiles
    * respectively; the flat single-tile packB the fused path uses at small d cannot represent
    * @c d > kKc<T> or @c k > kNc<T>.
    */
@@ -839,7 +840,7 @@ private:
   /**
    * @brief Envelope cap on @c n * k for Elkan eligibility, in elements.
    *
-   * At @c sizeof(T) = 4 this caps the bound matrix at @c kElkanNKLimit * 4 bytes (128 MB by
+   * At `sizeof(T)` = 4 this caps the bound matrix at @c kElkanNKLimit * 4 bytes (128 MB by
    * default). Shapes above this threshold skip Elkan and keep paying the full chunked
    * assignment each iteration.
    */
@@ -849,7 +850,7 @@ private:
    * @brief Hamerly bounds-aware assignment for iterations beyond the first.
    *
    * Updates @c m_u and @c m_l against the Euclidean centroid shifts the caller has already
-   * computed into @c m_shiftSq, then for each point applies the @c u <= l prune; points that
+   * computed into @c m_shiftSq, then for each point applies the `u <= l` prune; points that
    * clear the prune have their @c u tightened to the exact distance to the current assigned
    * centroid and rechecked, and only those still above the lower bound fall into the full
    * @c k-distance scan. Labels, @c m_u, @c m_l, and @c m_minDistSq are all maintained.
@@ -871,7 +872,7 @@ private:
     std::int32_t *labelsData = labels.data();
 
     // Per-cluster Euclidean shift + top-2 of shifts. The second-largest shift is the amount we
-    // subtract from @c l(x) when x's assigned cluster is the one with the largest shift --
+    // subtract from `l(x)` when x's assigned cluster is the one with the largest shift --
     // otherwise the largest shift is the loose bound donor for every non-assigned cluster.
     T sMax = T{0};
     T s2Max = T{0};
@@ -889,11 +890,11 @@ private:
       }
     }
 
-    // Per-cluster half-distance to the nearest other centroid. When @c u(x) for a sample
+    // Per-cluster half-distance to the nearest other centroid. When `u(x)` for a sample
     // assigned to cluster @c c clears this threshold, triangle inequality pins the sample in
-    // @c c: any other @c c' is at least @c 2 * halfDist[c] away, so @c ||x - c'|| >= 2 *
-    // halfDist[c] - u(x) >= u(x) >= ||x - c||. Populating it is @c O(k^2 * d), negligible next
-    // to Hamerly's per-sample work at @c k <= 64.
+    // @c c: any other @c c' is at least @c 2 * halfDist[c] away, so `||x - c'||` >= 2 *
+    // halfDist[c] - u(x) >= u(x) >= ||x - c||. Populating it is `O(k^2 * d)`, negligible next
+    // to Hamerly's per-sample work at `k <= 64`.
     T *halfDistData = m_halfDistToNearestOther.data();
     for (std::size_t c = 0; c < k; ++c) {
       T nearestSq = std::numeric_limits<T>::infinity();
@@ -929,7 +930,7 @@ private:
 
         // Lemma 1 shortcut: if the upper bound clears the half-distance to the nearest other
         // centroid, the sample's label cannot have changed -- no need to recompute
-        // @c ||x - c_a||. @c ui is still the post-shift bound, which stays valid; @c li is
+        // `||x - c_a||`. @c ui is still the post-shift bound, which stays valid; @c li is
         // allowed to decay here because the outer per-sample gate will exact-recompute it on
         // the next iteration that forces a tightening or a full scan.
         if (ui <= halfDistData[au]) {
@@ -984,8 +985,8 @@ private:
   /**
    * @brief Elkan bounds-aware assignment (k lower bounds per sample).
    *
-   * At shapes above Hamerly's @c k cap this maintains @c m_elkanBounds(i, c) as a lower bound
-   * on @c ||x_i - c||. Per iteration the bounds are refreshed against the centroid shifts, the
+   * At shapes above Hamerly's @c k cap this maintains `m_elkanBounds(i, c)` as a lower bound
+   * on `||x_i - c||`. Per iteration the bounds are refreshed against the centroid shifts, the
    * pairwise centroid matrix is recomputed, and each sample runs the classic three-gate prune:
    * Lemma 1 shortcut on the upper bound, per-cluster lower-bound gate, and the
    * @c 0.5 * ||c_a - c|| center-midpoint gate. The tight distance to @c c_a is lazily computed
@@ -1013,7 +1014,7 @@ private:
       shiftData[c] = std::sqrt(m_shiftSq(c));
     }
 
-    // Pairwise centroid distances. Symmetric; fill upper triangle and mirror. @c O(k^2 * d),
+    // Pairwise centroid distances. Symmetric; fill upper triangle and mirror. `O(k^2 * d)`,
     // amortized against the @c n * k inner scan below.
     T *centerDistData = m_centerDist.data();
     T *halfDistData = m_halfDistToNearestOther.data();
@@ -1137,11 +1138,11 @@ private:
   /// call and consulted by the Lemma 1 shortcut to skip the per-sample tight-distance recompute
   /// when the upper bound already clears the inter-cluster midpoint.
   NDArray<T, 1> m_halfDistToNearestOther;
-  /// Elkan's @c n x k per-sample lower-bound matrix (Euclidean, not squared). @c m_elkanBounds(i,
-  /// c) is a lower bound on @c ||x_i - c||; updated after each centroid shift and refined on the
+  /// Elkan's `n x k` per-sample lower-bound matrix (Euclidean, not squared). `m_elkanBounds(i, c)`
+  /// is a lower bound on `||x_i - c||`; updated after each centroid shift and refined on the
   /// per-sample scan when the bound is consulted.
   NDArray<T, 2, Layout::Contig> m_elkanBounds;
-  /// Elkan's pairwise centroid-distance matrix (Euclidean). @c m_centerDist(c, c') = ||c - c'||,
+  /// Elkan's pairwise centroid-distance matrix (Euclidean). `m_centerDist(c, c')` = ||c - c'||,
   /// populated each Elkan call and consulted for the 0.5-times bound shortcut.
   NDArray<T, 2, Layout::Contig> m_centerDist;
 

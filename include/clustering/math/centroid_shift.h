@@ -13,15 +13,15 @@ namespace clustering::math {
 /**
  * @brief Per-row squared shift between two centroid matrices of identical shape.
  *
- * Writes @c outShiftSq(c) = sum_t (cNew(c, t) - cOld(c, t))^2 for every cluster @c c.
+ * Writes `outShiftSq(c)` = sum_t (cNew(c, t) - cOld(c, t))^2 for every cluster @c c.
  * Composes from @c detail::sqEuclideanRow, which picks an AVX2 reduction on contiguous
  * 32-byte-aligned inputs and falls back to a scalar loop otherwise. The outer row loop fans
- * out over @p pool using the same @c shouldParallelize gate as @ref rowNormsSq.
+ * out over @p pool using the same @c shouldParallelize gate as @c rowNormsSq.
  *
  * @tparam T Element type (@c float or @c double).
  * @param cOld       Previous centroids (k x d), contiguous.
  * @param cNew       Current centroids (k x d), contiguous.
- * @param outShiftSq Rank-1 output of length k; @c isMutable() must be true.
+ * @param outShiftSq Rank-1 output of length k; `isMutable()` must be true.
  * @param pool       Parallelism injection.
  */
 template <class T>

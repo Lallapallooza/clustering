@@ -14,9 +14,10 @@ namespace clustering::kmeans {
 /**
  * @brief Seeder that picks between greedy k-means++ and AFK-MC2 against workload shape.
  *
- * AFK-MC2 activates only at @c n >= @ref afkmc2NThreshold AND @c k >= @ref afkmc2KFloor;
- * everything else runs greedy k-means++. The alternative is re-picked lazily when the
- * @c (n, d, k) shape changes between @c run calls so repeated fits at a stable shape preserve
+ * AFK-MC2 activates only at @c n >= @ref AutoSeeder::afkmc2NThreshold AND @c k >= @ref
+ * AutoSeeder::afkmc2KFloor; everything else runs greedy k-means++. The alternative is re-picked
+ * lazily when the
+ * `(n, d, k)` shape changes between @c run calls so repeated fits at a stable shape preserve
  * the held seeder's scratch.
  *
  * @tparam T Element type of the point cloud.
@@ -32,12 +33,16 @@ public:
    */
   static constexpr std::size_t afkmc2NThreshold = CLUSTERING_KMEANS_AFKMC2_N_THRESHOLD;
 #else
+  /// @c n threshold above which AFK-MC2 is preferred over greedy k-means++.
   static constexpr std::size_t afkmc2NThreshold = 500000;
 #endif
 
+  /// Minimum @c k at which AFK-MC2 is considered; mirrors @ref AfkMc2Seeder::kFloor.
   static constexpr std::size_t afkmc2KFloor = AfkMc2Seeder<T>::kFloor;
+  /// Default Markov-chain length passed through to AFK-MC2.
   static constexpr std::size_t afkmc2ChainLengthDefault = AfkMc2Seeder<T>::chainLengthDefault;
 
+  /// Seed @p outCentroids with the dispatched seeder; see the class docs for the dispatch rule.
   void run(const NDArray<T, 2> &X, std::size_t k, std::uint64_t seed, math::Pool pool,
            NDArray<T, 2> &outCentroids) {
     const std::size_t n = X.dim(0);

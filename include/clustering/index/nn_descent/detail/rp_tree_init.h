@@ -106,7 +106,7 @@ public:
 
 private:
   /**
-   * @brief Recursive splitter. @c [lo, hi) names the range of @p indices currently partitioned
+   * @brief Recursive splitter. `[lo, hi)` names the range of @p indices currently partitioned
    *        at this node.
    */
   static void splitRange(const T *data, std::size_t d, std::vector<std::int32_t> &indices,
@@ -194,7 +194,7 @@ private:
   }
 
   /**
-   * @brief Admit every pair of points in @c [lo, hi) into the bank (both directions).
+   * @brief Admit every pair of points in `[lo, hi) into the bank (both directions)`.
    */
   static void seedLeaf(const T *data, std::size_t d, const std::vector<std::int32_t> &indices,
                        std::size_t lo, std::size_t hi, NeighborHeapBank<T> &bank) {

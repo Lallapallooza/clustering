@@ -18,6 +18,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(CLUSTERING_BUILD_BENCHMARK "Build benchmarks" ${CLUSTERING_IS_TOP_LEVEL})
 option(CLUSTERING_BUILD_TESTS "Build unit tests" ${CLUSTERING_IS_TOP_LEVEL})
+option(
+    CLUSTERING_BUILD_DOCS
+    "Build API documentation (Doxygen + doxygen-awesome-css)"
+    OFF
+)
 check_cxx_compiler_flag("-mavx2" CLUSTERING_COMPILER_SUPPORTS_AVX2)
 set(CLUSTERING_USE_AVX2
     ${CLUSTERING_COMPILER_SUPPORTS_AVX2}
@@ -199,4 +204,23 @@ if(CLUSTERING_BUILD_TESTS)
     include(cmake/GTestDep.cmake)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(CLUSTERING_BUILD_DOCS)
+    find_package(Doxygen REQUIRED)
+    include(cmake/DocsDep.cmake)
+
+    set(AWESOME_CSS_DIR ${doxygen-awesome-css_SOURCE_DIR})
+    set(DOXYGEN_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/docs)
+    set(DOXYFILE_IN ${CMAKE_CURRENT_SOURCE_DIR}/docs/Doxyfile.in)
+    set(DOXYFILE_OUT ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile)
+    configure_file(${DOXYFILE_IN} ${DOXYFILE_OUT} @ONLY)
+
+    add_custom_target(
+        docs
+        COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYFILE_OUT}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        COMMENT "Generating API documentation with Doxygen"
+        VERBATIM
+    )
 endif()

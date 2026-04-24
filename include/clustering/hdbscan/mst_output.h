@@ -20,8 +20,11 @@ namespace clustering::hdbscan {
  *         specialization is out of scope.
  */
 template <class T> struct MstEdge {
+  /// First endpoint of the MST edge (0-based vertex index).
   std::int32_t u = 0;
+  /// Second endpoint of the MST edge (0-based vertex index).
   std::int32_t v = 0;
+  /// Mutual-reachability distance between @c u and @c v.
   T weight = T{};
 };
 

@@ -17,7 +17,7 @@ namespace clustering::math::distance {
  * @brief Tag selecting the squared Euclidean metric.
  *
  * Passed as the first argument to @c pointwiseSq; overloads of @c tag_invoke keyed on this tag
- * implement @c sum((a_i - b_i)^2).
+ * implement `sum((a_i - b_i)`^2).
  */
 struct SqEuclideanTag {};
 
@@ -56,7 +56,7 @@ struct PointwiseSqFn {
 /**
  * @brief Customization-point object for pairwise squared distances between two rank-1 arrays.
  *
- * @c pointwiseSq(tag, a, b) dispatches through an unqualified @c tag_invoke lookup, so the
+ * `pointwiseSq(tag, a, b)` dispatches through an unqualified @c tag_invoke lookup, so the
  * metric implementation travels with the tag's namespace. Users extend by defining a
  * @c tag_invoke overload taking the CPO and their own tag; library-provided overloads live in
  * @c clustering::math::distance and are found via ADL on the tag parameter.
@@ -70,7 +70,7 @@ inline constexpr detail::PointwiseSqFn pointwiseSq{};
 /**
  * @brief Squared Euclidean distance between two rank-1 NDArrays.
  *
- * Default overload of @c pointwiseSq for @c SqEuclideanTag. Sums @c (a(i) - b(i))^2 from
+ * Default overload of @c pointwiseSq for @c SqEuclideanTag. Sums `(a(i) - b(i))`^2 from
  * @c i = 0 head-to-tail; the summation order matches the scalar kd-tree path and is
  * deterministic for equal inputs regardless of layout. A zero-length operand returns @c T{0}
  * without indexing storage.
@@ -118,7 +118,7 @@ T tag_invoke(const detail::PointwiseSqFn & /*cpo*/, SqEuclideanTag, const NDArra
 /**
  * @brief Manhattan (L1) distance between two rank-1 NDArrays.
  *
- * Default overload of @c pointwiseSq for @c ManhattanTag. Sums @c |a(i) - b(i)| head-to-tail;
+ * Default overload of @c pointwiseSq for @c ManhattanTag. Sums `|a(i) - b(i)|` head-to-tail;
  * the summation order is deterministic for equal inputs regardless of layout. A zero-length
  * operand returns @c T{0} without indexing storage. The absolute value is selected via a
  * ternary on the signed difference, which avoids the @c std::abs / @c abs overload-set ambiguity
@@ -159,7 +159,7 @@ T tag_invoke(const detail::PointwiseSqFn & /*cpo*/, ManhattanTag, const NDArray<
  * @tparam LB Layout tag of @p b.
  * @param a Left-hand operand; must have the same length as @p b.
  * @param b Right-hand operand.
- * @return Cosine distance as a @c T in @c [0, 2], or @c T{1} when either operand has zero norm.
+ * @return Cosine distance as a @c T in `[0, 2]`, or @c T{1} when either operand has zero norm.
  */
 template <class T, Layout LA, Layout LB>
 T tag_invoke(const detail::PointwiseSqFn & /*cpo*/, CosineTag, const NDArray<T, 1, LA> &a,

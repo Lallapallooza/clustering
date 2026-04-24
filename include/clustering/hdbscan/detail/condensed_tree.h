@@ -19,8 +19,8 @@ namespace clustering::hdbscan::detail {
  * which the child separated from the parent. @c childSize encodes whether the child is a leaf
  * point (size 1, the "fall-out-as-noise" exit) or an internal condensed cluster node (size > 1).
  *
- * Internal cluster ids live in the range @c [n, n + numClusters); leaf ids (points) live in
- * @c [0, n). The root condensed cluster gets id @c n and has no incoming edge (so no row).
+ * Internal cluster ids live in the range `[n, n + numClusters); leaf ids (points)` live in
+ * `[0, n). The root condensed cluster gets id @c n and has no incoming edge (so no row)`.
  *
  * @tparam T Lambda value type (the reciprocal of the MRD weight).
  */
@@ -39,7 +39,7 @@ template <class T> struct CondensedTree {
 /**
  * @brief Compute the number of descendant leaves (points) at a single-linkage-tree node.
  *
- * Leaf nodes are @c [0, n) and have size @c 1 implicitly; internal merge nodes have their size
+ * Leaf nodes are `[0, n)` and have size @c 1 implicitly; internal merge nodes have their size
  * stored in @p slt.size. The helper reads the correct slot either way.
  */
 template <class T>
@@ -62,7 +62,7 @@ template <class T>
  *     condensed-cluster ids; each subtree roots its own condensed sub-cluster and recurses.
  *   - Exactly one side real: the real side inherits the current condensed-cluster id (no split);
  *     the small side "falls out as noise" and every one of its descendant points gets a leaf row
- *     at the lambda-at-split, with @c childSize == 1 and a single shared lambda.
+ *     at the lambda-at-split, with `childSize == 1` and a single shared lambda.
  *   - Neither side real: impossible if the parent sub-cluster is real; the algorithm only recurses
  *     into real sub-clusters.
  *

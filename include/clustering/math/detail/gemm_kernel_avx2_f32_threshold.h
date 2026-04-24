@@ -16,20 +16,20 @@ namespace clustering::math::detail {
 
 /**
  * @brief Fused 8x6 AVX2 f32 microkernel: accumulate @c X*Y^T over the full K, fold the
- *        @c ||x||^2 + ||y||^2 norms to recover squared distance, and emit every cell whose
+ *        `||x||^2 + ||y||^2` norms to recover squared distance, and emit every cell whose
  *        squared distance lies at or below @p radiusSq.
  *
  * Computes a column-by-column inner product of an 8-row A-panel against a 6-column B-panel.
- * After the @c K-loop, converts each accumulator to @c ||x_i||^2 + ||y_j||^2 - 2*x_i.y_j,
+ * After the @c K-loop, converts each accumulator to `||x_i||^2 + ||y_j||^2` - 2*x_i.y_j,
  * clamps the tiny-negative cancellation region up to zero, and compares against a broadcast
  * @c radiusSq.
  *
  * Buffer layouts match @c packA / @c packB from @c gemm_pack.h:
- *   - @p apPanel holds an @c Mr x @c kc A-panel; element @c (r, k) is at @c ap[k*Mr + r].
- *   - @p bpPanel holds a @c kc x @c Nr B-panel; element @c (k, c) is at @c bp[k*Nr + c].
+ *   - @p apPanel holds an @c Mr x @c kc A-panel; element `(r, k)` is at `ap[k*Mr + r]`.
+ *   - @p bpPanel holds a @c kc x @c Nr B-panel; element `(k, c)` is at `bp[k*Nr + c]`.
  *
  * Output ordering contract: within a single tile call, @p emit fires in row-major order --
- * @c (rowBase+0, colBase+0), @c (rowBase+0, colBase+1), ... through @c (rowBase+validRows-1,
+ * `(rowBase+0, colBase+0)`, `(rowBase+0, colBase+1)`, ... through `(rowBase+validRows-1,`
  * colBase+validCols-1). Rows past @p validRows and columns past @p validCols are never handed
  * to @p emit. The outer driver iterates tiles in its own natural order (row-chunks first, then
  * column-panels within a chunk), so the composite emit order is deterministic but not
@@ -46,12 +46,12 @@ namespace clustering::math::detail {
  *                   @c rowBase + rowOffset.
  * @param colBase    Global column index of column 0 of this panel; contributes to @p emit
  *                   via @c colBase + columnOffset.
- * @param validRows  Count of valid rows in the tile; @c [0, validRows) rows are scanned.
- * @param validCols  Count of valid columns in the panel; @c [0, validCols) columns are
+ * @param validRows  Count of valid rows in the tile; `[0, validRows)` rows are scanned.
+ * @param validCols  Count of valid columns in the panel; `[0, validCols)` columns are
  *                   scanned.
  * @param radiusSq   Squared radius; cells whose squared distance is at most this value
  *                   trigger @p emit.
- * @param emit       @c void(std::size_t, std::size_t) callable; invoked once per surviving
+ * @param emit       `void(std::size_t, std::size_t)` callable; invoked once per surviving
  *                   cell in row-major order.
  */
 template <class Emit>
@@ -122,10 +122,10 @@ gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::s
   const __m256 c4 = _mm256_add_ps(c4a, c4b);
   const __m256 c5 = _mm256_add_ps(c5a, c5b);
 
-  // Fold @c dot(x_i, y_j) into @c ||x_i||^2 + ||y_j||^2 - 2*dot per column, threshold-compare
+  // Fold `dot(x_i, y_j)` into `||x_i||^2 + ||y_j||^2` - 2*dot per column, threshold-compare
   // the 8 lanes in SIMD, then pack the result into an 8-bit column mask. Walking the mask is
   // O(survivors) instead of the old scalar O(Mr * Nr) double loop. Cancellation when
-  // @c x_i ~= y_j can drop the dist fractionally below zero; the @c max(.,0) clamp preserves
+  // @c x_i ~= y_j can drop the dist fractionally below zero; the `max(.,0)` clamp preserves
   // the non-negative squared-distance contract and never flips the sign of the comparison.
   const __m256 xNorms = _mm256_load_ps(aRowNormsSq);
   const __m256 neg2 = _mm256_set1_ps(-2.0F);

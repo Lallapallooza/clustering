@@ -26,8 +26,8 @@ inline constexpr std::size_t pairwiseArgminChunkRows = 256;
 /**
  * @brief Required shape for the chunked materialized argmin scratch buffer.
  *
- * The caller sizes an owning @c NDArray<T, 2> with these dimensions and forwards it as
- * @c distsScratch to @ref pairwiseArgminMaterializedWithScratch. The height collapses to
+ * The caller sizes an owning `NDArray<T, 2>` with these dimensions and forwards it as
+ * @c distsScratch to @c pairwiseArgminMaterializedWithScratch. The height collapses to
  * @c n when @c n is smaller than the chunk row cap so small inputs do not overallocate.
  *
  * @param n Row count of the data matrix.
@@ -58,7 +58,7 @@ enum class ArgminPath : std::uint8_t { Fused, Materialized };
  * @c pairwiseSqEuclidean against the full centroid matrix to fill the @p distsScratch tile,
  * then scalar-argmins each row into @p labels + @p outMinSq. The tile is sized so one full
  * chunk's worth of distances stays L2-resident across the GEMM and the argmin scan; keeping
- * the output matrix off DRAM is the load-bearing win over materializing @c (n, k) up front.
+ * the output matrix off DRAM is the load-bearing win over materializing `(n, k)` up front.
  *
  * Chunks are independent so the outer chunk loop parallelises freely; per-row argmin carries
  * no reduction across rows, so threaded and serial runs produce bit-identical labels and
@@ -209,9 +209,9 @@ bool canUseFusedArgmin(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LC> &C,
 /**
  * @brief Per-row argmin and minimum squared distance of rows of @p X against rows of @p C.
  *
- * Writes @c labels(i) = argmin_j ||X(i) - C(j)||^2 and
- * @c outMinDistSq(i) = min_j ||X(i) - C(j)||^2 for every row of @p X. @p cSqNorms must hold
- * @c ||C(j)||^2 per row of @p C; callers typically produce it via @ref rowNormsSq.
+ * Writes `labels(i)` = argmin_j ||X(i) - C(j)||^2 and
+ * `outMinDistSq(i)` = min_j ||X(i) - C(j)||^2 for every row of @p X. @p cSqNorms must hold
+ * `||C(j)||^2` per row of @p C; callers typically produce it via @c rowNormsSq.
  *
  * Dispatches between a fused AVX2 outer driver (@c d <= @c defaults::pairwiseArgminMaxD,
  * float, contiguous, 32-byte aligned X and C) and a materialized two-step
@@ -268,7 +268,7 @@ namespace detail {
  *
  * Shares the public entry's preconditions and branch; the return on empty input is
  * @c ArgminPath::Materialized by convention (neither driver runs; the cheap path at
- * @c (n, k) == (0, 0) short-circuits before dispatch).
+ * `(n, k)` == (0, 0) short-circuits before dispatch).
  */
 template <class T, Layout LX = Layout::Contig, Layout LC = Layout::Contig>
 ArgminPath pairwiseArgminSqEuclideanWithDispatchInfo(const NDArray<T, 2, LX> &X,

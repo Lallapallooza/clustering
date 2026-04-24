@@ -22,7 +22,7 @@ namespace clustering::math {
  * @tparam LB Layout tag of @p b.
  * @param a Left-hand operand.
  * @param b Right-hand operand.
- * @return @c true iff @c a.dim(k) == b.dim(k) for every axis and every pairwise element is
+ * @return @c true iff `a.dim(k)` == b.dim(k) for every axis and every pairwise element is
  *         bitwise-equal under @c operator==.
  */
 template <class T, std::size_t N, Layout LA, Layout LB>
@@ -60,7 +60,7 @@ bool arrayEqual(const NDArray<T, N, LA> &a, const NDArray<T, N, LB> &b) noexcept
 /**
  * @brief Element-wise approximate equality with NumPy-style asymmetric tolerance.
  *
- * True when @c |a_i - b_i| <= atol + rtol * |b_i| for every element. @p b sits on the
+ * True when `|a_i - b_i| <= atol + rtol * |b_i|` for every element. @p b sits on the
  * right-hand side of the tolerance term intentionally, matching @c numpy.allclose; the
  * relation is not symmetric in the two arguments.
  *
@@ -69,7 +69,7 @@ bool arrayEqual(const NDArray<T, N, LA> &a, const NDArray<T, N, LB> &b) noexcept
  * @tparam LA Layout tag of @p a.
  * @tparam LB Layout tag of @p b.
  * @param a    Left-hand operand.
- * @param b    Right-hand operand; @c rtol scales against @c |b|.
+ * @param b    Right-hand operand; @c rtol scales against `|b|`.
  * @param rtol Relative tolerance, defaults to @c 1e-5.
  * @param atol Absolute tolerance, defaults to @c 1e-8.
  * @return @c true iff shapes match and every element pair is within tolerance.

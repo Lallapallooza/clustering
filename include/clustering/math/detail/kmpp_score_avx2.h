@@ -12,10 +12,10 @@ namespace clustering::math::detail {
 /**
  * @brief Score @c L candidate rows against all @p n rows of @p xData.
  *
- * For each row @c i and each candidate @c t in @c [0, L):
- *   @c dist(i, t) = ||x_i - cand_t||^2
- *   @c outDist(i, t) = dist(i, t)
- *   @c scoresOut[t] += min(dist(i, t), minSq[i])
+ * For each row @c i and each candidate @c t in `[0, L)`:
+ *   `dist(i, t)` = ||x_i - cand_t||^2
+ *   `outDist(i, t)` = dist(i, t)
+ *   `scoresOut[t]` += min(dist(i, t), minSq[i])
  *
  * Rows are processed in 8-row M-tiles. Each tile reads an 8 * d-float window of @p xData in AoS
  * order and an 8x8 in-register transpose hoists each feature chunk into an 8-lane YMM holding
@@ -35,8 +35,8 @@ namespace clustering::math::detail {
  * @param candData  (L, d) row-major candidate rows.
  * @param minSq     Per-row running min-distance-squared, length @p n.
  * @param outDist   (n, outStride) per-row per-candidate distance output; only columns
- *                  @c [0, L) are written.
- * @param outStride Row stride of @p outDist; must be @c >= L.
+ *                  `[0, L)` are written.
+ * @param outStride Row stride of @p outDist; must be `>= L`.
  * @param scoresOut Per-candidate score accumulator, length @c L; accumulated into.
  */
 template <std::size_t L>

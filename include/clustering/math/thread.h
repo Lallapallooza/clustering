@@ -67,7 +67,7 @@ struct Pool {
   /**
    * @brief Number of worker threads available, or @c 1 in serial mode.
    *
-   * @return @c pool->get_thread_count() when a pool is attached, otherwise @c 1.
+   * @return `pool->get_thread_count`() when a pool is attached, otherwise @c 1.
    */
   [[nodiscard]] std::size_t workerCount() const noexcept {
     return (pool != nullptr) ? pool->get_thread_count() : std::size_t{1};
@@ -87,8 +87,8 @@ struct Pool {
    * @brief Decide whether @p totalWork warrants parallel dispatch.
    *
    * Returns @c true only when a pool is attached and the work splits into at least
-   * @c workerCount() * @p minTasksPerWorker chunks of size @p minChunk. Guards against
-   * @c minChunk == 0 by reporting @c false rather than dividing by zero.
+   * `workerCount()` * @p minTasksPerWorker chunks of size @p minChunk. Guards against
+   * `minChunk == 0` by reporting @c false rather than dividing by zero.
    *
    * @param totalWork         Total number of work units (e.g. matrix elements, rows).
    * @param minChunk          Minimum chunk size that amortizes per-task overhead.

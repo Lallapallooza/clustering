@@ -19,20 +19,21 @@ using math::detail::sqEuclideanRowPtr;
  * @brief AFK-MC2 seeder (Bachem, Lucic, Hassani, Krause, NeurIPS 2016).
  *
  * Sublinear-in-n MCMC approximation to k-means++: draws the first centroid uniformly, builds a
- * length-@c n proposal distribution @c q(i) = 0.5 * D(x_i, c_1)^2 / sum_D2 + 0.5 * 1/n, and then
+ * length-@c n proposal distribution `q(i)` = 0.5 * D(x_i, c_1)^2 / sum_D2 + 0.5 * 1/n, and then
  * for each remaining centroid runs a Markov chain of length @c m that accepts a proposal with
- * probability @c min(1, proposed_weight / current_weight) where the weight is the squared
+ * probability `min(1, proposed_weight / current_weight)` where the weight is the squared
  * distance to the current centroid set divided by the proposal density.
  *
  * Chain execution is strictly serial and thread-unaware so the PRNG draw order is fixed by
- * @c (seed, n, k, m) regardless of @p pool worker count. The preprocessing sweep fans out
+ * `(seed, n, k, m)` regardless of @p pool worker count. The preprocessing sweep fans out
  * across @p pool; the per-thread work is pure read with no shared mutation.
  *
- * Degenerate guard: when all points coincide with the first centroid (@c sum_D2 == 0) the
- * proposal collapses to uniform @c q(i) = 1/n so the chain remains ergodic.
+ * Degenerate guard: when all points coincide with the first centroid (`sum_D2 == 0`) the
+ * proposal collapses to uniform `q(i)` = 1/n so the chain remains ergodic.
  *
- * The chain's log-k approximation bound degrades at small @c k: below @c k = @ref kFloor the
- * bound is too loose to beat greedy k-means++, and callers at that regime should pin
+ * The chain's log-k approximation bound degrades at small @c k: below @c k = @ref
+ * AfkMc2Seeder::kFloor the bound is too loose to beat greedy k-means++, and callers at that regime
+ * should pin
  * @ref GreedyKmppSeeder (directly or via @ref AutoSeeder, which picks it by shape).
  *
  * @tparam T Element type; @c float or @c double.
@@ -52,6 +53,7 @@ public:
    */
   static constexpr std::size_t kFloor = CLUSTERING_KMEANS_AFKMC2_K_FLOOR;
 #else
+  /// Minimum @c k below which the AFK-MC2 chain's log-k bound is too loose to win.
   static constexpr std::size_t kFloor = 100;
 #endif
 
@@ -66,6 +68,7 @@ public:
    */
   static constexpr std::size_t chainLengthDefault = CLUSTERING_KMEANS_AFKMC2_CHAIN_LENGTH;
 #else
+  /// Default Markov-chain length per centroid pick.
   static constexpr std::size_t chainLengthDefault = 200;
 #endif
 
@@ -76,7 +79,7 @@ public:
    *
    * @param X            Data matrix (n x d), contiguous.
    * @param k            Number of centroids to seed.
-   * @param seed         RNG seed; identical seed + @c (X, k) produces identical centroids.
+   * @param seed         RNG seed; identical seed + `(X, k)` produces identical centroids.
    * @param pool         Parallelism injection (preprocessing sweep only).
    * @param outCentroids Output centroid matrix (k x d), contiguous; populated in row order.
    */

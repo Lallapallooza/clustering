@@ -31,10 +31,10 @@ namespace detail {
 struct BorrowedTag {};
 
 /**
- * @brief Process-global counter of non-empty @ref AlignedAllocator::allocate calls.
+ * @brief Process-global counter of non-empty @c AlignedAllocator::allocate calls.
  *
  * Test-only surface. Incremented on every @c allocate that actually issues a backing
- * @c std::aligned_alloc (the @c n == 0 short-circuit does not count). Empty-allocation
+ * @c std::aligned_alloc (the `n == 0` short-circuit does not count). Empty-allocation
  * short-circuits leave the counter untouched so caller-side reads are stable.
  *
  * Callers wrap an instrumented region with a read before and after, asserting the delta
@@ -112,11 +112,11 @@ enum class NDArrayStorage : std::uint8_t { Owned, Borrowed };
  * @brief Compile-time layout tag for NDArray.
  *
  * @c Contig guarantees row-major contiguous storage with zero offset. Instances of this layout
- * expose the chain-of-accessors @c operator[] and use the baseline flat-index formula in the
- * hot path. @c MaybeStrided makes no contiguity guarantee; only the variadic @c operator() is
+ * expose the chain-of-accessors `operator[]` and use the baseline flat-index formula in the
+ * hot path. @c MaybeStrided makes no contiguity guarantee; only the variadic `operator()` is
  * available for element access, and it consults @c m_strides and @c m_offset.
  *
- * The split is a type-level precondition: calling @c a[i] on a @c MaybeStrided array is a
+ * The split is a type-level precondition: calling `a[i]` on a @c MaybeStrided array is a
  * compile error, not a runtime check.
  */
 enum class Layout : std::uint8_t { Contig, MaybeStrided };
@@ -131,7 +131,7 @@ enum class Layout : std::uint8_t { Contig, MaybeStrided };
  *
  * @tparam T The type of elements stored in the NDArray.
  * @tparam N The number of dimensions of the NDArray.
- * @tparam L Layout tag; @c Layout::Contig (default) enables the @c operator[] chain.
+ * @tparam L Layout tag; @c Layout::Contig (default) enables the `operator[]` chain.
  */
 template <class T, std::size_t N, Layout L = Layout::Contig> class NDArray {
   static_assert(N >= 1, "NDArray rank must be >= 1");
@@ -193,6 +193,7 @@ public:
     ConstAccessor(const NDArray<T, N, Layout::Contig> &ndarray, std::size_t index, std::size_t dim)
         : BaseAccessor(const_cast<NDArray<T, N, Layout::Contig> *>(&ndarray), index, dim) {}
 
+    /// Defaulted copy constructor; accessors are lightweight and trivially copyable.
     ConstAccessor(const ConstAccessor &other) = default;
 
     /**
@@ -320,6 +321,7 @@ public:
   // Storage-aware special members: Owned arrays re-seat m_data against this->m_vec (the move
   // stole or the copy just populated it), while Borrowed arrays carry an empty m_vec and must
   // preserve the external pointer from the source.
+  /// Copy constructor; re-seats @c m_data against @c m_vec for owned storage.
   NDArray(const NDArray &other)
       : m_vec(other.m_vec), m_shape(other.m_shape), m_strides(other.m_strides),
         m_offset(other.m_offset), m_storage(other.m_storage), m_mutable(other.m_mutable) {
@@ -327,6 +329,7 @@ public:
     m_base = (m_storage == NDArrayStorage::Owned) ? m_vec.data() : other.m_base;
   }
 
+  /// Move constructor; steals @c m_vec and re-seats @c m_data for owned storage.
   NDArray(NDArray &&other) noexcept
       : m_vec(std::move(other.m_vec)), m_shape(other.m_shape), m_strides(other.m_strides),
         m_offset(other.m_offset), m_storage(other.m_storage), m_mutable(other.m_mutable) {
@@ -336,6 +339,7 @@ public:
     other.m_base = nullptr;
   }
 
+  /// Copy assignment; re-seats @c m_data against @c m_vec for owned storage.
   NDArray &operator=(const NDArray &other) {
     if (this == &other) {
       return *this;
@@ -351,6 +355,7 @@ public:
     return *this;
   }
 
+  /// Move assignment; steals @c m_vec and re-seats @c m_data for owned storage.
   NDArray &operator=(NDArray &&other) noexcept {
     if (this == &other) {
       return *this;
@@ -383,8 +388,8 @@ public:
   /**
    * @brief Provides access to the elements of the NDArray.
    *
-   * Only defined for @c Layout::Contig. A @c MaybeStrided array has no @c operator[]; use the
-   * variadic @c operator()(i, j, ...) to read through strides.
+   * Only defined for @c Layout::Contig. A @c MaybeStrided array has no `operator[]`; use the
+   * variadic `operator()`(i, j, ...) to read through strides.
    *
    * @param index Index in the first dimension.
    * @return An Accessor to the specified index in the first dimension.
@@ -422,6 +427,7 @@ public:
     return m_data[computeElementOffset(std::index_sequence_for<Ix...>{}, ix...)];
   }
 
+  /// Read-only multi-index element access via strides; mirrors the mutable overload.
   template <class... Ix> const T &operator()(Ix... ix) const noexcept {
     static_assert(sizeof...(Ix) == N, "operator() requires exactly N indices");
     return m_data[computeElementOffset(std::index_sequence_for<Ix...>{}, ix...)];
@@ -474,10 +480,10 @@ public:
   }
 
   /**
-   * @brief Reports whether writes through @c operator(), @c Accessor, or @c flatIndex are allowed.
+   * @brief Reports whether writes through `operator()`, @c Accessor, or @c flatIndex are allowed.
    *
    * Owned arrays are always mutable. Borrowed arrays carry the flag supplied at borrow time:
-   * @c borrow(const T*, ...) flips it off, @c borrow(T*, ...) leaves it on.
+   * `borrow(const T*, ...)` flips it off, `borrow(T*, ...)` leaves it on.
    */
   [[nodiscard]] bool isMutable() const noexcept { return m_mutable; }
 
@@ -519,17 +525,17 @@ public:
   [[nodiscard]] T *baseData() const noexcept { return m_base; }
 
   /**
-   * @brief Tests whether @c data() is aligned to @p A bytes.
+   * @brief Tests whether `data()` is aligned to @p A bytes.
    *
    * @tparam A Alignment to test in bytes.
-   * @return True when @c data() is a null pointer or an @p A -byte boundary.
+   * @return True when `data()` is a null pointer or an @p A -byte boundary.
    */
   template <std::size_t A> bool isAligned() const noexcept {
     return (reinterpret_cast<std::uintptr_t>(m_data) % A) == 0;
   }
 
   /**
-   * @brief Returns @c data() with an alignment hint of @p A bytes applied.
+   * @brief Returns `data()` with an alignment hint of @p A bytes applied.
    *
    * Calls @c __builtin_assume_aligned so downstream SIMD intrinsics (e.g. @c _mm256_load_ps)
    * can assume an @p A -byte aligned pointer and emit aligned-load instructions under @c -O2.
@@ -544,6 +550,7 @@ public:
     return static_cast<T *>(__builtin_assume_aligned(m_data, A));
   }
 
+  /// Read-only overload of `alignedData<A>`; attaches the same alignment hint to the pointer.
   template <std::size_t A> const T *alignedData() const noexcept {
     assert(isAligned<A>() && "alignedData<A>() requires A-byte aligned data");
     return static_cast<const T *>(__builtin_assume_aligned(m_data, A));
@@ -552,8 +559,8 @@ public:
   /**
    * @brief Borrows a contiguous buffer as an NDArray without taking ownership.
    *
-   * Available only when @c L == Layout::Contig. The returned array shares the caller's buffer,
-   * carries contiguous strides, and is writable through @c operator() and @c Accessor.
+   * Available only when `L == Layout`::Contig. The returned array shares the caller's buffer,
+   * carries contiguous strides, and is writable through `operator()` and @c Accessor.
    *
    * @param ptr Non-owning pointer to the first element. Must stay alive for the view's lifetime.
    * @param shape Dimensions, one entry per axis.
@@ -569,7 +576,7 @@ public:
    * @brief Borrows a read-only contiguous buffer as an NDArray.
    *
    * Stores the caller's @c const T* as @c T* via @c const_cast and flips @c m_mutable off so any
-   * write through @c operator() or @c Accessor asserts in debug.
+   * write through `operator()` or @c Accessor asserts in debug.
    */
   template <Layout L2 = L>
     requires(L2 == Layout::Contig)
@@ -582,7 +589,7 @@ public:
   /**
    * @brief Borrows a strided buffer as an NDArray without taking ownership.
    *
-   * Available only when @c L == Layout::MaybeStrided. Strides are in elements, not bytes; see
+   * Available only when `L == Layout`::MaybeStrided. Strides are in elements, not bytes; see
    * @c borrowBytes for the byte-stride entry point used at the Python binding boundary.
    */
   template <Layout L2 = L>
@@ -592,6 +599,7 @@ public:
     return NDArray(clustering::detail::BorrowedTag{}, ptr, ptr, shape, strides, 0, true);
   }
 
+  /// Read-only strided borrow; flips @c m_mutable off so writes through the view assert.
   template <Layout L2 = L>
     requires(L2 == Layout::MaybeStrided)
   static NDArray borrow(const T *ptr, std::array<std::size_t, N> shape,
@@ -609,6 +617,7 @@ public:
     return borrow(ptr, std::array<std::size_t, 1>{n});
   }
 
+  /// Read-only rank-1 convenience borrow; mirrors the mutable @c borrow1D.
   template <std::size_t M = N>
     requires(M == 1 && L == Layout::Contig)
   static NDArray borrow1D(const T *ptr, std::size_t n) noexcept {
@@ -618,7 +627,7 @@ public:
   /**
    * @brief Borrow a buffer whose strides are expressed in bytes (NumPy's convention).
    *
-   * Byte strides are divided by @c sizeof(T) to recover element strides; non-divisible entries
+   * Byte strides are divided by `sizeof(T)` to recover element strides; non-divisible entries
    * are undefined and asserted in debug. The result always carries @c Layout::MaybeStrided so
    * arbitrary byte strides can be represented without a runtime contiguity check gating the
    * @c Contig type-level invariant.
@@ -655,6 +664,7 @@ public:
     return borrow(s.data(), std::array<std::size_t, 1>{s.size()});
   }
 
+  /// Read-only span adapter; delegates to the read-only @c borrow overload.
   template <std::size_t M = N>
     requires(M == 1 && L == Layout::Contig)
   static NDArray fromSpan(std::span<const T> s) noexcept {
@@ -677,6 +687,7 @@ public:
         std::array<std::ptrdiff_t, 2>{m_strides[1], m_strides[0]}, m_offset, m_mutable);
   }
 
+  /// Read-only transpose; the returned view carries @c m_mutable = false.
   template <std::size_t M = N>
     requires(M == 2)
   NDArray<T, 2, Layout::MaybeStrided> t() const noexcept {
@@ -707,6 +718,7 @@ public:
                                 m_base, new_shape, new_strides, 0, m_mutable);
   }
 
+  /// Read-only row view; mirrors the mutable overload and flips @c m_mutable off.
   template <std::size_t M = N>
     requires(M > 1)
   NDArray<T, N - 1, L> row(std::size_t i) const noexcept {
@@ -740,6 +752,7 @@ public:
         m_mutable);
   }
 
+  /// Read-only column view; mirrors the mutable overload and flips @c m_mutable off.
   template <std::size_t M = N>
     requires(M == 2)
   NDArray<T, 1, Layout::MaybeStrided> col(std::size_t j) const noexcept {
@@ -755,7 +768,7 @@ public:
    * @brief Borrowed half-open slice along a single axis.
    *
    * Returned view always carries @c MaybeStrided; callers that need the @c Contig guarantee
-   * back (e.g. axis-0 slice of a contiguous source) can round-trip through @c contiguous().
+   * back (e.g. axis-0 slice of a contiguous source) can round-trip through `contiguous()`.
    */
   NDArray<T, N, Layout::MaybeStrided> slice(std::size_t axis, std::size_t begin,
                                             std::size_t end) noexcept {
@@ -768,6 +781,7 @@ public:
         new_shape, m_strides, 0, m_mutable);
   }
 
+  /// Read-only single-axis slice; mirrors the mutable overload with @c m_mutable = false.
   NDArray<T, N, Layout::MaybeStrided> slice(std::size_t axis, std::size_t begin,
                                             std::size_t end) const noexcept {
     assert(axis < N && begin <= end && end <= m_shape[axis]);
@@ -805,6 +819,7 @@ public:
                                                new_strides, 0, m_mutable);
   }
 
+  /// Read-only multi-axis slice; mirrors the mutable overload with @c m_mutable = false.
   NDArray<T, N, Layout::MaybeStrided> slice(const std::array<Range, N> &ranges) const noexcept {
     std::array<std::size_t, N> new_shape{};
     std::array<std::ptrdiff_t, N> new_strides{};
@@ -828,7 +843,7 @@ public:
   /**
    * @brief Borrowed view with axes reordered by @p perm.
    *
-   * @p perm must be a valid permutation of @c {0, ..., N-1}; validation is an assert in debug.
+   * @p perm must be a valid permutation of `{0, ..., N-1}`; validation is an assert in debug.
    */
   NDArray<T, N, Layout::MaybeStrided> permute(const std::array<std::size_t, N> &perm) noexcept {
     std::array<std::size_t, N> new_shape{};
@@ -842,6 +857,7 @@ public:
                                                new_shape, new_strides, m_offset, m_mutable);
   }
 
+  /// Read-only permuted view; mirrors the mutable overload with @c m_mutable = false.
   NDArray<T, N, Layout::MaybeStrided>
   permute(const std::array<std::size_t, N> &perm) const noexcept {
     std::array<std::size_t, N> new_shape{};
@@ -875,6 +891,7 @@ public:
         NDArray<T, M, Layout::Contig>::computeContiguousStrides(shape), 0, m_mutable);
   }
 
+  /// Read-only rank-@p M view; mirrors the mutable overload with @c m_mutable = false.
   template <std::size_t M>
   NDArray<T, M, Layout::Contig> view(std::array<std::size_t, M> shape) const noexcept {
     assert(isContiguous() && "view<M> requires a contiguous source");
@@ -906,6 +923,7 @@ public:
     return result;
   }
 
+  /// Read-only rank-@p M reshape; aliases on contiguous sources, copies otherwise.
   template <std::size_t M>
   NDArray<T, M, Layout::Contig> reshape(std::array<std::size_t, M> shape) const {
     assert(productOfShape(shape) == numel() && "reshape<M> must preserve element count");
@@ -924,7 +942,7 @@ public:
    *
    * Already-contiguous sources are aliased into a borrowed view sharing storage; strided sources
    * allocate a dense owned copy. The return type drops the @c MaybeStrided tag so downstream hot
-   * paths can resume the @c operator[] chain.
+   * paths can resume the `operator[]` chain.
    */
   NDArray<T, N, Layout::Contig> contiguous() {
     if (isContiguous()) {
@@ -937,6 +955,7 @@ public:
     return result;
   }
 
+  /// Read-only contiguous view; aliases on contiguous sources, copies otherwise.
   NDArray<T, N, Layout::Contig> contiguous() const {
     if (isContiguous()) {
       return NDArray<T, N, Layout::Contig>(

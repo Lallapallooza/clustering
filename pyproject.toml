@@ -43,6 +43,9 @@ bump_message = "bump: $current_version -> $new_version"
 version_files = [
     "pyproject.toml:^version",
     "README.md:GIT_TAG v",
+    "README.md:clustering.git@v",
+    "docs/mainpage.md:GIT_TAG v",
+    "docs/mainpage.md:clustering.git@v",
 ]
 
 [tool.scikit-build]

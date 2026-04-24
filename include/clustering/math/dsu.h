@@ -14,17 +14,17 @@ namespace clustering {
  * Stores @c n elements initially as singleton components. @c find compacts the path from @p x
  * to its root in two passes so recursion depth never grows with @c n -- the recursive one-pass
  * form blows the default stack at @c n = 1M. @c unite merges components by attaching the shorter
- * tree under the taller, keeping worst-case tree depth at @c O(log n) even without compression.
+ * tree under the taller, keeping worst-case tree depth at `O(log n)` even without compression.
  *
  * @tparam Idx Unsigned integer index type; defaults to @c uint32_t. Use @c uint64_t only when
- *         @c n may exceed @c 2^32.
+ *         @c n may exceed `2^32`.
  */
 template <class Idx = std::uint32_t> class UnionFind {
 public:
   static_assert(std::is_unsigned_v<Idx>, "UnionFind Idx must be an unsigned integer type");
 
   /**
-   * @brief Construct @p n singleton components numbered @c [0, n).
+   * @brief Construct @p n singleton components numbered `[0, n)`.
    *
    * @param n Element count; each element starts as its own parent with rank 0 and size 1.
    */
@@ -94,7 +94,7 @@ public:
   /**
    * @brief Whether @p a and @p b share a component.
    *
-   * Convenience wrapper over @c find(a) == @c find(b); applies path compression on both paths.
+   * Convenience wrapper over `find(a)` == `find(b)`; applies path compression on both paths.
    *
    * @param a First element index.
    * @param b Second element index.
@@ -122,7 +122,7 @@ public:
    * @brief Population of the component whose root is @p root.
    *
    * The caller must pass a root index (typically obtained from @ref find); passing a non-root is
-   * undefined by contract. Size is maintained at the root on every @ref unite: when trees merge,
+   * undefined by contract. Size is maintained at the root on every @ref unite -- when trees merge,
    * the winning root accumulates the losing root's size so the figure stays accurate without a
    * tree walk at query time.
    *

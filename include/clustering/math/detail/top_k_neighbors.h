@@ -9,14 +9,14 @@
 namespace clustering::math::detail {
 
 /**
- * @brief Fixed-capacity top-@c k tracker of @c (key, val) pairs with @c O(1) reject fast path.
+ * @brief Fixed-capacity top-@c k tracker of `(key, val)` pairs with `O(1)` reject fast path.
  *
  * Accumulates the @c k entries with the smallest keys from an unsorted stream. Unlike a heap
  * this keeps the retained pairs in insertion order in two parallel arrays and caches the slot
  * holding the current worst (largest) key. The common "new key is not smaller than the worst
- * retained" path returns in @c O(1) without touching memory; on a successful replace, the
- * worst slot is refreshed with an @c O(capacity) rescan. For small @c k (the kNN use case
- * drives this with @c k typically in @c [4, 32]), the linear rescan beats a heap sift by
+ * retained" path returns in `O(1)` without touching memory; on a successful replace, the
+ * worst slot is refreshed with an `O(capacity)` rescan. For small @c k (the kNN use case
+ * drives this with @c k typically in `[4, 32]`), the linear rescan beats a heap sift by
  * avoiding pair swaps, function-pointer comparator indirection, and the associated branch
  * misses. @ref drainAscending exports the retained pairs sorted ascending by key and resets
  * the tracker to empty for reuse.
@@ -56,9 +56,9 @@ public:
   [[nodiscard]] std::size_t capacity() const noexcept { return m_capacity; }
 
   /**
-   * @brief Current pruning bound: the largest retained key, or @c +inf when not yet full.
+   * @brief Current pruning bound: the largest retained key, or `+inf` when not yet full.
    *
-   * The kNN walker uses this as its subtree prune threshold; returning @c +inf until the
+   * The kNN walker uses this as its subtree prune threshold; returning `+inf` until the
    * tracker fills lets every subtree in early iterations pass the gap test unconditionally.
    */
   [[nodiscard]] Key boundKey() const noexcept {
@@ -73,7 +73,7 @@ public:
    *
    * If the tracker has spare capacity, the entry is inserted unconditionally and the worst
    * slot is refreshed only if the new entry is larger than the current worst. Once full,
-   * rejects in @c O(1) when the incoming entry does not beat the worst; otherwise overwrites
+   * rejects in `O(1)` when the incoming entry does not beat the worst; otherwise overwrites
    * the worst slot and rescans to locate the new worst.
    */
   void push(Key key, Val val) noexcept {
@@ -113,7 +113,7 @@ public:
   }
 
   /**
-   * @brief Export retained entries sorted ascending by @c (key, val) and reset to empty.
+   * @brief Export retained entries sorted ascending by `(key, val)` and reset to empty.
    *
    * The first @ref size entries of @p keyOut / @p valOut are overwritten. Entries beyond
    * @ref size are untouched, matching the kNN output layout where the tail is padded by the

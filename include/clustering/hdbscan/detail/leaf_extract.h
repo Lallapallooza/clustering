@@ -14,11 +14,11 @@ namespace clustering::hdbscan::detail {
  *
  * Every condensed-tree leaf (a cluster node with no cluster-child, only point-children) becomes
  * its own selected cluster. Internal cluster nodes are passed through; points reach the nearest
- * leaf ancestor, or @c -1 when no leaf contains them. Leaves are assigned dense ids in
+ * leaf ancestor, or `-1` when no leaf contains them. Leaves are assigned dense ids in
  * condensed-id order (lowest cluster id first).
  *
  * @param tree Condensed tree produced by @ref condenseTree.
- * @param n    Number of input points; leaf rows in @p tree have @c child in @c [0, n).
+ * @param n    Number of input points; leaf rows in @p tree have @c child in `[0, n)`.
  * @param out  Destination vector of length @p n; overwritten with the final per-point labels.
  */
 template <class T>

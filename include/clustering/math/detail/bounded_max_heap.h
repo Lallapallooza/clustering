@@ -10,7 +10,7 @@
 namespace clustering::math::detail {
 
 /**
- * @brief Fixed-capacity binary max-heap of @c (key, val) pairs with deterministic tie-break.
+ * @brief Fixed-capacity binary max-heap of `(key, val)` pairs with deterministic tie-break.
  *
  * Collecting the @c k smallest-key entries from an unsorted stream: insert everything through
  * @ref push, and the heap retains the @c k entries with the smallest keys seen. The heap's root
@@ -27,7 +27,7 @@ namespace clustering::math::detail {
  * results are reproducible bit-for-bit across runs at the same input.
  *
  * @par Complexity
- * @c push is @c O(log capacity), @c top is @c O(1), @c pop is @c O(log capacity).
+ * @c push is `O(log capacity)`, @c top is `O(1)`, @c pop is `O(log capacity)`.
  *
  * @tparam Key Orderable key type; larger keys sit at the root.
  * @tparam Val Payload carried alongside the key. Must be equality-comparable to participate in
@@ -74,7 +74,7 @@ public:
    *
    * Asserts on an empty heap; callers must guard with @ref empty.
    *
-   * @return Const reference to the root @c (key, val) pair.
+   * @return Const reference to the root `(key, val)` pair.
    */
   [[nodiscard]] const std::pair<Key, Val> &top() const noexcept {
     assert(!m_heap.empty() && "BoundedMaxHeap::top on empty heap");
@@ -84,7 +84,7 @@ public:
   /**
    * @brief Remove the largest-key entry.
    *
-   * Swaps the root with the tail, pops the tail, then sifts the new root down. @c O(log n).
+   * Swaps the root with the tail, pops the tail, then sifts the new root down. `O(log n)`.
    * Asserts on an empty heap.
    */
   void pop() noexcept {
@@ -115,7 +115,7 @@ private:
   /**
    * @brief Total-order predicate implementing the (key, val) tie-break.
    *
-   * @c (ak, av) is less than @c (bk, bv) when @c ak < bk, or @c ak == bk and @c av < bv. Equality
+   * `(ak, av)` is less than `(bk, bv)` when @c ak < bk, or `ak == bk` and @c av < bv. Equality
    * of both coordinates yields @c false (strict ordering).
    */
   static bool pairLess(const Key &ak, const Val &av, const Key &bk, const Val &bv) noexcept {

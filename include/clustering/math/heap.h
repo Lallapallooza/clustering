@@ -13,13 +13,13 @@
 namespace clustering {
 
 /**
- * @brief Binary min-heap of @c (key, val) pairs ordered on @c key.
+ * @brief Binary min-heap of `(key, val)` pairs ordered on @c key.
  *
  * Plain d=2 heap backed by a single @c std::vector. @c push, @c top, @c pop are the full surface;
  * no bulk-build, no merge, no handles. Use @ref IndexedHeap when a stable handle and
  * @c decreaseKey are needed.
  *
- * @tparam Key Orderable key type; @c operator< defines the ordering. Smaller keys pop first.
+ * @tparam Key Orderable key type; `operator<` defines the ordering. Smaller keys pop first.
  * @tparam Val Payload carried alongside the key.
  */
 template <class Key, class Val> class BinaryHeap {
@@ -27,9 +27,9 @@ public:
   BinaryHeap() = default;
 
   /**
-   * @brief Insert a new @c (key, val) entry.
+   * @brief Insert a new `(key, val)` entry.
    *
-   * Appends at the tail and sifts up to restore the heap invariant; @c O(log n).
+   * Appends at the tail and sifts up to restore the heap invariant; `O(log n)`.
    *
    * @param key Ordering key.
    * @param val Payload.
@@ -44,7 +44,7 @@ public:
    *
    * Asserts on an empty heap -- the caller must guard with @ref empty.
    *
-   * @return Const reference to the top @c (key, val) pair.
+   * @return Const reference to the top `(key, val)` pair.
    */
   [[nodiscard]] const std::pair<Key, Val> &top() const noexcept {
     assert(!m_heap.empty() && "BinaryHeap::top on empty heap");
@@ -54,7 +54,7 @@ public:
   /**
    * @brief Remove the smallest-key entry.
    *
-   * Swaps the root with the tail, pops the tail, then sifts the new root down. @c O(log n).
+   * Swaps the root with the tail, pops the tail, then sifts the new root down. `O(log n)`.
    * Asserts on an empty heap.
    */
   void pop() noexcept {
@@ -79,7 +79,7 @@ public:
   /**
    * @brief Whether the heap holds zero entries.
    *
-   * @return @c true iff @c size() == 0.
+   * @return @c true iff `size()` == 0.
    */
   [[nodiscard]] bool empty() const noexcept { return m_heap.empty(); }
 
@@ -93,12 +93,12 @@ private:
 };
 
 /**
- * @brief Binary min-heap keyed on @c Key with @c O(1) handle-to-position lookup.
+ * @brief Binary min-heap keyed on @c Key with `O(1)` handle-to-position lookup.
  *
- * Each heap entry carries an external @c Idx handle drawn from a fixed range @c [0, capacity).
+ * Each heap entry carries an external @c Idx handle drawn from a fixed range `[0, capacity)`.
  * At most one entry per handle is in the heap at any time; the handle is cleared on @c pop and on
  * construction. @ref decreaseKey looks up the handle's position through @c m_posMap and sifts up;
- * @c O(log n) worst case. Backed by heap-allocated vectors; allocation is constrained to
+ * `O(log n)` worst case. Backed by heap-allocated vectors; allocation is constrained to
  * construction and the occasional @c m_heap growth, never inside @c push / @c pop / @c decreaseKey.
  *
  * @tparam Key Orderable key type; smaller keys pop first.
@@ -119,13 +119,16 @@ public:
    * Public so callers can read the handle returned by @c top / @c pop without unpacking a tuple.
    */
   struct Entry {
+    /// External identity supplied by the caller at @c push time.
     Idx handle;
+    /// Ordering key; the heap root carries the smallest key.
     Key key;
+    /// Payload associated with @c handle.
     Val val;
   };
 
   /**
-   * @brief Construct an empty heap capable of handles in @c [0, capacity).
+   * @brief Construct an empty heap capable of handles in `[0, capacity)`.
    *
    * Allocates the position map to @p capacity entries filled with @c kNotInHeap.
    *
@@ -137,7 +140,7 @@ public:
    * @brief Insert an entry for @p handle.
    *
    * Asserts @p handle is in range and not already present. Sifts up to restore the heap
-   * invariant; @c O(log n).
+   * invariant; `O(log n)`.
    *
    * @param handle External identity of the entry; must be less than @c capacity.
    * @param key Ordering key.
@@ -170,10 +173,10 @@ public:
    *
    * Asserts @p handle is present and @p newKey is not greater than the current key (the classic
    * @c decreaseKey precondition -- raising a key would require sifting down, a different path).
-   * Sifts up from the handle's position; @c O(log n).
+   * Sifts up from the handle's position; `O(log n)`.
    *
    * @param handle Handle of the entry to update.
-   * @param newKey Replacement key; must satisfy @c newKey <= current key.
+   * @param newKey Replacement key; must satisfy `newKey <= current` key.
    */
   void decreaseKey(Idx handle, Key newKey) noexcept {
     assert(static_cast<std::size_t>(handle) < m_posMap.size() &&
@@ -200,7 +203,7 @@ public:
   /**
    * @brief Remove and return the smallest-key entry.
    *
-   * Clears the popped handle's slot in @c m_posMap; the handle becomes @c contains(h) == false.
+   * Clears the popped handle's slot in @c m_posMap; the handle becomes `contains(h)` == false.
    *
    * @return The popped @ref Entry by value.
    */
@@ -230,7 +233,7 @@ public:
   /**
    * @brief Whether the heap holds zero entries.
    *
-   * @return @c true iff @c size() == 0.
+   * @return @c true iff `size()` == 0.
    */
   [[nodiscard]] bool empty() const noexcept { return m_heap.empty(); }
 

@@ -26,13 +26,13 @@ namespace clustering::math::detail {
  * @brief Pack per-column squared norms of @c Y into @c Nr -wide panels aligned with the
  *        @c packB panel layout.
  *
- * Panel @c p stores the norms for columns @c [p*Nr, p*Nr + Nr). Positions beyond @p m are
- * set to @c +infinity so padded columns can never pass a finite @c radiusSq comparison.
+ * Panel @c p stores the norms for columns `[p*Nr, p*Nr + Nr)`. Positions beyond @p m are
+ * set to `+inf`inity so padded columns can never pass a finite @c radiusSq comparison.
  *
  * @tparam T Element type (@c float for the AVX2 path).
- * @param yRowNormsSq Row-1 array of length @p m with @c ||y_j||^2 per point.
+ * @param yRowNormsSq Row-1 array of length @p m with `||y_j||^2` per point.
  * @param m           Number of points in @c Y.
- * @param out         Destination buffer of capacity @c ceil(m / Nr) * Nr, 32-byte aligned.
+ * @param out         Destination buffer of capacity `ceil(m / Nr)` * Nr, 32-byte aligned.
  */
 template <class T>
 inline void packYColNormsSq(const T *yRowNormsSq, std::size_t m, T *out) noexcept {
@@ -85,7 +85,7 @@ inline constexpr std::size_t kThresholdPanelGroup = 32;
  * M-tile packs an @c Mr x d A-strip via @c packA (full K range, no K-blocking), then for
  * every Nr-wide B-panel of @p Y calls @c gemmKernel8x6Avx2F32Threshold. The per-column
  * @c Y-norms are pre-packed once per call; @c X-row-norms are computed inline per M-tile and
- * staged in @c alignas(32) stack scratch so the kernel can issue aligned loads.
+ * staged in `alignas(32)` stack scratch so the kernel can issue aligned loads.
  *
  * Pool fan-out is over row chunks. Each chunk's emit calls are serialized through @p emit
  * from the worker that owns the chunk; emit implementations that need thread safety across
@@ -98,11 +98,11 @@ inline constexpr std::size_t kThresholdPanelGroup = 32;
  * @tparam Emit @c std::invocable<std::size_t, std::size_t> callable.
  * @param X        Data matrix (n x d), contiguous, 32-byte aligned.
  * @param Y        Point matrix (m x d), contiguous, 32-byte aligned.
- * @param xRowNormsSq Row-1 array of @c ||x_i||^2, length n.
- * @param yRowNormsSq Row-1 array of @c ||y_j||^2, length m.
+ * @param xRowNormsSq Row-1 array of `||x_i||^2`, length n.
+ * @param yRowNormsSq Row-1 array of `||y_j||^2`, length m.
  * @param radiusSq Non-negative squared radius.
  * @param pool     Parallelism injection; fans out over row chunks when @c shouldParallelize.
- * @param emit     Callback for each surviving @c (row, col) pair.
+ * @param emit     Callback for each surviving `(row, col)` pair.
  */
 template <class Emit>
 inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig> &X,
@@ -133,7 +133,7 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
       yNormsPaddedSize);
 
   // packB wants B in K x N orientation (features x points); @p Y is (points x features), so
-  // take its transpose view before describing the source. @c Y.t() is a borrowed MaybeStrided
+  // take its transpose view before describing the source. `Y.t()` is a borrowed MaybeStrided
   // view; describeMatrix preserves the strides so packB's scalar element access sees the right
   // Y[j][k_iter] per packed position.
   const auto yTransposed = Y.t();
@@ -219,21 +219,21 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
  * Symmetric counterpart to @ref pairwiseThresholdOuterAvx2F32 for the @c X == @c Y case (the
  * eps-neighbour graph DBSCAN consumes is symmetric, so half the pairs are mirrors of the other
  * half). Iterates the chunk / M-tile / panel nest as the non-symmetric driver but skips every
- * M-tile / panel pair that lies strictly below the diagonal: tile @c (iBase, jBase) is
+ * M-tile / panel pair that lies strictly below the diagonal: tile `(iBase, jBase)` is
  * processed iff @c jBase + kNr > iBase, which collapses tile count from @c n*m / (Mr*Nr) to
  * roughly half. Diagonal-straddling tiles are processed in full and the @p emit wrapper handles
- * the per-cell @c (row > col) skip.
+ * the per-cell `(row > col)` skip.
  *
- * @p emit is invoked once per surviving cell with @c (row, col) where @c row <= col always; the
- * caller is responsible for any mirror push (@c adj[row].push(col) plus @c adj[col].push(row)
- * when @c row != col) so this driver can stay agnostic to the consumer's adjacency layout.
+ * @p emit is invoked once per surviving cell with `(row, col)` where `row <= col` always; the
+ * caller is responsible for any mirror push (`adj[row]`.push(col) plus `adj[col]`.push(row)
+ * when `row != col`) so this driver can stay agnostic to the consumer's adjacency layout.
  *
  * @tparam Emit @c std::invocable<std::size_t, std::size_t> callable.
  * @param X           Data matrix (n x d), contiguous, 32-byte aligned.
- * @param xRowNormsSq Row-1 array of @c ||x_i||^2, length n.
+ * @param xRowNormsSq Row-1 array of `||x_i||^2`, length n.
  * @param radiusSq    Non-negative squared radius.
  * @param pool        Parallelism injection; fans out over row chunks when @c shouldParallelize.
- * @param emit        Callback invoked for each surviving @c (row, col) pair with @c row <= col.
+ * @param emit        Callback invoked for each surviving `(row, col)` pair with `row <= col`.
  */
 template <class Emit>
 inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layout::Contig> &X,
@@ -308,8 +308,8 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
         // Strictly-below-diagonal panels (entire panel column-range ends at or before the
         // tile's first row) carry no information the upper-half traversal will not already
         // cover. The earliest panel that can carry an upper-half cell is @c iBase / kNr: panel
-        // @c p covers cols @c [p*kNr, p*kNr + kNr), so we need @c (p+1)*kNr > iBase, i.e.,
-        // @c p >= iBase / kNr (integer divide). This is the @c symmetric prune.
+        // @c p covers cols `[p*kNr, p*kNr + kNr)`, so we need `(p+1)*kNr > iBase`, i.e.,
+        // `p >= iBase` / kNr (integer divide). This is the @c symmetric prune.
         const std::size_t pSkip = iBase / kNr;
         const std::size_t pStart = (panelBase > pSkip) ? panelBase : pSkip;
         if (pStart >= panelEnd) {
@@ -317,10 +317,10 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
         }
 
         // Strictly-upper panels start where the panel's first column is past the tile's last
-        // row, i.e. @c jBase >= iBase + mc, equivalently @c p >= ceil((iBase + mc) / kNr).
-        // For panels in @c [pStart, pStrictUpper) at least one in-tile cell has @c row > col
+        // row, i.e. `jBase >= iBase` + mc, equivalently `p >= ceil`((iBase + mc) / kNr).
+        // For panels in `[pStart, pStrictUpper)` at least one in-tile cell has @c row > col
         // (the diagonal-straddling band), so the kernel may emit cells the symmetric mirror
-        // already covered. Wrap @p emit with a @c row <= col filter for those tiles. Strictly
+        // already covered. Wrap @p emit with a `row <= col` filter for those tiles. Strictly
         // upper panels skip the filter entirely -- the per-cell branch only matters in the
         // narrow diagonal band, so the ordinary case stays at zero overhead.
         const std::size_t pStrictUpper = (iBase + mc + kNr - 1) / kNr;

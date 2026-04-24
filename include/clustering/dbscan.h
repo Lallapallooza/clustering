@@ -86,7 +86,7 @@ public:
 
     // One adjacency query per point is the unit of work the range-index backends fan out on;
     // shouldSpawnPool with minOpsPerWorker=16 matches the KDTree adjacency sweep's own
-    // `shouldParallelize(n, 4, 2)` gate (@c n / 4 >= 2 * workerCount => @c n >= 8 * workerCount)
+    // `shouldParallelize(n, 4, 2)` gate (@c n / 4 >= 2 * workerCount => `n >= 8` * workerCount)
     // so the pool spawn and the backend fan-out fire at the same shape. @c n * d would
     // under-estimate DBSCAN work -- the backend does per-query tree walks that are much heavier
     // than @c d ops -- and caused @c n_jobs=16 at low @c d to fall back to serial here while
@@ -145,7 +145,7 @@ private:
    * @param seed    Index of the core point that starts the cluster.
    * @param isCore  Per-point core-point flag derived from the adjacency row sizes.
    * @param adj     Borrowed eps-adjacency list indexed by point row.
-   * @param labels  Pointer to the dense label buffer; aliased from @c m_labels.data().
+   * @param labels  Pointer to the dense label buffer; aliased from `m_labels.data()`.
    */
   void expandCluster(std::size_t seed, const std::vector<std::uint8_t> &isCore,
                      const std::vector<std::vector<std::int32_t>> &adj, std::int32_t *labels) {
@@ -187,7 +187,7 @@ private:
   /// @c DBSCAN instance skip the thread-spawn cost.
   std::optional<BS::light_thread_pool> m_pool;
   /// Dense label buffer. Reallocated inside @ref run only when @c n differs from the previous
-  /// call's size; the @c [0, n) range is overwritten each run with @ref UNCLASSIFIED, then
+  /// call's size; the `[0, n)` range is overwritten each run with @ref UNCLASSIFIED, then
   /// filled with cluster ids (or @ref NOISY) by the expansion sweep.
   NDArray<std::int32_t, 1> m_labels;
 };

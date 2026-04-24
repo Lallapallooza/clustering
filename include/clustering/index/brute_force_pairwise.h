@@ -40,13 +40,13 @@ public:
   /**
    * @brief Returns the full radius-neighborhood adjacency over the indexed point cloud.
    *
-   * Emits surviving @c (i, j) pairs directly from the fused AVX2 threshold kernel; the outer
+   * Emits surviving `(i, j)` pairs directly from the fused AVX2 threshold kernel; the outer
    * driver partitions X rows across @p pool so per-row pushes are race-free.
    *
    * @param radius Non-negative neighbourhood radius; comparison runs on the squared distance.
    * @param pool   Parallelism injection forwarded to the thresholded sweep.
    * @return Length-@c n vector where element @c i lists every @c j with
-   *         @c ||x_i - x_j||^2 <= radius^2.
+   *         `||x_i - x_j||^2 <= radius^2`.
    */
   [[nodiscard]] std::vector<std::vector<std::int32_t>> query(T radius, math::Pool pool) const {
     const std::size_t n = m_points.dim(0);
@@ -63,16 +63,16 @@ public:
 
     const T radiusSq = radius * radius;
     // Symmetric eps-neighbour graph: the kernel emits each unique upper-triangular cell once
-    // with @c row <= col. The kernel-side emit only touches @c adj[row] so workers writing
-    // disjoint row chunks remain race-free; the mirror push (@c adj[col].push(row)) runs as a
+    // with `row <= col`. The kernel-side emit only touches `adj[row]` so workers writing
+    // disjoint row chunks remain race-free; the mirror push (`adj[col]`.push(row)) runs as a
     // single-threaded post-pass below. Halves the pairwise compute on the brute-force path.
     auto emit = [&adj](std::size_t row, std::size_t col) {
       adj[row].push_back(static_cast<std::int32_t>(col));
     };
     math::pairwiseSqEuclideanThresholdedSymmetric(m_points, radiusSq, pool, emit);
 
-    // Mirror pass: each surviving upper-triangular pair @c (i, j) lives in @c adj[i]; push
-    // @c i to @c adj[j] sequentially so the parallel sweep above never crosses worker
+    // Mirror pass: each surviving upper-triangular pair `(i, j)` lives in `adj[i]`; push
+    // @c i to `adj[j]` sequentially so the parallel sweep above never crosses worker
     // boundaries. The size snapshot stops the loop from walking the freshly-mirrored entries
     // when the next outer @c i lands on a row that earlier iterations already augmented.
     for (std::size_t i = 0; i < n; ++i) {

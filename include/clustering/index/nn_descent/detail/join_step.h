@@ -38,7 +38,7 @@ namespace clustering::index::nn_descent::detail {
  * nested pool dispatch: the worker never calls @c submit_blocks.
  *
  * @par Reciprocal admission
- * Every admitted @c (u, v) edge is also pushed as @c (v, u), which is the standard Dong 2011
+ * Every admitted `(u, v)` edge is also pushed as `(v, u)`, which is the standard Dong 2011
  * bidirectional join. Without reciprocal admission, the join graph becomes asymmetric and
  * convergence stalls.
  *
@@ -67,7 +67,7 @@ template <class T> struct JoinStep {
     // iteration's local-join in a CSR-style packed layout. Two pairs of (offset, length) arrays
     // (one for new, one for old) point into a single contiguous buffer per epoch. The buffer
     // length per node is at most @c k, so a flat (n * k) allocation upper-bounds storage and the
-    // exact length per node is recorded in @c newLen[i] / @c oldLen[i].
+    // exact length per node is recorded in `newLen[i]` / `oldLen[i]`.
     std::vector<std::int32_t> newBuf(n * k);
     std::vector<std::int32_t> oldBuf(n * k);
     std::vector<std::int32_t> newLen(n, 0);

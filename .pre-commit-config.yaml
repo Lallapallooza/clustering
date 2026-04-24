@@ -28,6 +28,22 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  - repo: local
+    hooks:
+      - id: doxygen-chip-check
+        name: doxygen chip + backtick sanity
+        description: Reject @c patterns that render as broken half-chips and docstrings with unclosed backtick spans.
+        entry: scripts/check-doxygen-chips.sh
+        language: script
+        files: ^include/.*\.(h|hpp)$
+      - id: doxygen-build
+        name: doxygen build (zero warnings)
+        description: Rebuild the Doxygen site and fail on any warning (WARN_AS_ERROR=FAIL_ON_WARNINGS_PRINT).
+        entry: scripts/check-doxygen-build.sh
+        language: script
+        pass_filenames: false
+        files: ^(include/.*\.(h|hpp)|docs/.*|cmake/DocsDep\.cmake|CMakeLists\.txt)$
+
   - repo: https://github.com/commitizen-tools/commitizen
     rev: v4.13.10
     hooks:

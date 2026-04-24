@@ -14,19 +14,19 @@ namespace clustering::math::detail {
 #ifdef CLUSTERING_USE_AVX2
 
 /**
- * @brief Fused 8x6 AVX2 f32 microkernel: accumulate @c -2*X*C^T over the full K and fold
- *        running @c (minDistSq, argmin) per M-row.
+ * @brief Fused 8x6 AVX2 f32 microkernel: accumulate `-2`*X*C^T over the full K and fold
+ *        running `(minDistSq, argmin)` per M-row.
  *
  * Computes a column-by-column inner product of an 8-row A-panel against a 6-column B-panel.
- * After the @c K-loop, folds @c +cSqNorms[j] into each column's accumulator (giving
- * @c ||c_j||^2 - 2*x_i.c_j, which is @c ||x_i - c_j||^2 - ||x_i||^2 -- shifting every column
+ * After the @c K-loop, folds `+cSqNorms[j]` into each column's accumulator (giving
+ * `||c_j||^2` - 2*x_i.c_j, which is `||x_i - c_j||^2 - ||x_i||^2` -- shifting every column
  * by the same constant per row is safe for the running argmin comparison) and updates a pair
- * of @c (bestMin, bestArg) YMM registers via @c _mm256_cmp_ps + @c _mm256_blendv_ps with
+ * of `(bestMin, bestArg)` YMM registers via @c _mm256_cmp_ps + @c _mm256_blendv_ps with
  * @c _CMP_LT_OQ. Strict less-than mirrors @c math::argmin's earliest-index-on-tie semantics.
  *
  * Buffer layouts match @c packA / @c packB from @c gemm_pack.h:
- *   - @p apPanel holds an @c Mr x @c kc A-panel; element @c (r, k) is at @c ap[k*Mr + r].
- *   - @p bpPanel holds a @c kc x @c Nr B-panel; element @c (k, c) is at @c bp[k*Nr + c].
+ *   - @p apPanel holds an @c Mr x @c kc A-panel; element `(r, k)` is at `ap[k*Mr + r]`.
+ *   - @p bpPanel holds a @c kc x @c Nr B-panel; element `(k, c)` is at `bp[k*Nr + c]`.
  *
  * @p bestMin and @p bestArg hold per-row running state across successive N-panel invocations
  * of this kernel; the outer driver resets them per M-tile and reads them back at the M-tile
@@ -40,7 +40,7 @@ namespace clustering::math::detail {
  * @param jBase            Global column index of column 0 of this B-panel; contributes to
  *                         @p bestArg via @c jBase + columnOffset.
  * @param bestMin          In/out: per-row running minimum of
- *                         @c ||c_j||^2 - 2*x_i.c_j across all columns scanned so far.
+ *                         `||c_j||^2` - 2*x_i.c_j across all columns scanned so far.
  * @param bestArg          In/out: per-row argmin of the columns scanned so far.
  */
 inline void gemmKernel8x6Avx2F32FusedArgmin(const float *apPanel, const float *bpPanel,

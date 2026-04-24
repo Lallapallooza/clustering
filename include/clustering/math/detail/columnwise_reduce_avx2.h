@@ -43,7 +43,7 @@ inline void columnwiseAccumSumSqAvx2F32(const float *row, std::size_t d, float *
  *
  * Adds @p row element-wise into @p sumRow using Kahan compensation held in @p compRow; each lane
  * is independent so SIMD along the feature axis is bit-identical to the scalar loop per column.
- * The subtractions that recover the rounding residual (@c (t - sum) - y) are emitted as discrete
+ * The subtractions that recover the rounding residual (`(t - sum)` - y) are emitted as discrete
  * @c _mm256_sub_ps calls so the compiler cannot fuse them into an FMA and collapse the Kahan
  * correction. Tail handled with scalar loop when @p d is not a multiple of 8.
  */

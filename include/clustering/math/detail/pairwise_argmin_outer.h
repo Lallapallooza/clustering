@@ -29,13 +29,13 @@ namespace clustering::math::detail {
  * @brief Pack the per-column squared norms of @c C into @c Nr -wide panels aligned with the
  *        @c packB panel layout.
  *
- * Panel @c p stores the norms for columns @c [p*Nr, p*Nr + Nr). Positions beyond @p k are set
- * to @c +infinity so padded columns never win the argmin contest.
+ * Panel @c p stores the norms for columns `[p*Nr, p*Nr + Nr)`. Positions beyond @p k are set
+ * to `+inf`inity so padded columns never win the argmin contest.
  *
  * @tparam T Element type (@c float for the AVX2 path).
- * @param cSqNorms Row-1 array of length @p k with @c ||c_j||^2 per centroid.
+ * @param cSqNorms Row-1 array of length @p k with `||c_j||^2` per centroid.
  * @param k        Number of centroids (matches the @c nc passed to @c packB).
- * @param out      Destination buffer of capacity @c ceil(k / Nr) * Nr, 32-byte aligned.
+ * @param out      Destination buffer of capacity `ceil(k / Nr)` * Nr, 32-byte aligned.
  */
 template <class T> inline void packCSqNorms(const T *cSqNorms, std::size_t k, T *out) noexcept {
   constexpr std::size_t kNr = kKernelNr<T>;
@@ -60,11 +60,11 @@ template <class T> inline void packCSqNorms(const T *cSqNorms, std::size_t k, T 
  *
  * Iterates 8-row M-tiles. For each tile, packs an Mr x d A-strip via @c packA (full K range,
  * no K-blocking), then for every Nr-wide C-panel calls @c gemmKernel8x6Avx2F32FusedArgmin to
- * fold the per-column candidate distance into the tile's running @c (bestMin, bestArg). At
- * the tile epilogue, adds @c ||x_i||^2 per row, clamps to zero, and writes out labels +
+ * fold the per-column candidate distance into the tile's running `(bestMin, bestArg)`. At
+ * the tile epilogue, adds `||x_i||^2` per row, clamps to zero, and writes out labels +
  * minimum distances.
  *
- * Per-tile scratch is stack-local (@c alignas(32) buffers sized for the worst-case @p d);
+ * Per-tile scratch is stack-local (`alignas(32)` buffers sized for the worst-case @p d);
  * because the maximum @p d is bounded by @c defaults::pairwiseArgminMaxD at the public entry,
  * stack usage remains small and predictable.
  *
@@ -98,15 +98,15 @@ inline void pairwiseArgminOuterAvx2F32(const NDArray<float, 2, Layout::Contig> &
   const std::size_t bpackSize = nPanels * cpanelSize;
 
   // Pack the full centroid matrix once per call. Memory is ceil(k/Nr) * d * Nr floats; with the
-  // fused path gated at @c d <= defaults::pairwiseArgminMaxD this is strictly bounded and fits
+  // fused path gated at `d <= defaults`::pairwiseArgminMaxD this is strictly bounded and fits
   // comfortably in L2 for the envelopes the fused driver is advantageous on.
   std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> bpackedStorage(bpackSize);
   std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> normsPackedStorage(
       normsPaddedSize);
 
-  // packB expects B in @c (K x N) orientation, i.e. features-by-centroids. Our @p C is
-  // @c (centroids x features), so take its transpose view before handing the descriptor to
-  // packB. @c C.t() is a borrowed MaybeStrided view; describeMatrix preserves the strides so
+  // packB expects B in `(K x N)` orientation, i.e. features-by-centroids. Our @p C is
+  // `(centroids x features)`, so take its transpose view before handing the descriptor to
+  // packB. `C.t()` is a borrowed MaybeStrided view; describeMatrix preserves the strides so
   // packB's scalar element access picks up the right C[j][k_iter] per packed position.
   const auto cTransposed = C.t();
   const auto cDesc = ::clustering::detail::describeMatrix(cTransposed);
@@ -188,7 +188,7 @@ inline void pairwiseArgminOuterAvx2F32(const NDArray<float, 2, Layout::Contig> &
  * @brief Minimum byte count of the packed-B scratch that
  *        @ref pairwiseArgminOuterAvx2F32WithScratch expects.
  *
- * Sized at @c ceil(k / Nr) * Nr * d floats. Callers that amortize assignment across many
+ * Sized at `ceil(k / Nr)` * Nr * d floats. Callers that amortize assignment across many
  * iterations size this once at shape-change time so each assignment reuses the buffer.
  */
 inline std::size_t packedBScratchSizeFloats(std::size_t k, std::size_t d) noexcept {
@@ -209,7 +209,7 @@ inline std::size_t packedCSqNormsScratchSizeFloats(std::size_t k) noexcept {
 /**
  * @brief Total element count of a packed-B buffer laid out for @c gemmRunPrepacked.
  *
- * Sums @c k_dim * roundedNc over each @c jc block of width @c kNc<T>, where
+ * Sums @c k_dim * roundedNc over each @c jc block of width `kNc<T>`, where
  * @c roundedNc = ceil(nc / kNr<T>) * kNr<T>. The result is the exact buffer size
  * @c gemmRunPrepacked expects and matches @c GemmPlan's packing loop.
  */
@@ -338,11 +338,11 @@ inline void pairwiseArgminOuterAvx2F32WithScratch(const NDArray<float, 2, Layout
 /**
  * @brief Direct squared-distance argmin for the small-@c d hot path (no GEMM packing).
  *
- * At @c d <= a few lanes, the fused argmin-GEMM driver spends a disproportionate share of its
+ * At `d <= a` few lanes, the fused argmin-GEMM driver spends a disproportionate share of its
  * wall time in @c packA: packing an 8x2 A-panel into the microkernel layout costs nearly as
  * much as the 96-FMA kernel it feeds. This routine collapses the assignment to the direct
- * @c ||x_i - c_j||^2 formula, iterated 8 rows at a time with AVX2 accumulators and broadcast
- * centroid components. Writes the true squared distance (no @c ||x||^2 + @c ||c||^2 - 2 x.c
+ * `||x_i - c_j||^2` formula, iterated 8 rows at a time with AVX2 accumulators and broadcast
+ * centroid components. Writes the true squared distance (no `||x||^2` + `||c||^2` - 2 x.c
  * decomposition) so downstream callers consume numerically faithful inertia without a final
  * @c recomputeMinDistSqDirect pass.
  *
@@ -375,7 +375,7 @@ inline void pairwiseArgminDirectSmallDF32(const NDArray<float, 2, Layout::Contig
     const std::size_t iBase = tileIdx * kMr;
     const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
 
-    // Gather the 8 rows' d coordinates into per-feature YMM registers. At @c d <= 8 the full
+    // Gather the 8 rows' d coordinates into per-feature YMM registers. At `d <= 8` the full
     // tile fits in 8 YMM registers (one per feature lane); each register holds the same feature
     // for the 8 rows. If @c mc < kMr the tail rows are zero-padded; their @c bestMin/bestArg are
     // discarded by the write-back below.

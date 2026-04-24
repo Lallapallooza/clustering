@@ -22,20 +22,22 @@ namespace clustering::math {
 /**
  * @brief 128-bit state for the PCG-XSL-RR 64-bit output generator (Melissa O'Neill).
  *
- * State and stream are held as @c __uint128_t. Seed with @c seed(seed, stream); advance via
- * the free function @c advanceState(rng). Reproducibility is load-bearing: the multiplier and
+ * State and stream are held as @c __uint128_t. Seed with `seed(seed, stream)`; advance via
+ * the free function `advanceState(rng)`. Reproducibility is load-bearing: the multiplier and
  * output function match pcg-cpp's @c pcg64 so identical seed + stream produce identical u64
  * streams across platforms that have @c __uint128_t.
  */
 struct pcg64 {
+  /// 128-bit generator state; advanced by every @c advanceState call.
   __uint128_t m_state = 0;
+  /// Stream-encoded odd increment mixed into the LCG step.
   __uint128_t m_inc = 0;
 
   /**
    * @brief Initialize the generator per PCG's canonical seeding procedure.
    *
    * Matches Melissa O'Neill's @c pcg_basic reference: zero the state, set inc to
-   * @c (stream << 1) | 1, advance once, add the user seed, advance once more.
+   * `(stream << 1)` | 1, advance once, add the user seed, advance once more.
    *
    * @param seedValue User-supplied seed mixed into the state after the stream selector.
    * @param stream Stream identifier; two generators with identical seed but different streams
@@ -71,11 +73,12 @@ inline std::uint64_t advanceState(pcg64 &rng) noexcept {
 /**
  * @brief 256-bit state for Vigna & Blackman's xoshiro256** generator.
  *
- * Seed with @c seed(seedValue) (SplitMix64-diffused); advance via @c advanceState(rng). The
+ * Seed with `seed(seedValue)` (SplitMix64-diffused); advance via `advanceState(rng)`. The
  * canonical s={0,0,0,0} state is a fixed point, so @c seed always routes through SplitMix64
- * even for @c seedValue == 0.
+ * even for `seedValue == 0`.
  */
 struct xoshiro256ss {
+  /// Four 64-bit state words; SplitMix64-diffused at @c seed time.
   std::array<std::uint64_t, 4> m_s{0, 0, 0, 0};
 
   /**
@@ -138,11 +141,11 @@ template <class Rng> inline std::uint64_t randUniformU64(Rng &rng) noexcept {
 }
 
 /**
- * @brief Draw a uniform variate in the half-open unit interval @c [0, 1).
+ * @brief Draw a uniform variate in the half-open unit interval `[0, 1)`.
  *
- * For @c double, returns @c (u >> 11) * 2^-53, the canonical bias-free form that selects one
- * of @c 2^53 representable doubles in @c [0, 1). For @c float, returns @c (u >> 40) * 2^-24
- * over @c 2^24 representable floats. Both forms round-trip without the @c 1.0 endpoint.
+ * For @c double, returns `(u >> 11) * 2^-53`, the canonical bias-free form that selects one
+ * of `2^53` representable doubles in `[0, 1)`. For @c float, returns `(u >> 40) * 2^-24`
+ * over `2^24` representable floats. Both forms round-trip without the @c 1.0 endpoint.
  *
  * @tparam T Either @c float or @c double.
  */
@@ -159,10 +162,10 @@ template <class T, class Rng> inline T randUnit(Rng &rng) noexcept {
 /**
  * @brief Sample one category index proportionally to non-negative weights.
  *
- * Implements the k-means++ seeding primitive. Draws @c u in @c [0, 1), scales to the weight
+ * Implements the k-means++ seeding primitive. Draws @c u in `[0, 1)`, scales to the weight
  * total, and walks the cumulative sum returning the first index whose prefix-sum is strictly
- * greater than @c u*total. The strict comparison matches @c numpy.searchsorted(side='right')
- * and avoids the classical @c <= vs @c < off-by-one that biases toward index 0 when a weight
+ * greater than @c u*total. The strict comparison matches `numpy.searchsorted(side='right')`
+ * and avoids the classical `<= vs` `< off`-by-one that biases toward index 0 when a weight
  * equals the threshold exactly.
  *
  * @tparam T Element type of the weight array (@c float or @c double).
@@ -170,7 +173,7 @@ template <class T, class Rng> inline T randUnit(Rng &rng) noexcept {
  * @tparam Rng Generator type accepted by @ref advanceState.
  * @param weights Non-empty rank-1 array of non-negative weights with at least one positive entry.
  * @param rng In-out generator state.
- * @return Index in @c [0, weights.dim(0)).
+ * @return Index in `[0, weights.dim(0))`.
  */
 template <class T, Layout L, class Rng>
 inline std::size_t weightedCategorical(const NDArray<T, 1, L> &weights, Rng &rng) noexcept {
@@ -208,10 +211,10 @@ inline std::size_t weightedCategorical(const NDArray<T, 1, L> &weights, Rng &rng
 /**
  * @brief Efraimidis-Spirakis weighted reservoir sampling (A-Exp variant, log-key form).
  *
- * For each item @c i draws @c u_i uniformly in @c (0, 1) and computes the key
- * @c key_i = log(u_i) / w_i; the @c k items with the largest keys are selected. The log form
- * is algebraically identical to the paper's @c u_i^(1/w_i) but avoids silent underflow when
- * @c w_i is small (the naive @c pow form collapses to @c 0 once @c 1/w_i exceeds ~ 1075,
+ * For each item @c i draws `u_i` uniformly in `(0, 1)` and computes the key
+ * `key_i = log(u_i) / w_i`; the @c k items with the largest keys are selected. The log form
+ * is algebraically identical to the paper's `u_i^(1/w_i)` but avoids silent underflow when
+ * `w_i` is small (the naive @c pow form collapses to @c 0 once `1/w_i` exceeds `~1075`,
  * biasing the selection).
  *
  * Reference: Efraimidis & Spirakis, "Weighted random sampling with a reservoir," IPL 97 (2006),
@@ -221,7 +224,7 @@ inline std::size_t weightedCategorical(const NDArray<T, 1, L> &weights, Rng &rng
  * @tparam L Layout tag of the weight array; accepts both contiguous and strided.
  * @tparam Rng Generator type accepted by @ref advanceState.
  * @param weights Rank-1 array of strictly positive weights.
- * @param k Number of indices to select; must satisfy @c k <= weights.dim(0).
+ * @param k Number of indices to select; must satisfy `k <= weights`.dim(0).
  * @param rng In-out generator state.
  * @param outIdx Output buffer of exactly @c k positions; filled with the sampled indices in
  *        unspecified order.

@@ -8,15 +8,15 @@ namespace clustering::math::detail {
 /**
  * @brief Sift position @p pos up in @p heap until the heap invariant under @p comesBefore holds.
  *
- * Swaps @p pos with its parent while @c comesBefore(heap[pos], heap[parent]) reports true; returns
- * when the invariant holds or @p pos reaches the root. @c O(log heap.size()).
+ * Swaps @p pos with its parent while `comesBefore(heap[pos], heap[parent])` reports true; returns
+ * when the invariant holds or @p pos reaches the root. `O(log heap.size()`).
  *
- * @tparam Container  Random-access container indexable with @c operator[] and @c size(). Elements
+ * @tparam Container  Random-access container indexable with `operator[]` and `size()`. Elements
  *                    must be swappable.
- * @tparam Compare    Strict weak ordering on heap entries. @c comesBefore(a, b) returns @c true
+ * @tparam Compare    Strict weak ordering on heap entries. `comesBefore(a, b)` returns @c true
  *                    when @c a should sit closer to the root than @c b.
  * @param heap        The heap storage.
- * @param pos         Starting position; must be less than @c heap.size().
+ * @param pos         Starting position; must be less than `heap.size()`.
  * @param comesBefore Comparator deciding root-ward ordering.
  */
 template <class Container, class Compare>
@@ -37,13 +37,13 @@ void siftUp(Container &heap, std::size_t pos, Compare comesBefore) noexcept {
  * @brief Sift position @p pos down in @p heap until the heap invariant under @p comesBefore holds.
  *
  * Swaps @p pos with the child that most strictly comes before under @p comesBefore, repeating
- * until @p pos is a leaf or no child comes before it. @c O(log heap.size()).
+ * until @p pos is a leaf or no child comes before it. `O(log heap.size()`).
  *
- * @tparam Container  Random-access container indexable with @c operator[] and @c size(). Elements
+ * @tparam Container  Random-access container indexable with `operator[]` and `size()`. Elements
  *                    must be swappable.
  * @tparam Compare    Strict weak ordering on heap entries.
  * @param heap        The heap storage.
- * @param pos         Starting position; must be less than @c heap.size().
+ * @param pos         Starting position; must be less than `heap.size()`.
  * @param comesBefore Comparator deciding root-ward ordering.
  */
 template <class Container, class Compare>

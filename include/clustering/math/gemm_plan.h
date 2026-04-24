@@ -19,7 +19,7 @@ namespace clustering::math {
  *        repeated @c execute calls with varying @c A.
  *
  * Ownership model:
- *   - @c m_Bp holds a @c packB-shaped copy of @c B covering every @c (jcIdx, pcIdx) block; the
+ *   - @c m_Bp holds a @c packB-shaped copy of @c B covering every `(jcIdx, pcIdx)` block; the
  *     source @c B may be destroyed after construction.
  *   - @c m_scratch holds per-worker @c A-packing arenas sized @c workerCount * kMc * kKc.
  *   - @c m_pool is captured by value at construction. @c execute uses it unchanged.
@@ -35,7 +35,7 @@ namespace clustering::math {
  * @tparam Backend Backend tag; defaulted to @c detail::ReferenceGemm. @c GemmPlan does NOT route
  *         through the backend -- it calls @c gemmRunPrepacked directly with its owned @c m_Bp.
  *         The template parameter exists so @c GemmPlan is selected at the same
- *         @c <T, Backend> call site as the one-shot @c gemm entry.
+ *         `<T`, Backend> call site as the one-shot @c gemm entry.
  */
 template <class T, class Backend = detail::ReferenceGemm> class GemmPlan {
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
@@ -48,7 +48,7 @@ public:
    * @tparam LB Layout tag of B (@c Contig or @c MaybeStrided).
    * @param B   Source matrix (K x N); contents are copied into @c m_Bp, the source may outlive
    *            the plan or vice versa without coupling.
-   * @param pool Pool captured by value for use by @c execute; @c pool.workerCount() determines
+   * @param pool Pool captured by value for use by @c execute; `pool.workerCount()` determines
    *            @c m_scratch size and is fixed for the plan's lifetime.
    */
   template <Layout LB>
@@ -100,8 +100,8 @@ public:
    *        @c B captured at construction.
    *
    * @tparam LA Layout tag of A.
-   * @param A Input matrix (M x @c kDim()).
-   * @param C Output matrix (M x @c nDim()); must be mutable.
+   * @param A Input matrix (M x `kDim()`).
+   * @param C Output matrix (M x `nDim()`); must be mutable.
    * @param alpha Scalar multiplier on @c A*B; defaults to 1.
    * @param beta  Scalar multiplier on the prior @c C; defaults to 0.
    */
@@ -136,7 +136,9 @@ public:
 
   GemmPlan(const GemmPlan &) = delete;
   GemmPlan &operator=(const GemmPlan &) = delete;
+  /// Defaulted move constructor; transfers the packed @c B panel and scratch.
   GemmPlan(GemmPlan &&) noexcept = default;
+  /// Defaulted move assignment; transfers the packed @c B panel and scratch.
   GemmPlan &operator=(GemmPlan &&) noexcept = default;
   ~GemmPlan() = default;
 

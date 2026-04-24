@@ -48,7 +48,7 @@ template <class T>
  * Walks @p counts once; for each cluster with zero assigned points, calls
  * @ref reseedToFarthestPoint and resets that cluster's sum row to the donor's coordinates so
  * the mean step yields the reseeded point itself. The single sweep over @p counts bounds the
- * reseed work at @c O(k * n) in the worst case -- the @c k > n/2 pathology cannot loop
+ * reseed work at `O(k * n)` in the worst case -- the @c k > n/2 pathology cannot loop
  * indefinitely because each donor's @c minDistSq is zeroed before the next argmax scan.
  *
  * @return Number of clusters reseeded (zero on the convergent steady state).

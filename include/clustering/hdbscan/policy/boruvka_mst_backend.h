@@ -25,9 +25,9 @@ namespace clustering::hdbscan {
  *   1. Builds a KDTree on @p X.
  *   2. Computes per-point core distances as the @c minSamples-th nearest-neighbour squared
  *      distance (self-excluded) via @ref KDTree::knnQuery.
- *   3. Runs Boruvka rounds: each round invokes @ref detail::nearestOutComponent to find the
- *      minimum-MRD-weight out-of-component edge per component via per-point KDTree traversals
- *      pruned on each subtree's axis-aligned bounding box, then unions those edges into the
+ *   3. Runs Boruvka rounds: each round invokes @c clustering::hdbscan::detail::nearestOutComponent
+ * to find the minimum-MRD-weight out-of-component edge per component via per-point KDTree
+ * traversals pruned on each subtree's axis-aligned bounding box, then unions those edges into the
  *      spanning tree under the union-find component structure.
  *   4. Sorts the resulting edges ascending by weight for a canonical output ordering.
  *
@@ -49,11 +49,11 @@ public:
   /**
    * @brief Build the MRD-weighted minimum spanning tree of @p X.
    *
-   * @pre @p minSamples is positive and strictly less than @c X.dim(0).
-   * @pre @c X.dim(0) fits in @c std::int32_t; the HDBSCAN class shell asserts this before a
+   * @pre @p minSamples is positive and strictly less than `X.dim(0)`.
+   * @pre `X.dim(0)` fits in @c std::int32_t; the HDBSCAN class shell asserts this before a
    *      call reaches the backend.
    *
-   * @param X          Contiguous @c (n x d) dataset; caller retains ownership.
+   * @param X          Contiguous `(n x d)` dataset; caller retains ownership.
    * @param minSamples Neighbour count driving the core-distance definition.
    * @param pool       Worker pool; forwarded to the kNN query and the per-round KDTree
    *                   traversal. A null pool runs single-threaded.

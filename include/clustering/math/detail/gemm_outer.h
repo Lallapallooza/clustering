@@ -19,7 +19,7 @@ namespace clustering::math::detail {
 /**
  * @brief Cache-blocking constants for the Goto-style outer loop, sized for AVX2 targets.
  *
- * @c kMc is a multiple of @c kKernelMr<T>, @c kNc a multiple of @c kKernelNr<T>=6. Per-K-tile
+ * @c kMc is a multiple of `kKernelMr<T>`, @c kNc a multiple of `kKernelNr<T>`=6. Per-K-tile
  * @c Bp slice is @c kKc*kNc*sizeof(T): 4.18 MB for f32, fits L3 on Zen 3 and Skylake-X.
  * Per-worker @c Ap slice is @c kMc*kKc*sizeof(T): 96 KB for f32 (L2-resident).
  */
@@ -41,8 +41,8 @@ template <class T> inline constexpr std::size_t kKc = 256;
  * @param Cd Mutable descriptor of C; the caller guarantees mutability and Layout::Contig in v1.
  * @param alpha Scalar multiplier on @c A*B.
  * @param beta  Scalar multiplier on the prior @c C; @c kZero kernel clone selected when zero.
- * @param apArena Caller-owned scratch of capacity @c kMc<T>*kKc<T> elements (per worker).
- * @param bpArena Caller-owned scratch of capacity @c kKc<T>*kNc<T> elements (per call OR plan).
+ * @param apArena Caller-owned scratch of capacity `kMc<T>`*kKc<T> elements (per worker).
+ * @param bpArena Caller-owned scratch of capacity `kKc<T>`*kNc<T> elements (per call OR plan).
  * @param pool   Parallelism injection. When @c pool.shouldParallelize is @c true, the Mc-tile
  *               loop fans out via @c submit_blocks; each task indexes its own arena slice via
  *               @c Pool::workerIndex(). Otherwise the function runs serial on slice 0.

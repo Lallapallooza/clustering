@@ -20,20 +20,20 @@ namespace clustering {
  * @brief Lloyd-family k-means.
  *
  * The algorithm and seeder are template parameters with concept constraints. The default
- * instantiation carries @c LloydFusedGemm<T> and @c AutoSeeder<T>, the latter picking between
+ * instantiation carries `LloydFusedGemm<T>` and `AutoSeeder<T>`, the latter picking between
  * greedy k-means++ and AFK-MC2 against workload shape at @c run time. Callers who want to pin
  * a specific combination spell it out, e.g.
- * @c KMeans<float, LloydFusedGemm<float>, AfkMc2Seeder<float>>.
+ * `KMeans<float, LloydFusedGemm<float>, AfkMc2Seeder<float>>`.
  *
  * @note @c KMeans does NOT own @p X. The caller must keep the @c NDArray alive for the lifetime
  *       of every @ref run call on this instance. An @c n_init > 1 harness constructs @c KMeans
  *       once and calls @c run repeatedly against the same @p X so policy scratch amortizes
- *       across runs at a fixed @c (n, d, k, nJobs) tuple.
+ *       across runs at a fixed `(n, d, k, nJobs)` tuple.
  *
  * @tparam T      Element type. Only @c float is supported; add a @c double specialization to
  *                extend.
- * @tparam Algo   Lloyd driver satisfying @ref kmeans::LloydStrategy<Algo, T>.
- * @tparam Seeder Seeder satisfying @ref kmeans::SeederStrategy<Seeder, T>.
+ * @tparam Algo   Lloyd driver satisfying @ref clustering::kmeans::LloydStrategy.
+ * @tparam Seeder Seeder satisfying @ref clustering::kmeans::SeederStrategy.
  */
 template <class T, class Algo = kmeans::LloydFusedGemm<T>, class Seeder = kmeans::AutoSeeder<T>>
   requires kmeans::LloydStrategy<Algo, T> && kmeans::SeederStrategy<Seeder, T>
@@ -74,7 +74,7 @@ public:
    *                (sklearn convention). The effective sum-of-shift-squared threshold is
    *                @c tol * mean(var(X, axis=0)); iteration stops when the Kahan-summed per-
    *                centroid shift-squared falls at or below that threshold.
-   * @param seed    PRNG seed. Identical @c (seed, nJobs, X, maxIter, tol) produces bit-identical
+   * @param seed    PRNG seed. Identical `(seed, nJobs, X, maxIter, tol)` produces bit-identical
    *                labels, centroids, and inertia at @c nJobs=1.
    *
    * @warning @p X must remain alive and unchanged for the full duration of this call.
@@ -104,7 +104,7 @@ public:
     m_lloyd.run(X, m_centroids, m_k, maxIter, tol, pool, m_labels, m_inertia, m_nIter, m_converged);
   }
 
-  /// Length-n assignment; each entry is in @c [0, k).
+  /// Length-n assignment; each entry is in `[0, k)`.
   [[nodiscard]] const NDArray<std::int32_t, 1> &labels() const noexcept { return m_labels; }
   /// k x d fitted centroids.
   [[nodiscard]] const NDArray<T, 2, Layout::Contig> &centroids() const noexcept {

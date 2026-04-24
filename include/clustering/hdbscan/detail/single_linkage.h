@@ -15,10 +15,10 @@ namespace clustering::hdbscan::detail {
 /**
  * @brief Single-linkage dendrogram stored as parallel arrays of @c N - 1 merges.
  *
- * Matches the scipy @c linkage layout in spirit: merge row @c i of @c (left, right, distance, size)
+ * Matches the scipy @c linkage layout in spirit: merge row @c i of `(left, right, distance, size)`
  * records that cluster id @c left and cluster id @c right coalesce at @c distance, producing a new
- * cluster of @c size points identified by @c N + i. Leaf ids are @c [0, N); merge ids are
- * @c [N, 2N - 1). Consumers walk rows in the natural order for cluster condensation.
+ * cluster of @c size points identified by @c N + i. Leaf ids are `[0, N)`; merge ids are
+ * `[N, 2N - 1)`. Consumers walk rows in the natural order for cluster condensation.
  *
  * @tparam T Element type carrying the merge distance (mutual-reachability).
  */

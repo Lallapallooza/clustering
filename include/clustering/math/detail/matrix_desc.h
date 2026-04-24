@@ -15,7 +15,7 @@ namespace clustering::detail {
  * Field order matters: kernels may take @c MatrixDesc by value and expect the ABI to match
  * across translation units. Extending this struct is additive; reordering is a break.
  *
- * @tparam T Element type. Use the const-qualified alias @c MatrixDescC<T> for read-only views.
+ * @tparam T Element type. Use the const-qualified alias `MatrixDescC<T>` for read-only views.
  */
 template <class T> struct MatrixDesc {
   T *ptr;
@@ -39,7 +39,7 @@ namespace matrix_desc_impl {
  *
  * Returned value is the alignment granularity a microkernel can assume when issuing SIMD
  * loads through @c ptr. A null pointer reports 1 ("no alignment guarantee"): microkernels
- * that branch on @c alignment >= 32 must either short-circuit on an empty @c MatrixDesc
+ * that branch on `alignment >= 32` must either short-circuit on an empty @c MatrixDesc
  * (@c rows*cols == 0) or treat the null case as scalar-path, never as aligned.
  */
 inline std::size_t largestPow2Alignment(std::uintptr_t addr) noexcept {
@@ -64,7 +64,7 @@ inline std::size_t largestPow2Alignment(std::uintptr_t addr) noexcept {
  * @tparam L Layout tag of the source array; @c Layout::Contig or @c Layout::MaybeStrided.
  * @param a Source array. Storage (Owned/Borrowed), mutability, and contiguity are preserved in
  *          the descriptor's fields; the source must outlive the returned @c MatrixDescC.
- * @return @c MatrixDescC<T> with @c ptr aliasing @c a.data().
+ * @return `MatrixDescC<T>` with @c ptr aliasing `a.data()`.
  */
 template <class T, Layout L>
 inline MatrixDescC<T> describeMatrix(const NDArray<T, 2, L> &a) noexcept {
@@ -88,7 +88,7 @@ inline MatrixDescC<T> describeMatrix(const NDArray<T, 2, L> &a) noexcept {
  * @tparam T Element type of the source array.
  * @tparam L Layout tag of the source array; @c Layout::Contig or @c Layout::MaybeStrided.
  * @param a Source array. Must be mutable (Owned or a mutable Borrowed view).
- * @return @c MatrixDesc<T> with @c ptr aliasing @c a.data().
+ * @return `MatrixDesc<T>` with @c ptr aliasing `a.data()`.
  */
 template <class T, Layout L> inline MatrixDesc<T> describeMatrixMut(NDArray<T, 2, L> &a) noexcept {
   assert(a.isMutable() && "describeMatrixMut requires a mutable array");

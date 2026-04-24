@@ -170,17 +170,17 @@ inline T sqNormRow(const NDArray<T, 2, LX> &X, std::size_t i) noexcept {
 }
 
 /**
- * @brief Row-wise sum of squares: @c norms(i) = sum_k X(i, k)^2.
+ * @brief Row-wise sum of squares: `norms(i)` = sum_k X(i, k)^2.
  *
- * Inner reduction mirrors @ref sqEuclideanRow: AVX2 when @p LX is @c Layout::Contig and the row
+ * Inner reduction mirrors @c sqEuclideanRow: AVX2 when @p LX is @c Layout::Contig and the row
  * fills at least one lane, scalar otherwise. The outer row loop fans out over @p pool when the
  * workload clears @c shouldParallelize; per-row arithmetic is untouched across the fan-out.
  *
  * @tparam T Element type (@c float or @c double).
- * @tparam LX Layout tag of @p X; CTAD-resolved so strided views (e.g. @c Z.t()) bind without
+ * @tparam LX Layout tag of @p X; CTAD-resolved so strided views (e.g. `Z.t()`) bind without
  *         explicit template arguments.
  * @param X Input matrix (n x d).
- * @param norms Rank-1 output of length n; @c isMutable() must be true.
+ * @param norms Rank-1 output of length n; `isMutable()` must be true.
  * @param pool Parallelism injection for the outer row loop.
  */
 template <class T, Layout LX>
@@ -215,8 +215,8 @@ void rowNormsSq(const NDArray<T, 2, LX> &X, NDArray<T, 1> &norms, Pool pool) {
 /**
  * @brief Large-path pairwise squared Euclidean via the GEMM identity.
  *
- * Computes @c out(i, j) = ||X(i) - Y(j)||^2 by reconstructing
- * @c ||x||^2 + ||y||^2 - 2 x . y^T. The dot-product matrix is evaluated with the public
+ * Computes `out(i, j)` = ||X(i) - Y(j)||^2 by reconstructing
+ * `||x||^2 + ||y||^2 - 2 x . y^T`. The dot-product matrix is evaluated with the public
  * @ref gemm entry at @c alpha = -2 and @c beta = 0; row-norm vectors are produced by
  * @ref rowNormsSq; a final elementwise broadcast adds the norms and clamps to zero.
  *
@@ -225,7 +225,7 @@ void rowNormsSq(const NDArray<T, 2, LX> &X, NDArray<T, 1> &norms, Pool pool) {
  * @tparam LY Layout tag of @p Y; CTAD-resolved.
  * @param X Left operand (n x d).
  * @param Y Right operand (m x d).
- * @param out Output matrix (n x m); @c isMutable() must be true.
+ * @param out Output matrix (n x m); `isMutable()` must be true.
  * @param pool Parallelism injection; forwarded to @c rowNormsSq and @c gemm and used for the
  *        broadcast-and-clamp sweep.
  */
@@ -289,7 +289,7 @@ void pairwiseSqEuclideanGemm(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY>
  * @tparam LY Layout tag of @p Y; CTAD-resolved.
  * @param X Left operand (n x d).
  * @param Y Right operand (m x d).
- * @param out Output matrix (n x m); @c isMutable() must be true.
+ * @param out Output matrix (n x m); `isMutable()` must be true.
  * @param pool Parallelism injection for the outer row loop.
  */
 template <class T, Layout LX, Layout LY>
@@ -332,18 +332,18 @@ void pairwiseSqEuclideanSimd(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY>
 /**
  * @brief Pairwise squared Euclidean distances between rows of two matrices.
  *
- * Writes @c out(i, j) = sum_k (X(i, k) - Y(j, k))^2 for every row pair. @p out must be
+ * Writes `out(i, j)` = sum_k (X(i, k) - Y(j, k))^2 for every row pair. @p out must be
  * mutable-owned and contiguous; shape mismatches trigger a release-active assert. Internally
  * dispatches between a SIMD-per-pair kernel (small workloads) and a GEMM-identity kernel
  * (large workloads) against @c defaults::pairwiseGemmThreshold on @c n*m*d.
  *
  * @tparam T Element type (@c float or @c double).
- * @tparam LX Layout tag of @p X; CTAD-resolved so strided views (e.g. @c Z.t()) bind without
+ * @tparam LX Layout tag of @p X; CTAD-resolved so strided views (e.g. `Z.t()`) bind without
  *         explicit template arguments.
  * @tparam LY Layout tag of @p Y.
  * @param X Left operand (n x d).
  * @param Y Right operand (m x d).
- * @param out Output matrix (n x m). @c isMutable() must be true.
+ * @param out Output matrix (n x m). `isMutable()` must be true.
  * @param pool Parallelism injection; forwarded to the selected kernel.
  */
 template <class T, Layout LX = Layout::Contig, Layout LY = Layout::Contig>
@@ -386,7 +386,7 @@ namespace detail {
  * @tparam LY Layout tag of @p Y; CTAD-resolved.
  * @param X Left operand (n x d).
  * @param Y Right operand (m x d).
- * @param out Output matrix (n x m); @c isMutable() must be true.
+ * @param out Output matrix (n x m); `isMutable()` must be true.
  * @param pool Parallelism injection; forwarded to the selected kernel.
  * @return Which inner kernel executed.
  */
@@ -424,7 +424,7 @@ PairwisePath pairwiseSqEuclideanWithDispatchInfo(const NDArray<T, 2, LX> &X,
  *   - @c CLUSTERING_USE_AVX2 is defined and @c T is @c float.
  *   - @p X and @p Y are @c Layout::Contig.
  *   - @p X and @p Y are runtime 32-byte aligned (the AVX2 microkernel issues aligned loads).
- *   - @p d is non-zero, at most @ref detail::kThresholdMaxD, and at least @c 8 (one AVX2
+ *   - @p d is non-zero, at most @c detail::kThresholdMaxD, and at least @c 8 (one AVX2
  *     lane's worth of features, below which the blocked packer is net-negative).
  *   - @p n and @p m are non-zero.
  */
@@ -462,8 +462,8 @@ bool canUseFusedThreshold(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y
  *        distance via @ref sqEuclideanRow and walk survivors.
  *
  * Used when the fused-path eligibility check rejects (strided view, wrong type, tiny d,
- * AVX2 off). Iterates in global @c (row, col) ascending order so @p emit fires row-major --
- * a tighter guarantee than the fused path gives. No intermediate @c (n x m) tile is
+ * AVX2 off). Iterates in global `(row, col)` ascending order so @p emit fires row-major --
+ * a tighter guarantee than the fused path gives. No intermediate `(n x m)` tile is
  * materialized: callers with small @p n (e.g. single-seed range queries) avoid per-call heap
  * traffic that a materialized-then-mask path would incur.
  */
@@ -508,7 +508,7 @@ void pairwiseSqEuclideanThresholdedMaterialized(const NDArray<T, 2, LX> &X,
  * @brief Emit every row pair (i, j) whose squared Euclidean distance is at most @p radiusSq.
  *
  * Dispatches between a fused AVX2 tile kernel that streams survivors directly out of the
- * microkernel epilogue (no materialized @c (n x m) tile) and a materialized fallback
+ * microkernel epilogue (no materialized `(n x m)` tile) and a materialized fallback
  * (@ref pairwiseSqEuclidean plus a scalar survivor scan). The fused path fires @p emit in
  * row-major order within each tile; the materialized path fires globally row-major. Both
  * paths invoke @p emit exactly once per surviving cell.
@@ -522,7 +522,7 @@ void pairwiseSqEuclideanThresholdedMaterialized(const NDArray<T, 2, LX> &X,
  * @param radiusSq Non-negative squared radius; interpreted as @c r*r so callers already
  *                 squaring the radius avoid a redundant multiplication.
  * @param pool     Parallelism injection forwarded to the selected path.
- * @param emit     Callback invoked for each surviving @c (row, col) pair; row indexes into
+ * @param emit     Callback invoked for each surviving `(row, col)` pair; row indexes into
  *                 @p X, col indexes into @p Y. The caller owns thread-safety of @p emit if
  *                 @p pool is non-serial.
  */
@@ -557,16 +557,16 @@ void pairwiseSqEuclideanThresholded(const NDArray<T, 2, LX> &X, const NDArray<T,
 }
 
 /**
- * @brief Symmetric variant of @ref pairwiseSqEuclideanThresholded for the @c X == Y case.
+ * @brief Symmetric variant of @ref pairwiseSqEuclideanThresholded for the `X == Y` case.
  *
- * Adjacency over a single point cloud is symmetric: @c ||x_i - x_j||^2 = @c ||x_j - x_i||^2,
- * so half the @c (i, j) pairs the general entry would compute are mirrors of the other half.
+ * Adjacency over a single point cloud is symmetric: `||x_i - x_j||^2` = `||x_j - x_i||^2`,
+ * so half the `(i, j)` pairs the general entry would compute are mirrors of the other half.
  * This entry skips the lower-triangular work entirely and invokes @p emit exactly once per
- * surviving upper-triangular cell, with @c row <= col always. The caller is responsible for
- * any mirror push (typically @c adj[row].push(col) plus @c adj[col].push(row) when
- * @c row != col), which keeps the kernel agnostic to the consumer's adjacency layout.
+ * surviving upper-triangular cell, with `row <= col` always. The caller is responsible for
+ * any mirror push (typically `adj[row]`.push(col) plus `adj[col]`.push(row) when
+ * `row != col`), which keeps the kernel agnostic to the consumer's adjacency layout.
  *
- * Falls back to a scalar materialised path that walks only @c j >= i when the AVX2 fast path
+ * Falls back to a scalar materialised path that walks only `j >= i` when the AVX2 fast path
  * is ineligible (wrong type, strided view, tiny @c d, AVX2 off).
  *
  * @tparam T    Element type (@c float or @c double).
@@ -575,8 +575,8 @@ void pairwiseSqEuclideanThresholded(const NDArray<T, 2, LX> &X, const NDArray<T,
  * @param X        Point matrix (n x d).
  * @param radiusSq Non-negative squared radius; interpreted as @c r*r.
  * @param pool     Parallelism injection forwarded to the selected path.
- * @param emit     Callback invoked once per upper-triangular surviving @c (row, col) with
- *                 @c row <= col; the caller mirrors as needed.
+ * @param emit     Callback invoked once per upper-triangular surviving `(row, col)` with
+ *                 `row <= col`; the caller mirrors as needed.
  */
 template <class T, Layout LX = Layout::Contig, class Emit>
   requires std::invocable<Emit &, std::size_t, std::size_t>

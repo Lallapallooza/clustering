@@ -14,17 +14,17 @@ namespace clustering::math::detail {
 
 /**
  * @brief AVX2 f32 8x6 microkernel; produces the same column-major @c Mr x @c Nr output tile as
- *        @c gemmKernelMrNrScalar<float, Beta>.
+ *        `gemmKernelMrNrScalar<float, Beta>`.
  *
  * Six @c __m256 accumulators (one per output column) each carry all eight row-elements of that
  * column in a single YMM register. The K-step issues one aligned 32-byte load from the packed A
  * panel, six scalar broadcasts from the packed B panel, and six FMAs that accumulate
- * @c a * broadcast(b_c) into @c acc[c]. The column-major tile lets the epilogue flush each
+ * @c a * broadcast(b_c) into `acc[c]`. The column-major tile lets the epilogue flush each
  * accumulator with a single aligned @c _mm256_store_ps at @c tile + c*Mr.
  *
- * Buffer layouts are identical to @c gemmKernelMrNrScalar<float, Beta>; see that declaration
+ * Buffer layouts are identical to `gemmKernelMrNrScalar<float, Beta>`; see that declaration
  * for the @c ap / @c bp / @c tile contracts and the tail-protocol invariant. The AVX2 kernel
- * requires @p ap, @p bp, and @p tile to be 32-byte aligned (arena + @c alignas(32) scratch).
+ * requires @p ap, @p bp, and @p tile to be 32-byte aligned (arena + `alignas(32)` scratch).
  *
  * @tparam Beta Compile-time BetaKind selecting the epilogue. @c kZero writes the tile from the
  *              alpha-scaled product only (never reads @p tile); @c kGeneral reads @p tile, scales

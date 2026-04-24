@@ -4,20 +4,24 @@
 [![Release](https://img.shields.io/github/v/release/Lallapallooza/clustering)](https://github.com/Lallapallooza/clustering/releases/latest)
 
 Header-only C++20 clustering library with KD-Tree acceleration, AVX2
-hot paths, and a thread pool for parallel workloads. Ships DBSCAN and
-k-means with a nanobind Python binding.
+hot paths, and a thread pool for parallel workloads. Ships DBSCAN,
+HDBSCAN*, and k-means with a nanobind Python binding.
+
+API docs: [Lallapallooza.github.io/clustering](https://Lallapallooza.github.io/clustering/).
 
 ## Features
 - Header-only C++20, no runtime deps.
 - Any point dimension; AVX2 fast path at >= 8 dims.
 - **DBSCAN** -- KD-Tree-accelerated region queries, parallel via thread pool.
+- **HDBSCAN\*** -- Campello 2015 hierarchy with Prim / Boruvka / NN-Descent MST backends, EOM + leaf extraction, GLOSH outlier scores.
 - **k-means** -- fused argmin-GEMM Lloyd with greedy k-means++ and AFK-MC2 seeders, direct small-d kernel, chunked materialized fallback.
 - Python binding via nanobind (zero-copy output).
 
 ## Installation
 **C++ 20 compiler is required.**
 
-(Recommended) Add to your CMake:
+### C++ via CPM (recommended)
+
 ```cmake
 CPMAddPackage(
     NAME clustering
@@ -28,18 +32,32 @@ CPMAddPackage(
 target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
 ```
 
-Or clone the repository and include it in your project:
+### C++ via add_subdirectory
 
 ```bash
 git clone git@github.com:Lallapallooza/clustering.git
 ```
 
-Then in your CMake:
-
 ```cmake
 add_subdirectory(clustering)
 target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
 ```
+
+### Python via `uv` from GitHub
+
+Install a specific tag:
+
+```bash
+uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git@v0.8.0"
+```
+
+Or the latest `main`:
+
+```bash
+uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git"
+```
+
+The build uses scikit-build-core + nanobind and needs a C++20 toolchain plus CMake >= 3.22 and Ninja.
 
 ## Examples
 

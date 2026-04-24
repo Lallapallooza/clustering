@@ -15,15 +15,15 @@ namespace clustering::index::nn_descent::detail {
  * @brief Flat SoA bank of per-node bounded max-heaps collecting each node's current k-nearest
  *        neighbors.
  *
- * The bank owns a flat @c n * k storage for neighbor @c (sqDist, idx) pairs plus a parallel
+ * The bank owns a flat @c n * k storage for neighbor `(sqDist, idx)` pairs plus a parallel
  * @c n * k "new" flag array. Each @c k -slot chunk is maintained as a bounded max-heap under the
  * same total order as @ref math::detail::BoundedMaxHeap (smaller @c sqDist first; tie-break on
  * smaller @c idx). The flat layout keeps every per-node heap contiguous so the NN-Descent join
  * step walks neighbor lists through a pointer increment with no indirection.
  *
  * @par Tie-break
- * Identical to the shared @c BoundedMaxHeap: @c (a_key, a_val) < @c (b_key, b_val) when
- * @c a_key < b_key, or @c a_key == b_key and @c a_val < b_val. Load-bearing for kNN
+ * Identical to the shared @c BoundedMaxHeap: `(a_key, a_val)` < `(b_key, b_val)` when
+ * @c a_key < b_key, or `a_key == b_key` and @c a_val < b_val. Load-bearing for kNN
  * reproducibility: identical distances resolve deterministically on smaller neighbor index.
  *
  * @par New-flag tracking
@@ -155,11 +155,11 @@ public:
    * @brief Reload a node's heap from an externally-supplied neighbor list.
    *
    * Used by warm start: after @ref toSortedLists destroys heap order, the caller reloads the
-   * bank from the sorted view. Each supplied @c (dist, idx) pair is placed into the storage
+   * bank from the sorted view. Each supplied `(dist, idx)` pair is placed into the storage
    * then sifted up to rebuild the heap invariant. All loaded entries are flagged "new."
    *
    * @param i       Target node.
-   * @param entries Pairs of @c (sqDist, neighbor index); size must not exceed @c k.
+   * @param entries Pairs of `(sqDist, neighbor index)`; size must not exceed @c k.
    */
   void loadFromSorted(std::int32_t i, const std::vector<std::pair<T, std::int32_t>> &entries) {
     const std::size_t base = static_cast<std::size_t>(i) * m_k;
@@ -193,7 +193,7 @@ public:
    * @brief Extract each node's neighbors sorted ascending by squared distance.
    *
    * Performs a heap-sort in place via repeated root-pop then reverses each segment; the heap is
-   * destroyed by this call. Intended for the @c neighbors() public view consumed after build.
+   * destroyed by this call. Intended for the `neighbors()` public view consumed after build.
    *
    * @return Length-@p n vector of per-node sorted neighbor lists.
    */

@@ -24,7 +24,7 @@ namespace clustering::math::distance::detail {
  * @param a First vector (32-byte aligned, @p n elements).
  * @param b Second vector (32-byte aligned, @p n elements).
  * @param n Number of elements in @p a and @p b.
- * @return @c sum_{i=0..n-1} (a[i] - b[i])^2 as @c float.
+ * @return `sum_{i=0..n-1}` (a[i] - b[i])^2 as @c float.
  */
 inline float sqEuclideanAvx2F32(const float *__restrict__ a, const float *__restrict__ b,
                                 std::size_t n) noexcept {

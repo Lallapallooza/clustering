@@ -17,27 +17,28 @@ namespace clustering::hdbscan {
  * @brief MST backend that dispatches between Prim, Boruvka, and NN-Descent on input shape.
  *
  * The dispatcher holds a @c std::variant over the three concrete backends and re-emplaces the
- * active arm whenever the @c (n, d) shape of the input changes between @c run calls. Each arm
+ * active arm whenever the `(n, d)` shape of the input changes between @c run calls. Each arm
  * runs its own @c run on the held point cloud; the condensed-tree pipeline downstream is
  * monomorphic and reads from @ref MstOutput.
  *
- * Selection rules, total over the full @c (N, d) domain:
- *   - @c d <= @ref boruvkaLowDimCeil -> @ref BoruvkaMstBackend (KDTree pruning dominates at
- *     every @c n; dense Prim's quadratic overhead does not amortise).
- *   - @c d > @ref boruvkaLowDimCeil and @c N*N*sizeof(T) <= @ref kPrimMrdMatrixByteBudget ->
+ * Selection rules, total over the full `(N, d)` domain:
+ *   - @c d <= @ref AutoMstBackend::boruvkaLowDimCeil -> @ref BoruvkaMstBackend (KDTree pruning
+ * dominates at every @c n; dense Prim's quadratic overhead does not amortise).
+ *   - @c d > @ref AutoMstBackend::boruvkaLowDimCeil and @c N*N*sizeof(T) <= @ref
+ * kPrimMrdMatrixByteBudget ->
  *     @ref PrimMstBackend (streaming dense Prim beats KDTree fan-out once AABB pruning decays
  *     with @c d).
- *   - @c d <= @ref boruvkaDimCeil and Prim is out of budget -> @ref BoruvkaMstBackend
- *     (KDTree-accelerated, exact; AABB pruning still fires enough at moderate @c d).
- *   - @c d > @ref boruvkaDimCeil and Prim is out of budget -> @ref NnDescentMstBackend
- *     (approximate kNN-graph + Kruskal with a connectivity fallback).
+ *   - @c d <= @ref AutoMstBackend::boruvkaDimCeil and Prim is out of budget -> @ref
+ * BoruvkaMstBackend (KDTree-accelerated, exact; AABB pruning still fires enough at moderate @c d).
+ *   - @c d > @ref AutoMstBackend::boruvkaDimCeil and Prim is out of budget -> @ref
+ * NnDescentMstBackend (approximate kNN-graph + Kruskal with a connectivity fallback).
  *
  * The dimensional ceiling is overridable via @c CLUSTERING_HDBSCAN_BORUVKA_DIM_CEIL. The low-d
  * ceiling is overridable via @c CLUSTERING_HDBSCAN_BORUVKA_LOW_DIM_CEIL. The Prim regime is
  * gated directly by the byte budget so no override choice can push Prim above the documented
  * memory ceiling.
  *
- * Staleness uses an @c (n, d) shape tuple only, mirroring @c AutoSeeder. The dispatcher does
+ * Staleness uses an `(n, d)` shape tuple only, mirroring @c AutoSeeder. The dispatcher does
  * not cache data-dependent state across calls: every @c run rebuilds the held backend's
  * data-dependent index (KDTree, kNN graph), and the variant arm itself is reconstructed when a
  * shape change crosses a dispatch boundary.
@@ -61,6 +62,7 @@ public:
    */
   static constexpr std::size_t boruvkaLowDimCeil = CLUSTERING_HDBSCAN_BORUVKA_LOW_DIM_CEIL;
 #else
+  /// Low-dimensional ceiling at or below which Boruvka is preferred regardless of @c N.
   static constexpr std::size_t boruvkaLowDimCeil = 16;
 #endif
 
@@ -73,6 +75,8 @@ public:
    */
   static constexpr std::size_t boruvkaDimCeil = CLUSTERING_HDBSCAN_BORUVKA_DIM_CEIL;
 #else
+  /// Dimensional ceiling above which KDTree Boruvka gives way to NN-Descent when Prim is out
+  /// of byte budget.
   static constexpr std::size_t boruvkaDimCeil = 60;
 #endif
 
@@ -84,7 +88,7 @@ public:
    * @brief Whether the Prim regime applies at @p n under the dense-MRD byte budget.
    *
    * Prim materialises an @c n*n matrix of @c T, so the admissible set is @c n*n*sizeof(T) <=
-   * @ref kPrimMrdMatrixByteBudget. Exposed as a static helper so callers and tests share the
+   * @c kPrimMrdMatrixByteBudget. Exposed as a static helper so callers and tests share the
    * exact boundary the dispatcher uses.
    */
   static constexpr bool primFitsBudget(std::size_t n) noexcept {
@@ -142,7 +146,7 @@ private:
         m_held.template emplace<BoruvkaMstBackend<T>>();
       }
     } else if (d <= boruvkaDimCeil && primFitsBudget(n)) {
-      // Streaming Prim beats both Boruvka and NN-Descent in the @c d <= 60 band while @c n
+      // Streaming Prim beats both Boruvka and NN-Descent in the `d <= 60` band while @c n
       // stays inside its quadratic compute budget. Above @c boruvkaDimCeil the dense pairwise
       // work is dominated by the @c d-wide distance compute and NN-Descent wins; the cap keeps
       // Prim out of that regime.

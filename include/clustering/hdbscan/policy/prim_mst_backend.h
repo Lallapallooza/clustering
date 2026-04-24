@@ -21,25 +21,25 @@ namespace clustering::hdbscan {
  * @brief Compute budget that gates the streaming Prim backend, expressed as the maximum point
  *        count it will accept.
  *
- * The streaming Prim variant materialises only @c O(n) state (no @c n*n MRD matrix), but the
+ * The streaming Prim variant materialises only `O(n)` state (no @c n*n MRD matrix), but the
  * inner relax recomputes @c d-wide squared-Euclidean distances per popped vertex, costing
- * @c O(n^2 * d) total scalar work. Beyond this @c n the dispatcher should prefer NN-Descent
- * (high @c d) or Boruvka (low @c d), both of which scale better than @c O(n^2).
+ * `O(n^2 * d)` total scalar work. Beyond this @c n the dispatcher should prefer NN-Descent
+ * (high @c d) or Boruvka (low @c d), both of which scale better than `O(n^2)`.
  */
 inline constexpr std::size_t kPrimMaxN = std::size_t{16384};
 
 /// Equivalent byte-budget phrasing of @ref kPrimMaxN, kept so callers that gate on
 /// @c n*n*sizeof(T) <= kPrimMrdMatrixByteBudget compile unchanged. Numerically equal to
-/// @ref kPrimMaxN squared, scaled by @c sizeof(float).
+/// @ref kPrimMaxN squared, scaled by `sizeof(float)`.
 inline constexpr std::size_t kPrimMrdMatrixByteBudget = kPrimMaxN * kPrimMaxN * sizeof(float);
 
 /**
  * @brief Thresholds gating the dense symmetric core-distance pass.
  *
  * The dense pass computes all @c n*(n-1)/2 squared distances once and feeds both endpoints into
- * a per-row top-@c minSamples tracker. Its total work is @c O(n^2 * d) distance compute plus
- * @c O(n^2 * minSamples) top-@c k bookkeeping. It beats the @ref KDTree kNN fallback once
- * @c minSamples is small enough for the top-@c k write amp to stay bounded and @c (n, d) is
+ * a per-row top-@c minSamples tracker. Its total work is `O(n^2 * d)` distance compute plus
+ * `O(n^2 * minSamples)` top-@c k bookkeeping. It beats the @ref KDTree kNN fallback once
+ * @c minSamples is small enough for the top-@c k write amp to stay bounded and `(n, d)` is
  * large enough to amortise the symmetric scan's fixed cost. Below these bounds the KDTree path
  * wins; above @c kPrimDenseCoreMaxMinSamples the top-@c k rescan per update dominates.
  */
@@ -63,12 +63,12 @@ inline constexpr std::size_t kPrimDenseCoreMaxMinSamples = 64;
  *      second full scan over @c edgeWeight.
  *
  * @par Memory
- * Working state is @c O(n) plus @c O(n * minSamples) while dense core distances are computed.
+ * Working state is `O(n)` plus `O(n * minSamples)` while dense core distances are computed.
  * No @c n*n distance matrix is materialised.
  *
  * @par Cache
  * Each Prim iteration streams @c X sequentially in @c d-wide rows. Total bytes touched per
- * iteration is @c n * d * sizeof(T), which fits in @c L2 for the dispatcher's @c (n, d) window.
+ * iteration is @c n * d * sizeof(T), which fits in @c L2 for the dispatcher's `(n, d)` window.
  *
  * The backend satisfies @ref MstBackendStrategy and carries no persistent state.
  *
@@ -84,11 +84,11 @@ public:
   /**
    * @brief Build the MRD-weighted minimum spanning tree of @p X.
    *
-   * @pre @p minSamples is positive and strictly less than @c X.dim(0).
-   * @pre @c X.dim(0) does not exceed @ref kPrimMaxN. A violation fires
+   * @pre @p minSamples is positive and strictly less than `X.dim(0)`.
+   * @pre `X.dim(0)` does not exceed @c kPrimMaxN. A violation fires
    *      @c CLUSTERING_ALWAYS_ASSERT before any allocation.
    *
-   * @param X          Contiguous @c (n x d) dataset; caller retains ownership.
+   * @param X          Contiguous `(n x d)` dataset; caller retains ownership.
    * @param minSamples Neighbour count driving the core-distance definition.
    * @param pool       Worker pool; forwarded to the KDTree build and kNN query.
    * @param out        Destination; @c edges filled with @c n - 1 entries in insertion order and
@@ -100,8 +100,8 @@ public:
     CLUSTERING_ALWAYS_ASSERT(minSamples >= 1);
     CLUSTERING_ALWAYS_ASSERT(minSamples < n);
 
-    // Refuse @c n that would push the @c O(n^2 * d) inner work past the dispatcher's intended
-    // Prim window. Phrased as @c n <= kNsqBudget / n rather than @c n*n <= kNsqBudget to avoid
+    // Refuse @c n that would push the `O(n^2 * d)` inner work past the dispatcher's intended
+    // Prim window. Phrased as `n <= kNsqBudget` / n rather than @c n*n <= kNsqBudget to avoid
     // the intermediate overflowing @c std::size_t at large @c n. Fires before any allocation so
     // out-of-budget callers surface deterministically.
     constexpr std::size_t kNsqBudget = kPrimMrdMatrixByteBudget / sizeof(T);
@@ -143,11 +143,11 @@ public:
       }
     }
 
-    // Phase 2: streaming Prim. Maintain @c edgeWeight[v] = best-known incident MRD weight to
-    // the growing tree, @c parent[v] = the in-tree vertex realising that weight, and a visited
+    // Phase 2: streaming Prim. Maintain `edgeWeight[v]` = best-known incident MRD weight to
+    // the growing tree, `parent[v]` = the in-tree vertex realising that weight, and a visited
     // bitmap. Each iteration picks the smallest-weight unvisited @c target via a linear scan,
-    // emits the edge @c (parent[target], target, edgeWeight[target]), then relaxes every other
-    // unvisited @c v by recomputing @c sqDist(target, v) and lifting to MRD.
+    // emits the edge `(parent[target], target, edgeWeight[target])`, then relaxes every other
+    // unvisited @c v by recomputing `sqDist(target, v)` and lifting to MRD.
     std::vector<std::uint8_t> visited(n, std::uint8_t{0});
     std::vector<std::int32_t> parent(n, std::int32_t{0});
     std::vector<T> edgeWeight(n, std::numeric_limits<T>::max());
@@ -233,7 +233,7 @@ public:
       const auto tIdx = static_cast<std::size_t>(target);
       const T coreT = coreDistData[tIdx];
       const T *rowT = xData + (tIdx * d);
-      // Per-iter parallel dispatch: the gate uses the per-worker op budget @c (n*d / nWorkers)
+      // Per-iter parallel dispatch: the gate uses the per-worker op budget `(n*d / nWorkers)`
       // so very small @c n stays serial and avoids submit_blocks overhead.
       if (pool.pool != nullptr && pool.shouldParallelizeWork(n * d)) {
         pool.pool
@@ -304,11 +304,11 @@ private:
     worstSlot[row] = worst;
   }
 
-  /// Dense symmetric core-distance pass. Each unordered pair @c (i, j) is visited once via the
+  /// Dense symmetric core-distance pass. Each unordered pair `(i, j)` is visited once via the
   /// upper triangle @c j = i+1..n-1; the resulting squared distance updates both row @c i and
   /// row @c j so each pair contributes to both endpoints without a second compute pass. Squared
   /// distance is derived from precomputed row norms and a single dot product via the identity
-  /// @c ||a-b||^2 = ||a||^2 + ||b||^2 - 2<a,b>, which lets the inner kernel be a fused-multiply-
+  /// `||a-b||^2` = ||a||^2 + ||b||^2 - 2<a,b>, which lets the inner kernel be a fused-multiply-
   /// add dot instead of a compensated subtract-and-square.
   static void computeDenseCoreDistances(const NDArray<T, 2> &X, const std::vector<T> &rowNorms,
                                         std::size_t minSamples, bool rowsAligned32,

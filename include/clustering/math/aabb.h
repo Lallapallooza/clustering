@@ -20,13 +20,13 @@ namespace clustering::math {
  * key in single-tree KDTree traversals.
  *
  * When @c CLUSTERING_USE_AVX2 is defined dispatches to the AVX2 kernel which processes @c d in
- * @c ceil(d/8) ymm-wide tiles plus a scalar tail. The vector path is branch-free per dimension;
+ * `ceil(d/8)` ymm-wide tiles plus a scalar tail. The vector path is branch-free per dimension;
  * the tail loop matches the scalar reference exactly so dimensions entirely below 8 (e.g. @c d=2
  * or @c d=4) get the same answer as the scalar fallback.
  *
- * Numerically equivalent to the scalar reference within @c (ceil(d/8)+1)*ULP-2 on finite inputs:
+ * Numerically equivalent to the scalar reference within `(ceil(d/8)+1)`*ULP-2 on finite inputs:
  * one ULP-2 budget per accumulated 8-wide partial plus one for the horizontal reduction. Strict
- * ULP-2 holds at @c d<=8 (single tile, two roundings).
+ * ULP-2 holds at `d<=8` (single tile, two roundings).
  *
  * @warning Bit-equivalence with the scalar reference is not guaranteed: the AVX2 horizontal
  *          reduction differs from a scalar left-fold under FMA. NaN inputs also diverge: the
@@ -37,8 +37,8 @@ namespace clustering::math {
  *
  * @param point  Length-@c d query coordinates.
  * @param boxMin AABB minimum coordinates; length defines @c d.
- * @param boxMax AABB maximum coordinates; length must equal @c boxMin.size().
- * @return @c sum_{j=0..d-1} max(0, max(boxMin[j]-point[j], point[j]-boxMax[j]))^2.
+ * @param boxMax AABB maximum coordinates; length must equal `boxMin.size()`.
+ * @return `sum_{j=0..d-1}` max(0, max(boxMin[j]-point[j], point[j]-boxMax[j]))^2.
  */
 template <class T>
 [[nodiscard]] inline T pointAabbGapSq(const T *point, std::span<const T> boxMin,

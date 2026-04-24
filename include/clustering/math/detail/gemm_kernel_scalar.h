@@ -30,23 +30,23 @@ template <> inline constexpr std::size_t kKernelMr<double> = 4;
 template <> inline constexpr std::size_t kKernelNr<double> = 6;
 
 /**
- * @brief Scalar reference microkernel: writes a @c kKernelMr<T> x @c kKernelNr<T> output tile.
+ * @brief Scalar reference microkernel: writes a `kKernelMr<T>` x `kKernelNr<T>` output tile.
  *
  * Buffer layouts (shared with the AVX2 kernel variants that consume the same packed panels):
- *   - @p ap holds a @c kc x @c Mr panel of A, with element @c (r, k) at @c ap[k*Mr + r].
- *   - @p bp holds a @c kc x @c Nr panel of B, with element @c (k, c) at @c bp[k*Nr + c].
- *   - @p tile is a column-major @c Mr x @c Nr scratch buffer; element @c (r, c) lands at
- *     @c tile[c*Mr+r]. Column-major tile lets the AVX2 kernel epilogue @c _mm256_store_ps
+ *   - @p ap holds a @c kc x @c Mr panel of A, with element `(r, k)` at `ap[k*Mr + r]`.
+ *   - @p bp holds a @c kc x @c Nr panel of B, with element `(k, c)` at `bp[k*Nr + c]`.
+ *   - @p tile is a column-major @c Mr x @c Nr scratch buffer; element `(r, c)` lands at
+ *     `tile[c*Mr+r]`. Column-major tile lets the AVX2 kernel epilogue @c _mm256_store_ps
  *     each 8-row column as one contiguous 32-byte store; scalar and AVX2 kernels share this
  *     layout so the outer loop's pre-load and writeback indexing is uniform across ISAs.
  *     The outer loop owns @p tile (32-byte aligned, on its stack) and is responsible for
  *     pre-loading it with @c beta-scaled @c C contributions when @c Beta == @c kGeneral.
- *     Cells outside the valid @c (mcTail x ncTail) sub-rectangle must be pre-zeroed by the
+ *     Cells outside the valid `(mcTail x ncTail)` sub-rectangle must be pre-zeroed by the
  *     outer loop so the kernel's writes to padded cells are harmless.
  *
  * Epilogue:
- *   - @c kZero:    @c tile[c*Mr+r] = alpha * acc[r][c] (kernel never reads @p tile).
- *   - @c kGeneral: @c tile[c*Mr+r] = alpha * acc[r][c] + beta * tile[c*Mr+r].
+ *   - @c kZero:    `tile[c*Mr+r]` = alpha * acc[r][c] (kernel never reads @p tile).
+ *   - @c kGeneral: `tile[c*Mr+r]` = alpha * acc[r][c] + beta * tile[c*Mr+r].
  *
  * @tparam T    Element type; @c float or @c double.
  * @tparam Beta Compile-time BetaKind selecting the epilogue.

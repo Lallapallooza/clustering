@@ -42,7 +42,7 @@ enum class ClusterSelectionMethod : std::uint8_t {
 /**
  * @brief Semantics of the @c minSamples parameter at core-distance extraction.
  *
- * Campello 2015 defines @c core_k(p) as the distance from @c p to its @c k-th nearest neighbour
+ * Campello 2015 defines `core_k(p)` as the distance from @c p to its @c k-th nearest neighbour
  * excluding @c p itself. scikit-learn and the original @c hdbscan package count @c p itself as
  * one of the @c k neighbours, so for a given @c min_samples = k those implementations return
  * what Campello would call @c core_{k-1}. Both conventions are widely deployed and produce
@@ -77,7 +77,7 @@ namespace clustering {
  *       of every @ref run call. Data-dependent indices (KDTree, kNN graph) are rebuilt on every
  *       fit so in-place buffer mutations through a borrowed view can never produce a silent
  *       cache miss. Shape-indexed scratch (heaps, reusable buffers) may be amortized at fixed
- *       @c (n, d, minSamples); a shape change rebuilds. @ref reset returns the instance to
+ *       `(n, d, minSamples)`; a shape change rebuilds. @ref reset returns the instance to
  *       fresh-constructed state.
  *
  * @note On a freshly-constructed or just- @ref reset instance, all result accessors return empty
@@ -87,10 +87,10 @@ namespace clustering {
  * @note Labels and outlier scores follow the Campello 2015 formula over Euclidean
  *       mutual-reachability distances, matching the reference implementation.
  *
- * @note The @c minSamples argument is interpreted per @ref hdbscan::MinSamplesConvention. The
- *       default (@c kSklearn) treats the query point itself as one of the @c minSamples
- *       neighbours; pass @c kCampello to count non-self neighbours only. The two conventions
- *       differ by one neighbour and produce different MSTs on high-dimensional inputs.
+ * @note The @c minSamples argument is interpreted per @c clustering::hdbscan::MinSamplesConvention.
+ * The default (@c kSklearn) treats the query point itself as one of the @c minSamples neighbours;
+ * pass @c kCampello to count non-self neighbours only. The two conventions differ by one neighbour
+ * and produce different MSTs on high-dimensional inputs.
  *
  * @par Thread safety
  * A single @c HDBSCAN instance is not safe to drive concurrently; @ref run mutates internal
@@ -119,12 +119,18 @@ public:
    * auxiliary structures.
    */
   struct CondensedTreeView {
+    /// Parent cluster id for each row of the condensed tree.
     std::span<const std::int32_t> parent;
+    /// Child cluster or leaf point id for each row.
     std::span<const std::int32_t> child;
+    /// Lambda value (= 1 / distance) at which @c child detaches from @c parent.
     std::span<const T> lambda;
+    /// Size of the @c child subtree at its birth lambda.
     std::span<const std::int32_t> childSize;
 
+    /// True when the view holds no rows (no fit or @c reset called).
     [[nodiscard]] bool empty() const noexcept { return parent.empty(); }
+    /// Number of rows in the condensed tree.
     [[nodiscard]] std::size_t size() const noexcept { return parent.size(); }
   };
 
@@ -141,7 +147,7 @@ public:
    * @param nJobs          Worker count for the internal thread pool. A value of @c 0 is clamped
    *                       upward to @c std::thread::hardware_concurrency().
    * @param convention     Interpretation of @p minSamples at core-distance extraction. See
-   *                       @ref hdbscan::MinSamplesConvention.
+   *                       @c clustering::hdbscan::MinSamplesConvention.
    */
   explicit HDBSCAN(
       std::size_t minClusterSize, std::size_t minSamples = 0,
@@ -212,7 +218,7 @@ public:
 
     // Convert squared distances to linear distances before the post-MST pipeline consumes them.
     // The backends store squared Euclidean internally (avoids an @c sqrt per pair-distance); the
-    // MST structure is invariant under @c d -> @c sqrt(d) (monotone) but the condensed-tree
+    // MST structure is invariant under @c d -> `sqrt(d)` (monotone) but the condensed-tree
     // stability DP compares absolute lambda values whose outcome is not invariant under that
     // transform. Linearising here aligns the lambda scale with the reference implementation and
     // with outlier-score bounds users expect.
@@ -268,11 +274,11 @@ public:
     m_ctChildSize = std::move(condensed.childSize);
   }
 
-  /// Length-n assignment; @c -1 marks noise. Empty on a freshly-constructed or just- @ref reset
+  /// Length-n assignment; `-1` marks noise. Empty on a freshly-constructed or just- @ref reset
   /// instance.
   [[nodiscard]] const NDArray<std::int32_t, 1> &labels() const noexcept { return m_labels; }
 
-  /// Length-n per-point GLOSH outlier scores in @c [0, 1]. Empty on a freshly-constructed or
+  /// Length-n per-point GLOSH outlier scores in `[0, 1]`. Empty on a freshly-constructed or
   /// just- @ref reset instance.
   [[nodiscard]] const NDArray<T, 1> &outlierScores() const noexcept { return m_outlierScores; }
 

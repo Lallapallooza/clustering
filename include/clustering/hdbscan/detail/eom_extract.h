@@ -13,25 +13,25 @@ namespace clustering::hdbscan::detail {
  * @brief Excess-of-mass cluster selection on a condensed tree.
  *
  * Implements the Campello 2015 EOM dynamic program:
- *   1. Compute per-cluster stability @c S(c) = sum over member points of
- *      @c (lambda_drop - lambda_birth), where @c lambda_birth is the lambda at which the cluster
+ *   1. Compute per-cluster stability `S(c)` = sum over member points of
+ *      `(lambda_drop - lambda_birth)`, where @c lambda_birth is the lambda at which the cluster
  *      split off from its parent and @c lambda_drop is the per-point lambda at which the point
  *      fell out (as a leaf-row in the condensed tree).
  *   2. Sweep condensed-cluster ids in reverse (children first, then parents), and for each node
- *      choose between (a) keeping the node as a selected cluster, claiming stability @c S(c), or
+ *      choose between (a) keeping the node as a selected cluster, claiming stability `S(c)`, or
  *      (b) replacing it with the sum of the best selections across its children. The parent
- *      selects @c (b) only when it strictly improves on @c S(c); ties go to the parent (shallower)
+ *      selects `(b)` only when it strictly improves on `S(c)`; ties go to the parent (shallower)
  *      so the realised clusters are as shallow as possible without losing stability.
  *   3. Propagate the selection: any node reached while walking the parent chain of a "chosen"
  *      node is marked as ancestor-of-chosen and is itself never chosen.
  *
  * Emits a dense per-point label array: points reach the chosen ancestor of their containing
- * condensed cluster, or @c -1 if no ancestor was chosen (the root-only case). The label array is
- * remapped to the canonical @c [0, numChosen) order at the end, with the first chosen cluster
+ * condensed cluster, or `-1` if no ancestor was chosen (the root-only case). The label array is
+ * remapped to the canonical `[0, numChosen)` order at the end, with the first chosen cluster
  * visited in condensed-id order becoming label @c 0.
  *
  * @param tree Condensed tree produced by @ref condenseTree.
- * @param n    Number of input points; leaf rows in @p tree have @c child in @c [0, n).
+ * @param n    Number of input points; leaf rows in @p tree have @c child in `[0, n)`.
  * @param out  Destination vector of length @p n; overwritten with the final per-point labels.
  */
 template <class T>

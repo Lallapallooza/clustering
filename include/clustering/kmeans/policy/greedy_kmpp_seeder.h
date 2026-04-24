@@ -159,7 +159,7 @@ inline void sqEuclideanRowToBatchAvx2Fixed(const double *x, const double *candDa
 }
 
 /**
- * @brief Compute @p L squared Euclidean distances against an @c (L, d) row-batched candidate
+ * @brief Compute @p L squared Euclidean distances against an `(L, d)` row-batched candidate
  *        layout in a single streaming pass over the @p x row.
  *
  * Streams the @p x row through L parallel @c fmadd accumulators so each x byte is read from
@@ -204,11 +204,11 @@ inline void sqEuclideanRowToBatchAvx2(const T *x, const T *candData, std::size_t
 }
 
 /**
- * @brief Compute @p L squared distances against an @c (d, 8) transposed candidate layout with
+ * @brief Compute @p L squared distances against an `(d, 8)` transposed candidate layout with
  *        one streaming pass over the @p x row.
  *
- * The (d, 8) layout puts the k-th feature of every candidate at @c cand[k*8 .. k*8 + 8), so a
- * single @c _mm256_load_ps fetches all 8 candidates' k-th component; broadcasting @c x[k] then
+ * The `(d, 8)` layout puts the k-th feature of every candidate at `cand[k*8 .. k*8 + 8)`, so a
+ * single @c _mm256_load_ps fetches all 8 candidates' k-th component; broadcasting `x[k]` then
  * folds 8 squared-distance contributions in one FMA. At @c d < 8 this collapses the per-row
  * scoring from @c L*d scalar ops to @c d SIMD ops.
  */
@@ -225,11 +225,11 @@ inline void sqEuclideanRowAgainst8Transposed(const float *x, const float *candDa
 }
 
 /**
- * @brief Compute two 8-way squared distance slabs against an @c (d, 16) transposed candidate
+ * @brief Compute two 8-way squared distance slabs against an `(d, 16)` transposed candidate
  *        layout in one streaming pass over the @p x row.
  *
- * Unrolls @ref sqEuclideanRowAgainst8Transposed across two adjacent lane groups so each @c x[k]
- * broadcast folds 16 candidate distances per FMA pair. At @c L in @c (8, 16] with @c d <= 8
+ * Unrolls @ref sqEuclideanRowAgainst8Transposed across two adjacent lane groups so each `x[k]`
+ * broadcast folds 16 candidate distances per FMA pair. At `L in (8, 16]` with `d <= 8`
  * this shaves half the broadcast + load traffic versus looping the 8-wide kernel twice.
  */
 inline void sqEuclideanRowAgainst16Transposed(const float *x, const float *candData, std::size_t d,
@@ -250,7 +250,7 @@ inline void sqEuclideanRowAgainst16Transposed(const float *x, const float *candD
 }
 
 /**
- * @brief Compute one 8-way squared distance slab against an @c (d, W) transposed candidate
+ * @brief Compute one 8-way squared distance slab against an `(d, W)` transposed candidate
  *        layout with an explicit row stride @p W.
  *
  * Generalizes @ref sqEuclideanRowAgainst8Transposed to the L > 16 regime where the transposed
@@ -276,7 +276,7 @@ inline void sqEuclideanRowAgainst8TransposedStrided(const float *x, const float 
  * @brief Squared Euclidean distance from one @p x row to a batch of @p L candidate rows.
  *
  * Routes to the AVX2 batched kernel when the build is AVX2-enabled and @p d clears one lane
- * width; otherwise dispatches @p L scalar @ref sqEuclideanRowPtr calls. The batched AVX2 path
+ * width; otherwise dispatches @p L scalar @c sqEuclideanRowPtr calls. The batched AVX2 path
  * streams the @p x row through @p L parallel accumulators so the inner loop reads each x byte
  * once across the whole batch.
  */
@@ -303,14 +303,14 @@ inline void sqEuclideanRowToBatch(const T *x, const T *candData, std::size_t L, 
  *
  * Picks @c k initial centroid rows from the dataset. The first centroid is drawn uniformly;
  * each subsequent centroid is the best of @c L = 2 + floor(ln(k)) candidates sampled with
- * probability proportional to @c D(x)^2 -- the squared distance from each point to its nearest
+ * probability proportional to `D(x)`^2 -- the squared distance from each point to its nearest
  * already-chosen centroid. The candidate that yields the smallest resulting sum of squared
  * minimum distances wins.
  *
  * Scratch is private: the candidate pack, the transposed candidate layout, the per-point
  * per-candidate distance cache, the cumulative-distance array, and the per-point running
  * min-squared-distance all live inside the policy. Repeated @c run calls at a stable
- * @c (n, d, k) shape pay no reallocation.
+ * `(n, d, k)` shape pay no reallocation.
  *
  * @tparam T Element type; @c float or @c double.
  */
@@ -328,8 +328,8 @@ public:
    * @brief Seed @c k centroids from @p X into @p outCentroids.
    *
    * @param X            Data matrix (n x d), contiguous.
-   * @param k            Number of centroids to seed (@c >= 1).
-   * @param seed         RNG seed; identical seed + @c (X, k) produces identical centroids.
+   * @param k            Number of centroids to seed (`>= 1`).
+   * @param seed         RNG seed; identical seed + `(X, k)` produces identical centroids.
    * @param pool         Parallelism injection. Reserved for a future per-chunk fan-out of the
    *                     scoring loop.
    * @param outCentroids Output centroid matrix (k x d), contiguous; populated in row order.
@@ -445,7 +445,7 @@ public:
 #ifdef CLUSTERING_USE_AVX2
       // Low-d hot path: at d <= kAvx2Lanes the (L, d) row-batched kernel either falls into the
       // scalar K-tail (d < 8) or pays @c L horizontal-sum reductions for one K-iter of work
-      // (d == 8). The transposed @c (d, W) layout puts the same-feature components of every
+      // (d == 8). The transposed `(d, W)` layout puts the same-feature components of every
       // candidate in consecutive 8-lane YMM registers, so each broadcast-of-x[k] + FMA pair
       // folds 8 (or 16, for the 16-lane unroll) distances at once.
       if constexpr (std::is_same_v<T, float>) {
@@ -726,7 +726,7 @@ private:
       m_minSq = NDArray<T, 1>({n});
     }
     // GEMM-scoring-only scratch (distsFlat, xNormsSq, candNormsSq, gemmApArena, gemmBpArena).
-    // The GEMM path fires at @c d >= 32 && L >= kKernelNr<float>; outside that envelope we keep
+    // The GEMM path fires at `d >= 32` && L >= kKernelNr<float>; outside that envelope we keep
     // unit-sized placeholders so @c .data() stays dereferenceable without paying the @c kKc*kNc
     // envelope tax (@c Bp alone is several MB).
     constexpr std::size_t kNrForGemm = math::detail::kKernelNr<float>;
@@ -748,7 +748,7 @@ private:
     }
     const std::size_t workersClamped = workers == 0 ? std::size_t{1} : workers;
     // @c gemmRunReference parallelizes the Mc-tile loop, with each worker owning a per-worker
-    // slice of the A-pack arena at offset @c (worker * kMc * kKc). Sizing the arena for just
+    // slice of the A-pack arena at offset `(worker * kMc * kKc)`. Sizing the arena for just
     // one worker was fine while the seeder's envelope kept the GEMM path off (k=16, L=4 fell
     // into the SoA kernel), but the Elkan-eligible shapes push L >= kNrF where the GEMM scoring
     // activates and multiple workers collide into the same slice.
@@ -769,19 +769,19 @@ private:
     }
   }
 
-  /// Packed candidate rows: shape @c (L, d). Reused across all @c k-1 outer picks within one run.
+  /// Packed candidate rows: shape `(L, d)`. Reused across all @c k-1 outer picks within one run.
   NDArray<T, 2, Layout::Contig> m_candRows;
-  /// Transposed candidate rows: shape @c (d, W) where @c W = greedyKmppTransposedWidth(L).
+  /// Transposed candidate rows: shape `(d, W)` where @c W = greedyKmppTransposedWidth(L).
   /// Padded to a multiple of the 8-wide YMM lane so the transposed kernel iterates over
   /// fixed-width chunks; lanes past @c L are zero-filled and the scoring loop reads only the
   /// first @c L lanes.
   NDArray<T, 2, Layout::Contig> m_candRowsT;
-  /// Per-outer-iteration cache of candidate distances: shape @c (n, W) matching the transposed
+  /// Per-outer-iteration cache of candidate distances: shape `(n, W)` matching the transposed
   /// pack. Lets the commit step pick out the winner column without re-scanning x against the
   /// winner centroid -- saves an O(n*d) pass per outer pick.
   NDArray<T, 2, Layout::Contig> m_candDistSq;
   /// Per-outer-iteration prefix sum of @c minSq, length @c n. Drives inverse-CDF sampling in
-  /// @c log(n) time instead of an @c L*n linear scan.
+  /// `log(n)` time instead of an @c L*n linear scan.
   NDArray<T, 1> m_cumDistSq;
   /// Per-point running min-squared-distance to the selected centroid set. Private to the
   /// seeder; the Lloyd policy owns its own per-point distance scratch.

@@ -1,0 +1,430 @@
+/*
+ * Custom style overrides on top of doxygen-awesome-css.
+ * Loaded after doxygen-awesome.css so every override wins the cascade.
+ * Palette: near-black monochrome with a single restrained warm accent.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+:root {
+    /* Accent: muted amber, used only for links/highlights. No violet anywhere. */
+    --primary-color: #c48d4d;
+    --primary-dark-color: #a7743a;
+    --primary-light-color: #d9ae7f;
+    --primary-lighter-color: #f1e4d2;
+    --primary-lightest-color: #faf4ec;
+
+    --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --font-family-monospace: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+    --spacing-small: 6px;
+    --spacing-medium: 12px;
+    --spacing-large: 18px;
+
+    --border-radius-small: 6px;
+    --border-radius-medium: 10px;
+    --border-radius-large: 14px;
+
+    --code-font-size: 14px;
+}
+
+html.dark-mode {
+    --primary-color: #d9a066;
+    --primary-dark-color: #c48d4d;
+    --primary-light-color: #e8c79b;
+    --primary-lighter-color: #1a1a1a;
+    --primary-lightest-color: #141414;
+
+    --page-background-color: #0a0a0a;
+    --page-foreground-color: #e5e5e5;
+    --page-secondary-foreground-color: #8a8a8a;
+
+    --side-nav-background: #0d0d0d;
+    --menu-background: #111111;
+    --separator-color: #242424;
+
+    --code-background: #111111;
+    --fragment-background: #111111;
+    --fragment-foreground: #e5e5e5;
+    --fragment-keyword: #b8a16a;
+    --fragment-keywordtype: #8fb4aa;
+    --fragment-keywordflow: #b8a16a;
+    --fragment-token: #b5c6a0;
+    --fragment-comment: #6b6b6b;
+    --fragment-link: var(--primary-color);
+    --fragment-preprocessor: #c48d4d;
+    --fragment-linenumber-color: #4a4a4a;
+    --fragment-linenumber-background: #0d0d0d;
+    --fragment-linenumber-border: #242424;
+
+    --memdef-border-color: #242424;
+    --memdef-background-color: #0f0f0f;
+    --memdef-title-background-color: #151515;
+    --memdef-title-foreground-color: var(--page-foreground-color);
+}
+
+/* ---- Global body ---- */
+body, html {
+    font-family: var(--font-family);
+    font-feature-settings: 'cv11', 'ss01';
+    letter-spacing: -0.005em;
+}
+
+/* Single-scroll viewport: #doc-content and #nav-tree have calc(100vh-...)
+   heights set by sidebar-only.css, so html/body must NOT also scroll,
+   otherwise the page gets two vertical scrollbars stacked on the right. */
+html, body {
+    height: 100%;
+    overflow: hidden;
+}
+
+/* Give #top a little more vertical budget so title + brief + search all fit
+   without the brief pushing the search box under the 120px overflow clip. */
+html {
+    --top-height: 130px;
+}
+
+/* Right-side page outline (#page-nav) is a grid sibling of #doc-content
+   and would, by default, get its own vertical scrollbar whenever the outline
+   exceeds its grid-cell height -- producing the two-scrollbar look on class
+   pages. Cap its height to one viewport and let sticky positioning pin the
+   outline, but disable any inner scroll so visual navigation stays single. */
+#page-nav {
+    max-height: calc(100vh - 31px);
+    overflow: hidden !important;
+    position: sticky;
+    top: 0;
+}
+#page-nav-tree,
+#page-nav-contents {
+    overflow: visible !important;
+    height: auto !important;
+}
+
+/* Thin overlay scrollbars on the panes doxygen-awesome actually scrolls. */
+#nav-tree, #doc-content, div.fragment, pre.fragment {
+    scrollbar-width: thin;
+    scrollbar-color: var(--separator-color) transparent;
+}
+#nav-tree::-webkit-scrollbar,
+#doc-content::-webkit-scrollbar,
+div.fragment::-webkit-scrollbar,
+pre.fragment::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+#nav-tree::-webkit-scrollbar-thumb,
+#doc-content::-webkit-scrollbar-thumb,
+div.fragment::-webkit-scrollbar-thumb,
+pre.fragment::-webkit-scrollbar-thumb {
+    background: var(--separator-color);
+    border-radius: 999px;
+}
+#nav-tree::-webkit-scrollbar-track,
+#doc-content::-webkit-scrollbar-track,
+div.fragment::-webkit-scrollbar-track,
+pre.fragment::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#top, #titlearea {
+    background: var(--page-background-color);
+    border-bottom: 1px solid var(--separator-color);
+    box-shadow: none;
+}
+
+/* Leave doxygen-awesome's title sizing alone -- its own CSS handles
+   wrap + search-box positioning. Only tighten colour + weight. */
+#projectname {
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--page-foreground-color);
+}
+
+#projectbrief {
+    color: var(--page-secondary-foreground-color);
+    font-size: 12.5px;
+    font-weight: 400;
+    line-height: 1.35;
+    max-height: 34px;
+    overflow: hidden;
+}
+
+/* ---- Side nav ---- */
+#side-nav {
+    background: var(--side-nav-background);
+    border-right: 1px solid var(--separator-color);
+}
+
+#nav-tree .item,
+#nav-tree a {
+    font-size: 13.5px;
+}
+
+/* ---- Headings ---- */
+h1, h2, h3, h4, .title {
+    font-family: var(--font-family);
+    letter-spacing: -0.02em;
+    font-weight: 700;
+    color: var(--page-foreground-color);
+}
+
+h1 { font-size: 30px; margin-top: 0.6em; margin-bottom: 0.4em; }
+h2 {
+    font-size: 22px;
+    margin-top: 1.6em;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--separator-color);
+}
+h3 { font-size: 17px; margin-top: 1.3em; }
+
+/* ---- Hero block on the mainpage ---- */
+.hero {
+    margin: 4px 0 28px;
+    padding: 28px 30px;
+    border-radius: var(--border-radius-large);
+    background: #111111;
+    border: 1px solid var(--separator-color);
+    border-top: 3px solid var(--primary-color);
+    color: var(--page-foreground-color);
+}
+html:not(.dark-mode) .hero {
+    background: #ffffff;
+    border-color: #e4e4e4;
+    border-top-color: var(--primary-color);
+    color: #111111;
+}
+
+.hero-tagline {
+    font-size: 18px;
+    line-height: 1.5;
+    font-weight: 400;
+    max-width: 780px;
+    color: var(--page-foreground-color);
+}
+
+.hero-pills {
+    margin-top: 18px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.hero-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-family: var(--font-family-monospace);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--page-secondary-foreground-color);
+    background: transparent;
+    border: 1px solid var(--separator-color);
+}
+
+/* ---- Code / fragments ---- */
+code, tt, kbd, .fragment, pre.fragment, .memname, div.line {
+    font-family: var(--font-family-monospace);
+    font-size: var(--code-font-size);
+}
+
+div.fragment, pre.fragment {
+    border-radius: var(--border-radius-medium);
+    border: 1px solid var(--separator-color);
+    padding: 14px 16px;
+    background: var(--fragment-background);
+    overflow-x: auto;
+}
+
+/* Inline code: neutral gray chip, high contrast, NO violet tint. */
+a code,
+p > code, li > code, td > code, dd > code {
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: #1a1a1a;
+    color: #e0d0b4;
+    border: 1px solid #242424;
+    font-size: 13px;
+}
+html:not(.dark-mode) p > code,
+html:not(.dark-mode) li > code,
+html:not(.dark-mode) td > code,
+html:not(.dark-mode) dd > code,
+html:not(.dark-mode) a code {
+    background: #f4f4f4;
+    color: #8a5a1f;
+    border-color: #e4e4e4;
+}
+
+/* ---- Links ---- */
+a, a:visited {
+    color: var(--primary-color);
+    text-decoration: none;
+    border-bottom: 1px dashed transparent;
+    transition: border-color 120ms ease;
+}
+a:hover {
+    border-bottom-color: var(--primary-color);
+    text-decoration: none;
+}
+
+/* ---- Tables ---- */
+table.markdownTable,
+table.doxtable,
+table.fieldtable,
+table.memberdecls {
+    border-radius: var(--border-radius-medium);
+    overflow: hidden;
+    border-collapse: separate;
+    border-spacing: 0;
+    border: 1px solid var(--separator-color);
+}
+table.markdownTable th,
+table.doxtable th {
+    background: #151515;
+    color: var(--page-foreground-color);
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--separator-color);
+}
+html:not(.dark-mode) table.markdownTable th,
+html:not(.dark-mode) table.doxtable th {
+    background: #f4f4f4;
+    color: #111111;
+}
+table.markdownTable td,
+table.doxtable td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--separator-color);
+}
+table.markdownTable tr:last-child td,
+table.doxtable tr:last-child td {
+    border-bottom: none;
+}
+
+/* ---- Member declarations / definitions ---- */
+.memitem {
+    margin: 18px 0;
+    border-radius: var(--border-radius-medium);
+    border: 1px solid var(--separator-color);
+    background: var(--memdef-background-color);
+}
+.memproto, .memname {
+    font-family: var(--font-family-monospace);
+    font-weight: 500;
+}
+.memtitle {
+    border-top-left-radius: var(--border-radius-medium);
+    border-top-right-radius: var(--border-radius-medium);
+    background: var(--memdef-title-background-color);
+    border-bottom: 1px solid var(--separator-color);
+}
+
+/* ---- Notes / warnings / params boxes ---- */
+dl.note, dl.warning, dl.attention, dl.remark, dl.todo, dl.bug, dl.deprecated {
+    padding: 14px 16px;
+    border-radius: var(--border-radius-medium);
+    border-left-width: 4px;
+    background: #111111;
+}
+html:not(.dark-mode) dl.note,
+html:not(.dark-mode) dl.warning,
+html:not(.dark-mode) dl.attention,
+html:not(.dark-mode) dl.remark,
+html:not(.dark-mode) dl.todo,
+html:not(.dark-mode) dl.bug,
+html:not(.dark-mode) dl.deprecated {
+    background: #fafafa;
+}
+dl.warning, dl.attention {
+    border-left-color: #d9a066;
+}
+dl.note {
+    border-left-color: var(--primary-color);
+}
+
+/* ---- Search box ---- */
+/* Make the sidebar-top search box obviously visible on the near-black bg. */
+#MSearchBox {
+    border-radius: 8px !important;
+    border: 1px solid #3a3a3a !important;
+    background: #1a1a1a !important;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+}
+#MSearchField {
+    font-family: var(--font-family);
+    color: var(--page-foreground-color);
+}
+#MSearchField::placeholder {
+    color: #6a6a6a;
+}
+#MSearchBox .left .search-icon,
+#MSearchBox .left #MSearchSelect {
+    color: var(--page-secondary-foreground-color);
+}
+html:not(.dark-mode) #MSearchBox {
+    background: #ffffff !important;
+    border-color: #dcdcdc !important;
+}
+
+/* ---- Footer ---- */
+.navpath ul {
+    background: var(--page-background-color);
+    border-top: 1px solid var(--separator-color);
+}
+img.footer {
+    opacity: 0.55;
+}
+address.footer {
+    color: var(--page-secondary-foreground-color);
+    font-size: 12.5px;
+    padding: 10px 0 30px;
+}
+
+/* ---- Tree view ---- */
+#nav-tree .selected {
+    background: #1a1a1a;
+    border-radius: 4px;
+}
+html:not(.dark-mode) #nav-tree .selected {
+    background: #efefef;
+}
+
+/* ---- Paragraph link on hover ---- */
+a.anchorlink {
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+h2:hover a.anchorlink,
+h3:hover a.anchorlink {
+    opacity: 1;
+}
+
+/* ---- Dark-mode toggle button ---- */
+doxygen-awesome-dark-mode-toggle {
+    border-radius: 999px;
+}
+
+/* ---- Member attribute badges (inline / noexcept / nodiscard / virtual) ---- */
+/* Stock doxygen-awesome paints these as amber pills with black-ish text --
+   unreadable on the near-black page. Re-skin as subtle outlined chips. */
+span.mlabel {
+    background: transparent !important;
+    color: var(--page-secondary-foreground-color) !important;
+    border: 1px solid var(--separator-color) !important;
+    padding: 2px 8px !important;
+    border-radius: 4px !important;
+    font-family: var(--font-family-monospace) !important;
+    font-size: 11.5px !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.01em !important;
+    text-transform: lowercase;
+}
+html:not(.dark-mode) span.mlabel {
+    color: #6a6a6a !important;
+    border-color: #dcdcdc !important;
+    background: #f7f7f7 !important;
+}

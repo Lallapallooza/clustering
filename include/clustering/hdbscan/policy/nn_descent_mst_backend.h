@@ -48,11 +48,12 @@ struct NnDescentMstConfig {
  *        disconnected components.
  *
  * Given a point matrix @p X and a core-distance parameter @p minSamples, the backend:
- *   1. Builds (or reuses) an @ref NnDescentIndex at @c k = @c minSamples + @c kExtra.
+ *   1. Builds (or reuses) an @ref clustering::index::NnDescentIndex at @c k = @c minSamples + @c
+ * kExtra.
  *   2. Extracts per-point core distances as the @c minSamples-th nearest squared distance from
  *      the kNN graph.
  *   3. Promotes the kNN edges to an MRD-weighted undirected edge list:
- *      @c MRD(i, j) = max(coreDist[i], coreDist[j], sqDist(i, j)).
+ *      `MRD(i, j)` = max(coreDist[i], coreDist[j], sqDist(i, j)).
  *   4. Runs Kruskal on the sorted MRD edge list to produce a spanning forest.
  *   5. When the forest spans fewer than @c n components, enumerates minimum-weight bridges
  *      between every pair of disjoint components and adds @c c - 1 bridges Kruskal-style until
@@ -86,16 +87,16 @@ public:
    * @brief Construct with an explicit tuning @p config.
    *
    * Distinct from the zero-arg default ctor to avoid the default-constructor ambiguity in
-   * @c [class.default.ctor]/2.
+   * `[class.default.ctor]`/2.
    */
   explicit NnDescentMstBackend(NnDescentMstConfig config) : m_config(config) {}
 
   /**
    * @brief Build the approximate MRD-weighted minimum spanning tree of @p X.
    *
-   * @pre @p minSamples is positive and strictly less than @c X.dim(0).
+   * @pre @p minSamples is positive and strictly less than `X.dim(0)`.
    *
-   * @param X          Contiguous @c (n x d) dataset; caller retains ownership.
+   * @param X          Contiguous `(n x d)` dataset; caller retains ownership.
    * @param minSamples Neighbour count driving the core-distance definition.
    * @param pool       Worker pool; forwarded to the inner @c NnDescentIndex build.
    * @param out        Destination; @c edges receives the @c n - 1 MST edges in insertion order
@@ -302,7 +303,7 @@ private:
         bridges[pairIdx] = Bridge{bestW, bestU, bestV};
       };
 
-      // Cost per pair scales with @c |memA| * |memB| * d; the gate uses the largest pair as a
+      // Cost per pair scales with `|memA| * |memB| * d`; the gate uses the largest pair as a
       // proxy because per-pair work is wildly heterogeneous and underestimating any single big
       // pair would leave one worker stuck while others finish.
       std::size_t maxPairOps = 0;

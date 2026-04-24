@@ -179,7 +179,7 @@ template <class T> [[nodiscard]] inline T sqEuclideanFromDot(T normA, T normB, T
  *
  * Returns @c true if any of the @p size slots starting at @p data holds @p target. AVX2 path
  * consumes the slab 8 lanes per vector compare, so short dedup scans over small slabs collapse
- * from @c O(size) scalar compares to @c O(size / 8) vector ops. Scalar fallback when AVX2 is
+ * from `O(size)` scalar compares to `O(size / 8)` vector ops. Scalar fallback when AVX2 is
  * not compiled in.
  *
  * @param data   Pointer to the slab; may be unaligned.

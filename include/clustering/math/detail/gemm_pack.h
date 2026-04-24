@@ -21,7 +21,7 @@ namespace clustering::math::detail {
  * Each source pointer addresses a contiguous 8-float row; @p dst must be 32-byte aligned and
  * has capacity for 8 x 32B stores. Callers place the eight rows at row-stride @p srcRowStride
  * apart. The destination layout is the @c Ap panel layout the 8x6 microkernel consumes:
- * @c dst[k*8 + r] holds @c src[r][k].
+ * `dst[k*8 + r]` holds `src[r]`[k].
  */
 [[gnu::always_inline]] inline void
 transpose8x8Avx2F32(const float *src, std::ptrdiff_t srcRowStride, float *dst) noexcept {
@@ -66,7 +66,7 @@ transpose8x8Avx2F32(const float *src, std::ptrdiff_t srcRowStride, float *dst) n
  * @brief Pack an @c mc x @c kc block of a dense row-major f32 source into the 8-row panel
  *        layout the 8x6 microkernel consumes, via 8x8 AVX2 transpose tiles.
  *
- * Assumes @c aColStride == 1 (caller dispatches on the descriptor). The @p apOut arena is
+ * Assumes `aColStride == 1` (caller dispatches on the descriptor). The @p apOut arena is
  * 32-byte aligned by construction; each 32B destination store inside the transpose tile is
  * aligned. Unaligned AVX2 loads absorb the @c pc-offset.
  */
@@ -116,18 +116,18 @@ inline void packA_f32_RowMajorAvx2(const float *aBase, std::ptrdiff_t aRowStride
 /**
  * @brief Pack an @c Mc x @c Kc block of @c A into the microkernel-friendly @c Ap layout.
  *
- * Output is a sequence of @c ceil(mc / Mr) panels. Panel @c p is @c Mr rows by @c kc columns;
- * element @c (r, k) (with @c r the panel-local row and @c k the inner-dim index) lands at
- * @c apOut[p*Mr*kc + k*Mr + r]. The last panel zero-pads any rows beyond @c (mc - p*Mr) for
- * every @c k in @c [0, kc), so the kernel's accumulator math remains valid for tail tiles.
+ * Output is a sequence of `ceil(mc / Mr)` panels. Panel @c p is @c Mr rows by @c kc columns;
+ * element `(r, k)` (with @c r the panel-local row and @c k the inner-dim index) lands at
+ * `apOut[p*Mr*kc + k*Mr + r]`. The last panel zero-pads any rows beyond `(mc - p*Mr)` for
+ * every @c k in `[0, kc)`, so the kernel's accumulator math remains valid for tail tiles.
  *
  * @tparam T  Element type.
- * @param Ad  Source matrix descriptor (@c MatrixDescC<T>); arbitrary strides are supported.
+ * @param Ad  Source matrix descriptor (`MatrixDescC<T>`); arbitrary strides are supported.
  * @param ic  Starting row in @c Ad of the block to pack.
  * @param mc  Row count of the block (last panel zero-pads if @c mc % Mr != 0).
  * @param pc  Starting column in @c Ad of the block.
  * @param kc  Column count of the block.
- * @param apOut Destination buffer of capacity @c ceil(mc/Mr) * Mr * kc, 32-byte aligned.
+ * @param apOut Destination buffer of capacity `ceil(mc/Mr)` * Mr * kc, 32-byte aligned.
  */
 template <class T>
 void packA(const ::clustering::detail::MatrixDescC<T> &Ad, std::size_t ic, std::size_t mc,
@@ -173,17 +173,17 @@ void packA(const ::clustering::detail::MatrixDescC<T> &Ad, std::size_t ic, std::
 /**
  * @brief Pack a @c Kc x @c Nc block of @c B into the microkernel-friendly @c Bp layout.
  *
- * Output is a sequence of @c ceil(nc / Nr) panels. Panel @c p is @c kc rows by @c Nr columns;
- * element @c (k, c) (with @c c the panel-local column) lands at
- * @c bpOut[p*kc*Nr + k*Nr + c]. The last panel zero-pads any columns beyond @c (nc - p*Nr).
+ * Output is a sequence of `ceil(nc / Nr)` panels. Panel @c p is @c kc rows by @c Nr columns;
+ * element `(k, c)` (with @c c the panel-local column) lands at
+ * `bpOut[p*kc*Nr + k*Nr + c]`. The last panel zero-pads any columns beyond `(nc - p*Nr)`.
  *
  * @tparam T  Element type.
- * @param Bd  Source matrix descriptor (@c MatrixDescC<T>); arbitrary strides are supported.
+ * @param Bd  Source matrix descriptor (`MatrixDescC<T>`); arbitrary strides are supported.
  * @param pc  Starting row in @c Bd of the block to pack.
  * @param kc  Row count of the block.
  * @param jc  Starting column in @c Bd of the block.
  * @param nc  Column count of the block (last panel zero-pads if @c nc % Nr != 0).
- * @param bpOut Destination buffer of capacity @c ceil(nc/Nr) * kc * Nr, 32-byte aligned.
+ * @param bpOut Destination buffer of capacity `ceil(nc/Nr)` * kc * Nr, 32-byte aligned.
  */
 template <class T>
 void packB(const ::clustering::detail::MatrixDescC<T> &Bd, std::size_t pc, std::size_t kc,

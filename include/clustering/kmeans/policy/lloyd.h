@@ -10,7 +10,7 @@
 namespace clustering::kmeans {
 
 /**
- * @brief Contract for the Lloyd driver that @c KMeans<T> delegates to.
+ * @brief Contract for the Lloyd driver that `KMeans<T>` delegates to.
  *
  * A @c LloydStrategy owns its private scratch, takes seeded centroids as input, runs the
  * iteration loop, and writes final labels, inertia, iteration count, and convergence state
