@@ -100,9 +100,9 @@ namespace clustering {
  *
  * @tparam T          Element type. Only @c float is supported in this class; a @c double
  *                    specialization is out of scope.
- * @tparam MstBackend Backend satisfying @ref hdbscan::MstBackendStrategy. Defaults to
- *                    @ref hdbscan::AutoMstBackend which picks Prim, Boruvka, or NN-Descent on
- *                    input shape.
+ * @tparam MstBackend Backend satisfying @ref clustering::hdbscan::MstBackendStrategy.
+ *                    Defaults to @ref clustering::hdbscan::AutoMstBackend which picks Prim,
+ *                    Boruvka, or NN-Descent on input shape.
  */
 template <class T, class MstBackend = hdbscan::AutoMstBackend<T>>
   requires hdbscan::MstBackendStrategy<MstBackend, T>

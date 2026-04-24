@@ -16,7 +16,14 @@ jobs:
       - name: Install docs toolchain (required by doxygen-build pre-commit hook)
         run: |
           sudo apt-get update
-          sudo apt-get install -y doxygen graphviz cmake ninja-build
+          sudo apt-get install -y graphviz cmake ninja-build
+      - name: Install Doxygen 1.16.1
+        run: |
+          curl -fsSL -o /tmp/doxygen.tar.gz \
+            https://www.doxygen.nl/files/doxygen-1.16.1.linux.bin.tar.gz
+          tar -xzf /tmp/doxygen.tar.gz -C /tmp
+          sudo install -m 0755 /tmp/doxygen-1.16.1/bin/doxygen /usr/local/bin/doxygen
+          doxygen --version
       - run: pip install pre-commit
       - run: pre-commit run --all-files --show-diff-on-failure
 
