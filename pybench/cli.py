@@ -25,7 +25,12 @@ from pybench.charts.labels_io import (
 )
 from pybench.charts.meta import RunMetadata
 from pybench.charts.results_io import capture_metadata, load_results, save_results
-from pybench.charts.vis import VisInputs, build_vis_figure
+from pybench.charts.vis import (
+    MultiDimVisInputs,
+    VisInputs,
+    build_multidim_vis_figure,
+    build_vis_figure,
+)
 from pybench.recipe import Recipe, RunResult
 from pybench.recipes import all_recipes
 from pybench.runner import (
@@ -41,6 +46,12 @@ _ANSI_RESET = "\x1b[0m"
 
 _SUBCOMMANDS = ("bench", "vis")
 _VIS_SUFFIX = "vis"
+
+# Ceiling on the number of rows a @c --all-dims vis figure will render. Past
+# this count each row's panels shrink to the point where the scatter structure
+# becomes illegible; extras are dropped with a warning so the reader knows
+# the figure is not the whole partition.
+_ALL_DIMS_MAX_ROWS = 10
 
 
 def _list_recipes(recipes: dict) -> None:
@@ -152,7 +163,21 @@ def _add_vis_args(parser: argparse.ArgumentParser) -> None:
         "--dims",
         type=int,
         default=None,
-        help="Only render the cell at this dims (otherwise the smallest dims is picked)",
+        help=(
+            "Only render the cell at this dims (one row of 4 panels). Without"
+            " this flag the default is 3 representative dims (low / mid / high)"
+            " from the partition; pass @c --all-dims to render every dim."
+        ),
+    )
+    parser.add_argument(
+        "--all-dims",
+        dest="all_dims",
+        action="store_true",
+        help=(
+            "Render one row of 4 panels per dim in the partition (up to"
+            f" {_ALL_DIMS_MAX_ROWS} rows; extras are dropped with a warning)."
+            " Mutually exclusive with @c --dims."
+        ),
     )
     parser.add_argument(
         "--n-jobs",
@@ -500,34 +525,107 @@ def _run_replot(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
     return 0
 
 
-def _pick_vis_cell(
+def _pick_representative_dims(
+    available_dims: Sequence[int],
+) -> list[int]:
+    """Pick the low / mid / high dim from a sorted-unique sequence.
+
+    The caller passes a deduplicated ascending list; we return up to 3 dims
+    in ascending order. 1 dim -> ``[d0]``; 2 dims -> ``[d0, d1]``; 3+ dims
+    -> ``[low, dims[len // 2], high]`` with duplicates collapsed so a 4-dim
+    partition still returns exactly 3 rows.
+    """
+    dims = sorted({int(d) for d in available_dims})
+    if len(dims) <= 2:
+        return dims
+    low = dims[0]
+    mid = dims[len(dims) // 2]
+    high = dims[-1]
+    # Collapse accidental dupes (can happen only with len == 3 and even pick).
+    picked: list[int] = []
+    for d in (low, mid, high):
+        if d not in picked:
+            picked.append(d)
+    return picked
+
+
+def _pick_vis_cells(
     partition_results: list[RunResult],
     *,
     size_filter: int | None,
     dims_filter: int | None,
     n_jobs_filter: int | None,
-) -> RunResult | None:
-    """Pick one representative cell per partition for vis rendering.
+    all_dims: bool,
+) -> tuple[list[RunResult], str]:
+    """Pick one cell per rendered dim for a partition's vis figure.
 
-    Default (no filters): largest @c size at the smallest @c dims; ties on
-    @c (size, dims) broken by the first insertion order so the pick is
-    deterministic. @c size_filter / @c dims_filter / @c n_jobs_filter narrow
-    to the exact cell if supplied. Returns @c None when no cell matches.
+    Returns @c (cells, selection_mode). @c cells is ordered by ascending
+    dim; @c selection_mode is a short human-readable string that the figure
+    header surfaces so the reader knows which dims were picked.
+
+    Selection rules:
+
+    - @p dims_filter supplied -> single row at that dim.
+    - @p all_dims True -> every dim in the partition, clamped to the
+      @c _ALL_DIMS_MAX_ROWS ceiling with a warning when rows are dropped.
+    - Neither -> the low / mid / high picker across unique dims.
+
+    For each rendered dim, the cell is the largest @c size at that dim,
+    narrowed by @p size_filter and @p n_jobs_filter when supplied. Ties are
+    broken by insertion order. Returns an empty list when no cell matches
+    any rendered dim.
     """
-    candidates = list(partition_results)
+    base = list(partition_results)
     if size_filter is not None:
-        candidates = [r for r in candidates if r.size == size_filter]
-    if dims_filter is not None:
-        candidates = [r for r in candidates if r.dims == dims_filter]
+        base = [r for r in base if r.size == size_filter]
     if n_jobs_filter is not None:
-        candidates = [r for r in candidates if r.params.get("n_jobs") == n_jobs_filter]
-    if not candidates:
-        return None
-    if size_filter is not None and dims_filter is not None:
-        return candidates[0]
-    # default pick: largest size first, tie-broken by smallest dims.
-    candidates.sort(key=lambda r: (-r.size, r.dims))
-    return candidates[0]
+        base = [r for r in base if r.params.get("n_jobs") == n_jobs_filter]
+
+    available_dims = sorted({r.dims for r in base})
+    if not available_dims:
+        return [], ""
+
+    if dims_filter is not None:
+        picked_dims = [dims_filter] if dims_filter in available_dims else []
+        selection_mode = f"cell selection: single dim --dims {dims_filter}"
+    elif all_dims:
+        if len(available_dims) > _ALL_DIMS_MAX_ROWS:
+            dropped = len(available_dims) - _ALL_DIMS_MAX_ROWS
+            logger.warning(
+                "vis --all-dims: partition has %d dims, rendering the first %d"
+                " (dropping %d trailing dim(s))",
+                len(available_dims),
+                _ALL_DIMS_MAX_ROWS,
+                dropped,
+            )
+            picked_dims = available_dims[:_ALL_DIMS_MAX_ROWS]
+        else:
+            picked_dims = available_dims
+        selection_mode = f"cell selection: all {len(picked_dims)} dims (--all-dims)"
+    else:
+        picked_dims = _pick_representative_dims(available_dims)
+        if len(picked_dims) >= 3:
+            selection_mode = (
+                f"cell selection: 3 representative dims"
+                f" (low / mid / high: d={picked_dims[0]}, d={picked_dims[1]},"
+                f" d={picked_dims[-1]})"
+            )
+        elif len(picked_dims) == 2:
+            selection_mode = (
+                f"cell selection: 2 dims (low / high: d={picked_dims[0]},"
+                f" d={picked_dims[1]})"
+            )
+        else:
+            selection_mode = f"cell selection: single dim (d={picked_dims[0]})"
+
+    cells: list[RunResult] = []
+    for dim in picked_dims:
+        candidates = [r for r in base if r.dims == dim]
+        if not candidates:
+            continue
+        candidates.sort(key=lambda r: (-r.size, r.dims))
+        cells.append(candidates[0])
+    return cells, selection_mode
 
 
 def _subsample_seed_from_hash6(hash6: str) -> int:
@@ -581,7 +679,7 @@ def _save_vis_figure(
     return out_path
 
 
-def _build_vis_for_cell(
+def _vis_inputs_for_cell(
     *,
     algo: str,
     recipe: Recipe,
@@ -591,8 +689,8 @@ def _build_vis_for_cell(
     meta: RunMetadata,
     subsample_seed: int,
     bench_filename: str | None = None,
-) -> Any:
-    inputs = VisInputs(
+) -> VisInputs:
+    return VisInputs(
         algo=algo,
         recipe_name=recipe.name,
         size=result.size,
@@ -608,13 +706,44 @@ def _build_vis_for_cell(
         subsample_seed=subsample_seed,
         bench_filename=bench_filename,
     )
-    return build_vis_figure(inputs)
+
+
+def _build_vis_for_cell(
+    *,
+    algo: str,
+    recipe: Recipe,
+    result: RunResult,
+    bundle: LabelsBundle,
+    non_njobs_params: tuple[tuple[str, Any], ...],
+    meta: RunMetadata,
+    subsample_seed: int,
+    bench_filename: str | None = None,
+) -> Any:
+    return build_vis_figure(
+        _vis_inputs_for_cell(
+            algo=algo,
+            recipe=recipe,
+            result=result,
+            bundle=bundle,
+            non_njobs_params=non_njobs_params,
+            meta=meta,
+            subsample_seed=subsample_seed,
+            bench_filename=bench_filename,
+        )
+    )
 
 
 def _run_vis(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
     json_path = Path(args.results)
     if not json_path.is_file():
         print(f"vis: results file not found: {json_path}", file=sys.stderr)
+        return 1
+
+    if args.all_dims and args.dims is not None:
+        print(
+            "vis: --all-dims and --dims are mutually exclusive",
+            file=sys.stderr,
+        )
         return 1
 
     meta, all_results = load_results(json_path)
@@ -662,13 +791,14 @@ def _run_vis(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
             expected_recipe_name=algo,
         )
 
-        cell = _pick_vis_cell(
+        cells, selection_mode = _pick_vis_cells(
             part_results,
             size_filter=args.size,
             dims_filter=args.dims,
             n_jobs_filter=args.n_jobs,
+            all_dims=args.all_dims,
         )
-        if cell is None:
+        if not cells:
             print(
                 f"vis: no cell matched filters for partition {algo!r} "
                 f"params={dict(non_njobs_params)}",
@@ -676,30 +806,43 @@ def _run_vis(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
             )
             continue
 
-        resolved = _resolve_bundle_for_cell(
-            load_result=load_result,
-            sidecar_path=sidecar_path,
-            recipe=recipe,
-            cell=cell,
-            no_regen=args.no_regen,
-        )
-        if resolved is None:
-            return 1
-        bundle, authoritative_result = resolved
-        # When regen fires we prefer the fresh @c RunResult so the figure caption
-        # reports the ari of the labels actually drawn; a sidecar hit returns
-        # @p cell unchanged.
         bench_fn = chart_filename(algo, dict(non_njobs_params), hash6)
-        fig = _build_vis_for_cell(
-            algo=algo,
-            recipe=recipe,
-            result=authoritative_result,
-            bundle=bundle,
-            non_njobs_params=non_njobs_params,
-            meta=meta,
-            subsample_seed=subsample_seed,
-            bench_filename=bench_fn,
+        rows: list[VisInputs] = []
+        regen_failed = False
+        for cell in cells:
+            resolved = _resolve_bundle_for_cell(
+                load_result=load_result,
+                sidecar_path=sidecar_path,
+                recipe=recipe,
+                cell=cell,
+                no_regen=args.no_regen,
+            )
+            if resolved is None:
+                regen_failed = True
+                break
+            bundle, authoritative_result = resolved
+            # When regen fires we prefer the fresh @c RunResult so the figure's
+            # caption reports the ari of the labels actually drawn; a sidecar
+            # hit returns @p cell unchanged.
+            rows.append(
+                _vis_inputs_for_cell(
+                    algo=algo,
+                    recipe=recipe,
+                    result=authoritative_result,
+                    bundle=bundle,
+                    non_njobs_params=non_njobs_params,
+                    meta=meta,
+                    subsample_seed=subsample_seed,
+                    bench_filename=bench_fn,
+                )
+            )
+        if regen_failed:
+            return 1
+
+        multi_inputs = MultiDimVisInputs(
+            rows=tuple(rows), selection_mode=selection_mode
         )
+        fig = build_multidim_vis_figure(multi_inputs)
         out_path = _save_vis_figure(fig, algo, non_njobs_params, hash6, out_dir)
         written.append(out_path)
 

@@ -644,6 +644,242 @@ def test_cli_vis_sentinel_regen_propagates_ours_only(
     assert list(vis_dir.glob("*.png"))
 
 
+def _run_multidim_bench_to_produce_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sizes: list[int],
+    dims: list[int],
+) -> Path:
+    """Drive @c pybench bench across multiple @p dims so vis has a real choice.
+
+    The default @c _run_bench_to_produce_sidecar only exercises one dim;
+    multi-dim vis needs a partition with several dims to test the picker.
+    """
+    monkeypatch.setattr(
+        "pybench.cli.run_one_with_labels",
+        _stub_run_one_with_labels_factory(ari=0.99),
+    )
+    out_dir = tmp_path / "out"
+    _invoke_main(
+        monkeypatch,
+        [
+            "bench",
+            "--algo",
+            "dbscan",
+            "--sizes",
+            *[str(s) for s in sizes],
+            "--dims",
+            *[str(d) for d in dims],
+            "--out",
+            str(out_dir),
+        ],
+    )
+    return out_dir
+
+
+def test_cli_vis_default_renders_three_rows_on_3plus_dims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default (no --dims / no --all-dims): 3-row figure when partition has >= 3 dims."""
+    out_dir = _run_multidim_bench_to_produce_sidecar(
+        tmp_path, monkeypatch, sizes=[1000], dims=[2, 8, 32, 128]
+    )
+
+    captured: list[Any] = []
+    real_build = cli_module.build_multidim_vis_figure
+
+    def _spy(inputs):
+        captured.append(inputs)
+        return real_build(inputs)
+
+    monkeypatch.setattr("pybench.cli.build_multidim_vis_figure", _spy)
+
+    vis_dir = tmp_path / "vis"
+    _invoke_main(
+        monkeypatch,
+        [
+            "vis",
+            "--results",
+            str(out_dir / "results.json"),
+            "--out",
+            str(vis_dir),
+        ],
+    )
+    assert captured, "build_multidim_vis_figure must be called"
+    payload = captured[0]
+    # Low / mid / high over [2, 8, 32, 128] is [2, 32, 128]; the picker
+    # chooses dims[len // 2] for mid (index 2 here).
+    rows = payload.rows
+    assert len(rows) == 3
+    assert [r.dims for r in rows] == [2, 32, 128]
+    assert "3 representative dims" in payload.selection_mode
+
+
+def test_cli_vis_all_dims_renders_every_dim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """@c --all-dims renders a row per dim in the partition."""
+    out_dir = _run_multidim_bench_to_produce_sidecar(
+        tmp_path, monkeypatch, sizes=[1000], dims=[2, 8, 32, 128]
+    )
+
+    captured: list[Any] = []
+    real_build = cli_module.build_multidim_vis_figure
+
+    def _spy(inputs):
+        captured.append(inputs)
+        return real_build(inputs)
+
+    monkeypatch.setattr("pybench.cli.build_multidim_vis_figure", _spy)
+
+    vis_dir = tmp_path / "vis"
+    _invoke_main(
+        monkeypatch,
+        [
+            "vis",
+            "--results",
+            str(out_dir / "results.json"),
+            "--out",
+            str(vis_dir),
+            "--all-dims",
+        ],
+    )
+    assert captured
+    rows = captured[0].rows
+    assert [r.dims for r in rows] == [2, 8, 32, 128]
+    assert "all 4 dims" in captured[0].selection_mode
+
+
+def test_cli_vis_single_dims_filter_renders_one_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """@c --dims D renders a single-row figure at dim D, preserving legacy behavior."""
+    out_dir = _run_multidim_bench_to_produce_sidecar(
+        tmp_path, monkeypatch, sizes=[1000], dims=[2, 8, 32]
+    )
+
+    captured: list[Any] = []
+    real_build = cli_module.build_multidim_vis_figure
+
+    def _spy(inputs):
+        captured.append(inputs)
+        return real_build(inputs)
+
+    monkeypatch.setattr("pybench.cli.build_multidim_vis_figure", _spy)
+
+    vis_dir = tmp_path / "vis"
+    _invoke_main(
+        monkeypatch,
+        [
+            "vis",
+            "--results",
+            str(out_dir / "results.json"),
+            "--out",
+            str(vis_dir),
+            "--dims",
+            "8",
+        ],
+    )
+    assert captured
+    rows = captured[0].rows
+    assert len(rows) == 1
+    assert rows[0].dims == 8
+    assert "single dim --dims 8" in captured[0].selection_mode
+
+
+def test_cli_vis_default_two_dim_partition_renders_two_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2-dim partition -> 2 rows (low + high, no mid)."""
+    out_dir = _run_multidim_bench_to_produce_sidecar(
+        tmp_path, monkeypatch, sizes=[1000], dims=[2, 64]
+    )
+
+    captured: list[Any] = []
+    real_build = cli_module.build_multidim_vis_figure
+
+    def _spy(inputs):
+        captured.append(inputs)
+        return real_build(inputs)
+
+    monkeypatch.setattr("pybench.cli.build_multidim_vis_figure", _spy)
+
+    vis_dir = tmp_path / "vis"
+    _invoke_main(
+        monkeypatch,
+        [
+            "vis",
+            "--results",
+            str(out_dir / "results.json"),
+            "--out",
+            str(vis_dir),
+        ],
+    )
+    assert captured
+    rows = captured[0].rows
+    assert [r.dims for r in rows] == [2, 64]
+
+
+def test_cli_vis_default_one_dim_partition_renders_one_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1-dim partition -> 1 row (that dim)."""
+    out_dir = _run_multidim_bench_to_produce_sidecar(
+        tmp_path, monkeypatch, sizes=[1000], dims=[4]
+    )
+
+    captured: list[Any] = []
+    real_build = cli_module.build_multidim_vis_figure
+
+    def _spy(inputs):
+        captured.append(inputs)
+        return real_build(inputs)
+
+    monkeypatch.setattr("pybench.cli.build_multidim_vis_figure", _spy)
+
+    vis_dir = tmp_path / "vis"
+    _invoke_main(
+        monkeypatch,
+        [
+            "vis",
+            "--results",
+            str(out_dir / "results.json"),
+            "--out",
+            str(vis_dir),
+        ],
+    )
+    assert captured
+    rows = captured[0].rows
+    assert len(rows) == 1
+    assert rows[0].dims == 4
+
+
+def test_cli_vis_rejects_all_dims_with_dims_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """@c --all-dims and @c --dims are mutually exclusive -> non-zero exit."""
+    out_dir = _run_multidim_bench_to_produce_sidecar(
+        tmp_path, monkeypatch, sizes=[1000], dims=[2, 8]
+    )
+    vis_dir = tmp_path / "vis"
+    with pytest.raises(SystemExit) as exc:
+        _invoke_main(
+            monkeypatch,
+            [
+                "vis",
+                "--results",
+                str(out_dir / "results.json"),
+                "--out",
+                str(vis_dir),
+                "--all-dims",
+                "--dims",
+                "8",
+            ],
+        )
+    assert exc.value.code not in (0, None)
+
+
 def test_cli_vis_regen_caption_uses_fresh_ari(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -687,13 +923,13 @@ def test_cli_vis_regen_caption_uses_fresh_ari(
     monkeypatch.setattr("pybench.cli.run_one_with_labels", _regen_stub)
 
     captured_inputs: list[Any] = []
-    real_build_vis_figure = cli_module.build_vis_figure
+    real_build_multidim = cli_module.build_multidim_vis_figure
 
-    def _spy_build_vis(inputs):
+    def _spy_build_multidim(inputs):
         captured_inputs.append(inputs)
-        return real_build_vis_figure(inputs)
+        return real_build_multidim(inputs)
 
-    monkeypatch.setattr("pybench.cli.build_vis_figure", _spy_build_vis)
+    monkeypatch.setattr("pybench.cli.build_multidim_vis_figure", _spy_build_multidim)
 
     vis_dir = tmp_path / "vis"
     _invoke_main(
@@ -707,7 +943,8 @@ def test_cli_vis_regen_caption_uses_fresh_ari(
         ],
     )
 
-    assert captured_inputs, "expected build_vis_figure to be called"
-    # The VisInputs fed to the figure carries the fresh ari, not the stale one.
-    assert captured_inputs[0].ari == pytest.approx(fresh_ari)
-    assert captured_inputs[0].ari != pytest.approx(stale_ari)
+    assert captured_inputs, "expected build_multidim_vis_figure to be called"
+    # The VisInputs in the multi-dim payload carries the fresh ari, not stale.
+    row = captured_inputs[0].rows[0]
+    assert row.ari == pytest.approx(fresh_ari)
+    assert row.ari != pytest.approx(stale_ari)

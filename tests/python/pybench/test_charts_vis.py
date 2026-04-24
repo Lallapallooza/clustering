@@ -12,12 +12,14 @@ from matplotlib.figure import Figure
 
 from pybench.charts.meta import RunMetadata
 from pybench.charts.vis import (
+    MultiDimVisInputs,
     VisInputs,
     _NOISE_COLOR,
     _colors_for_labels,
     _palette_for_k,
     _rgba_hex,
     build_empty_vis_figure,
+    build_multidim_vis_figure,
     build_vis_figure,
 )
 
@@ -465,3 +467,148 @@ def test_vis_with_all_noise_labels() -> None:
     disagree_ax = fig.axes[3]
     texts = [t.get_text() for t in disagree_ax.texts]
     assert any("full agreement" in t for t in texts)
+
+
+# -----------------------------------------------------------------------------
+# Multi-dim layout tests
+# -----------------------------------------------------------------------------
+
+
+def _inputs_for_dim(dim: int, *, seed: int = 42, ari: float = 0.97) -> VisInputs:
+    """Construct a VisInputs standing in for a given dim's row."""
+    n = 400
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, 2)).astype(np.float32)
+    k = 4
+    gt = rng.integers(0, k, n).astype(np.int32)
+    ours = gt.copy()
+    theirs = gt.copy()
+    return VisInputs(
+        algo="kmeans",
+        recipe_name="kmeans_blobs",
+        size=n,
+        dims=dim,
+        non_njobs_params=(("k", k),),
+        n_jobs=1,
+        ari=ari,
+        title_meta=_meta(),
+        gt_labels=gt,
+        ours_labels=ours,
+        theirs_labels=theirs,
+        projection_2d=X,
+        subsample_seed=seed,
+    )
+
+
+def test_multidim_vis_three_dims_has_12_axes() -> None:
+    """3 rows x 4 panels == 12 axes."""
+    inputs = MultiDimVisInputs(
+        rows=tuple(_inputs_for_dim(d, seed=s) for d, s in ((2, 1), (32, 2), (512, 3))),
+        selection_mode="test: 3 dims",
+    )
+    fig = build_multidim_vis_figure(inputs)
+    assert len(fig.axes) == 12
+
+
+def test_multidim_vis_single_dim_has_4_axes() -> None:
+    """1-row payload renders the same 4 panels build_vis_figure would."""
+    inputs = MultiDimVisInputs(
+        rows=(_inputs_for_dim(8, seed=7),),
+        selection_mode="test: single dim",
+    )
+    fig = build_multidim_vis_figure(inputs)
+    assert len(fig.axes) == 4
+
+
+def test_multidim_vis_two_dims_has_8_axes() -> None:
+    """2 rows x 4 panels == 8 axes (partition has only 2 unique dims)."""
+    inputs = MultiDimVisInputs(
+        rows=tuple(_inputs_for_dim(d, seed=s) for d, s in ((2, 11), (128, 12))),
+        selection_mode="test: 2 dims",
+    )
+    fig = build_multidim_vis_figure(inputs)
+    assert len(fig.axes) == 8
+
+
+def test_multidim_vis_rejects_empty_rows() -> None:
+    """Zero rows is a programmer error, not a render fallback."""
+    with pytest.raises(ValueError):
+        build_multidim_vis_figure(MultiDimVisInputs(rows=(), selection_mode="empty"))
+
+
+def test_multidim_vis_header_reports_selection_mode() -> None:
+    """The selection_mode string appears in the figure-level header text."""
+    mode = "cell selection: 3 representative dims (low / mid / high)"
+    inputs = MultiDimVisInputs(
+        rows=tuple(_inputs_for_dim(d, seed=s) for d, s in ((2, 1), (32, 2), (512, 3))),
+        selection_mode=mode,
+    )
+    fig = build_multidim_vis_figure(inputs)
+    all_text = " ".join(t.get_text() for t in fig.texts)
+    assert mode in all_text
+
+
+def test_multidim_vis_caption_reports_per_dim_ari() -> None:
+    """Each row's ARI appears in the caption as 'd={dim} = {ari:.3f}'."""
+    inputs = MultiDimVisInputs(
+        rows=(
+            _inputs_for_dim(2, seed=1, ari=0.999),
+            _inputs_for_dim(32, seed=2, ari=0.985),
+            _inputs_for_dim(512, seed=3, ari=0.971),
+        ),
+        selection_mode="test",
+    )
+    fig = build_multidim_vis_figure(inputs)
+    all_text = " ".join(t.get_text() for t in fig.texts)
+    assert "d=2 = 0.999" in all_text
+    assert "d=32 = 0.985" in all_text
+    assert "d=512 = 0.971" in all_text
+
+
+def test_multidim_vis_deterministic_savefig() -> None:
+    """Two calls with the same MultiDimVisInputs produce byte-identical PNGs."""
+    rows = tuple(_inputs_for_dim(d, seed=s) for d, s in ((2, 10), (32, 11), (512, 12)))
+    inputs = MultiDimVisInputs(rows=rows, selection_mode="test")
+    fig_a = build_multidim_vis_figure(inputs)
+    fig_b = build_multidim_vis_figure(inputs)
+    png_a = _png_bytes(fig_a)
+    png_b = _png_bytes(fig_b)
+    assert hashlib.sha256(png_a).hexdigest() == hashlib.sha256(png_b).hexdigest(), (
+        "multi-dim vis PNG is non-deterministic across identical calls"
+    )
+
+
+def test_multidim_vis_palette_is_cb_safe() -> None:
+    """Each row still routes cluster ids through the CB-safe palette."""
+    from matplotlib.collections import PathCollection
+
+    inputs = MultiDimVisInputs(
+        rows=tuple(_inputs_for_dim(d, seed=s) for d, s in ((2, 5), (32, 6), (512, 7))),
+        selection_mode="test",
+    )
+    fig = build_multidim_vis_figure(inputs)
+    # Extract RGBA colors of the ground-truth scatter for each row, and
+    # require every non-noise color to land in the palette's dispatch
+    # (either the CB-safe 20-color set or the HSV fallback).
+    palette_20 = {
+        _rgba_hex(c)
+        for c in (
+            "#0072B2",
+            "#009E73",
+            "#D55E00",
+            "#CC79A7",
+            "#56B4E9",
+            "#E69F00",
+            "#F0E442",
+        )
+    }
+    for row_idx, row in enumerate(inputs.rows):
+        gt_ax = fig.axes[row_idx * 4]
+        scatters = [c for c in gt_ax.collections if isinstance(c, PathCollection)]
+        assert scatters, f"row {row_idx} gt panel missing PathCollection"
+        # k=4 in _inputs_for_dim, so every color should come from the
+        # first few CB-safe swatches. Ensure at least one match.
+        colors = {tuple(float(v) for v in c) for c in scatters[0].get_facecolors()}
+        assert any(c in palette_20 for c in colors), (
+            f"row {row_idx} colors {colors} not in CB-safe prefix"
+        )

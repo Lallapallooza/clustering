@@ -407,6 +407,89 @@ def _draw_caption(
         )
 
 
+def _draw_multidim_header(
+    fig: Figure,
+    *,
+    algo: str,
+    recipe_name: str,
+    non_njobs_params: tuple[tuple[str, Any], ...],
+    selection_mode: str,
+    header_top: float,
+) -> None:
+    """Header for a multi-dim vis figure: title + params + selection mode.
+
+    ``header_top`` is the normalized y in figure coords where the title sits;
+    lines are offset downward from it. Keeping the offsets fixed means taller
+    figures (more rows) do not stretch the header block vertically.
+    """
+    if algo == recipe_name:
+        title_text = f"{algo}  |  {_format_non_njobs_params(non_njobs_params)}".rstrip(
+            "  |  "
+        )
+    else:
+        title_text = (
+            f"{algo}  |  {recipe_name}  |  {_format_non_njobs_params(non_njobs_params)}"
+        ).rstrip("  |  ")
+    fig.text(
+        0.02,
+        header_top,
+        title_text,
+        fontsize=12.5,
+        fontweight="bold",
+        color=_TEXT,
+        ha="left",
+        va="top",
+    )
+    fig.text(
+        0.98,
+        header_top,
+        selection_mode,
+        fontsize=9.5,
+        color=_MUTED,
+        ha="right",
+        va="top",
+    )
+
+
+def _draw_multidim_caption(
+    fig: Figure,
+    *,
+    per_dim_ari: tuple[tuple[int, float], ...],
+    title_meta: RunMetadata,
+    bench_filename: str | None,
+    caption_bottom: float,
+) -> None:
+    """Caption block for a multi-dim figure: per-dim ARI + provenance.
+
+    ``caption_bottom`` anchors the primary caption row in figure coords; the
+    optional ``bench:`` cross-reference sits just below it.
+    """
+    ari_parts = ", ".join(f"d={dim} = {ari:.3f}" for dim, ari in per_dim_ari)
+    caption = (
+        f"ARI per dim: {ari_parts}    |    git  {title_meta.git_sha}    |    "
+        f"{title_meta.machine}    |    {title_meta.timestamp_iso}"
+    )
+    fig.text(
+        0.5,
+        caption_bottom,
+        caption,
+        fontsize=9.0,
+        color=_MUTED,
+        ha="center",
+        va="bottom",
+    )
+    if bench_filename:
+        fig.text(
+            0.5,
+            caption_bottom - 0.015,
+            f"bench: {bench_filename}",
+            fontsize=8.5,
+            color=_MUTED,
+            ha="center",
+            va="bottom",
+        )
+
+
 # -----------------------------------------------------------------------------
 # Panel renderers
 # -----------------------------------------------------------------------------
@@ -538,15 +621,24 @@ def _render_disagreement_panel(
 # -----------------------------------------------------------------------------
 
 
-def build_vis_figure(inputs: VisInputs) -> Figure:
-    """Pure function: build and return a Matplotlib Figure. No I/O."""
-    projection = inputs.projection_2d
-    if projection.size == 0 or not np.isfinite(projection).all():
-        return build_empty_vis_figure(
-            inputs.algo, "projection is empty or contains non-finite values"
-        )
+def _render_vis_row(
+    *,
+    ax_gt: Any,
+    ax_ours: Any,
+    ax_theirs: Any,
+    ax_disagree: Any,
+    inputs: VisInputs,
+    show_axis_labels: bool,
+    panel_titles: tuple[str, str, str, str],
+) -> None:
+    """Render one row of 4 vis panels into the supplied axes.
 
-    # Align pred-space ids so panel colors are consistent post-Hungarian.
+    Factors out the per-cell rendering that ``build_vis_figure`` and
+    ``build_multidim_vis_figure`` both need. Hungarian alignment, the shared
+    palette, limits, subsample indices, and the disagreement mask are all
+    derived from ``inputs`` alone so each row is independently valid.
+    """
+    projection = inputs.projection_2d
     aligned_ours, _ = align_to_ground_truth(inputs.gt_labels, inputs.ours_labels)
     if inputs.theirs_labels is not None:
         aligned_theirs, _ = align_to_ground_truth(
@@ -555,8 +647,6 @@ def build_vis_figure(inputs: VisInputs) -> Figure:
     else:
         aligned_theirs = None
 
-    # k_effective is over the UNION of the three (or two, when theirs is None)
-    # label arrays so the palette covers every id any panel will color.
     if aligned_theirs is not None:
         k = _effective_k(inputs.gt_labels, aligned_ours, aligned_theirs)
     else:
@@ -567,13 +657,58 @@ def build_vis_figure(inputs: VisInputs) -> Figure:
     subsample = _subsample_indices(
         projection.shape[0], inputs.subsample_seed, inputs.max_scatter_points
     )
+    disagree = _disagreement_mask(inputs.gt_labels, aligned_ours, aligned_theirs)
 
-    # Disagreement mask runs over the FULL point set (not subsample).
-    disagree = _disagreement_mask(
-        inputs.gt_labels,
-        aligned_ours,
-        aligned_theirs,
+    _render_scatter_panel(
+        ax_gt,
+        title=panel_titles[0],
+        projection=projection,
+        labels=inputs.gt_labels,
+        subsample=subsample,
+        palette=palette,
+        xlim=xlim,
+        ylim=ylim,
+        show_axis_labels=show_axis_labels,
     )
+    _render_scatter_panel(
+        ax_ours,
+        title=panel_titles[1],
+        projection=projection,
+        labels=aligned_ours,
+        subsample=subsample,
+        palette=palette,
+        xlim=xlim,
+        ylim=ylim,
+    )
+    if aligned_theirs is not None:
+        _render_scatter_panel(
+            ax_theirs,
+            title=panel_titles[2],
+            projection=projection,
+            labels=aligned_theirs,
+            subsample=subsample,
+            palette=palette,
+            xlim=xlim,
+            ylim=ylim,
+        )
+    else:
+        _render_theirs_placeholder(ax_theirs)
+    _render_disagreement_panel(
+        ax_disagree,
+        projection=projection,
+        disagree_mask=disagree,
+        xlim=xlim,
+        ylim=ylim,
+    )
+
+
+def build_vis_figure(inputs: VisInputs) -> Figure:
+    """Pure function: build and return a Matplotlib Figure. No I/O."""
+    projection = inputs.projection_2d
+    if projection.size == 0 or not np.isfinite(projection).all():
+        return build_empty_vis_figure(
+            inputs.algo, "projection is empty or contains non-finite values"
+        )
 
     # 1x4 horizontal layout: ground truth, ours, theirs, disagreement. Figure
     # dimensions scale with the panel count so each panel keeps a consistent
@@ -597,46 +732,14 @@ def build_vis_figure(inputs: VisInputs) -> Figure:
     ax_theirs = fig.add_subplot(gs[0, 2])
     ax_disagree = fig.add_subplot(gs[0, 3])
 
-    _render_scatter_panel(
-        ax_gt,
-        title="Ground truth",
-        projection=projection,
-        labels=inputs.gt_labels,
-        subsample=subsample,
-        palette=palette,
-        xlim=xlim,
-        ylim=ylim,
+    _render_vis_row(
+        ax_gt=ax_gt,
+        ax_ours=ax_ours,
+        ax_theirs=ax_theirs,
+        ax_disagree=ax_disagree,
+        inputs=inputs,
         show_axis_labels=True,
-    )
-    _render_scatter_panel(
-        ax_ours,
-        title="Ours",
-        projection=projection,
-        labels=aligned_ours,
-        subsample=subsample,
-        palette=palette,
-        xlim=xlim,
-        ylim=ylim,
-    )
-    if aligned_theirs is not None:
-        _render_scatter_panel(
-            ax_theirs,
-            title="Theirs",
-            projection=projection,
-            labels=aligned_theirs,
-            subsample=subsample,
-            palette=palette,
-            xlim=xlim,
-            ylim=ylim,
-        )
-    else:
-        _render_theirs_placeholder(ax_theirs)
-    _render_disagreement_panel(
-        ax_disagree,
-        projection=projection,
-        disagree_mask=disagree,
-        xlim=xlim,
-        ylim=ylim,
+        panel_titles=("Ground truth", "Ours", "Theirs", "Disagreement"),
     )
 
     _draw_caption(
@@ -650,6 +753,136 @@ def build_vis_figure(inputs: VisInputs) -> Figure:
         non_njobs_params=inputs.non_njobs_params,
         title_meta=inputs.title_meta,
         bench_filename=inputs.bench_filename,
+    )
+    return fig
+
+
+@dataclass(frozen=True, slots=True)
+class MultiDimVisInputs:
+    """Bundle of :class:`VisInputs` for multi-dim vis rendering.
+
+    Each element of ``rows`` is the full payload for one dim's row of four
+    panels. The per-row :class:`VisInputs` already carries its own ``dims``,
+    ``size``, ``n_jobs``, and ``ari``; ``selection_mode`` is a human-readable
+    string (e.g. ``"3 representative dims (low / mid / high)"``) displayed in
+    the figure header so readers know how the dims shown were picked.
+
+    All rows must agree on ``algo``, ``recipe_name``, ``non_njobs_params``,
+    ``title_meta``, and ``bench_filename`` -- those drive the figure-level
+    header/caption that the rows share. Per-dim arrays (labels, projection)
+    are independent.
+    """
+
+    rows: tuple[VisInputs, ...]
+    selection_mode: str
+
+
+# Layout constants for the multi-dim figure. Height scales linearly with the
+# row count; header/caption bands stay fixed in absolute inches so they do
+# not stretch as rows are added.
+_MULTIDIM_ROW_HEIGHT_IN = 4.4
+_MULTIDIM_HEADER_IN = 0.9
+_MULTIDIM_CAPTION_IN = 0.7
+_MULTIDIM_WIDTH_IN = 14.4
+_MULTIDIM_MAX_ROWS = 10
+
+
+def build_multidim_vis_figure(inputs: MultiDimVisInputs) -> Figure:
+    """Render a multi-row vis figure with one row of 4 panels per dim.
+
+    Each row gets its own :class:`VisInputs` via ``inputs.rows``. The figure
+    height scales with the row count so every panel keeps the same aspect
+    ratio; a single-row payload produces a figure visually equivalent to
+    :func:`build_vis_figure` but with a dim-aware header and per-dim ARI in
+    the caption. An empty ``rows`` tuple is rejected with ``ValueError``.
+
+    When any row's projection is empty or contains non-finite values, the
+    figure falls back to :func:`build_empty_vis_figure` for the whole figure.
+    """
+    if not inputs.rows:
+        raise ValueError("MultiDimVisInputs.rows must be non-empty")
+    for row in inputs.rows:
+        proj = row.projection_2d
+        if proj.size == 0 or not np.isfinite(proj).all():
+            return build_empty_vis_figure(
+                row.algo,
+                f"projection for d={row.dims} is empty or contains non-finite values",
+            )
+
+    n_rows = len(inputs.rows)
+    fig_h = (
+        n_rows * _MULTIDIM_ROW_HEIGHT_IN + _MULTIDIM_HEADER_IN + _MULTIDIM_CAPTION_IN
+    )
+    fig = Figure(figsize=(_MULTIDIM_WIDTH_IN, fig_h), facecolor="white")
+    FigureCanvasAgg(fig)
+
+    # Normalize header/caption bands to figure coords; panel grid occupies
+    # the middle band. Using absolute-inch offsets keeps the header and
+    # caption at the same visual weight regardless of row count.
+    header_top_abs = _MULTIDIM_HEADER_IN
+    caption_h_abs = _MULTIDIM_CAPTION_IN
+    top_frac = 1.0 - (0.35 * _MULTIDIM_HEADER_IN) / fig_h
+    # The gridspec's top reserves enough room for row-level titles + header;
+    # bottom reserves the caption band.
+    panel_top = 1.0 - header_top_abs / fig_h
+    panel_bottom = caption_h_abs / fig_h
+
+    gs = fig.add_gridspec(
+        nrows=n_rows,
+        ncols=4,
+        left=0.06,
+        right=0.98,
+        top=panel_top,
+        bottom=panel_bottom,
+        wspace=0.12,
+        hspace=0.35,
+    )
+
+    first = inputs.rows[0]
+    # Shared header: algo + params + selection mode. Positioned at the top of
+    # the figure. ``top_frac`` is a sliver above ``panel_top`` so the header
+    # text does not overlap the first row's titles.
+    _draw_multidim_header(
+        fig,
+        algo=first.algo,
+        recipe_name=first.recipe_name,
+        non_njobs_params=first.non_njobs_params,
+        selection_mode=inputs.selection_mode,
+        header_top=top_frac,
+    )
+
+    for row_idx, row in enumerate(inputs.rows):
+        ax_gt = fig.add_subplot(gs[row_idx, 0])
+        ax_ours = fig.add_subplot(gs[row_idx, 1])
+        ax_theirs = fig.add_subplot(gs[row_idx, 2])
+        ax_disagree = fig.add_subplot(gs[row_idx, 3])
+        is_last_row = row_idx == n_rows - 1
+        # Row titles prefix the dim so the reader can orient quickly; the
+        # disagreement panel carries the per-dim n + n_jobs so the reader
+        # sees the exact cell that was rendered.
+        panel_titles = (
+            f"d={row.dims}  Ground truth",
+            "Ours",
+            "Theirs",
+            f"Disagreement  (n={row.size}, n_jobs={row.n_jobs})",
+        )
+        _render_vis_row(
+            ax_gt=ax_gt,
+            ax_ours=ax_ours,
+            ax_theirs=ax_theirs,
+            ax_disagree=ax_disagree,
+            inputs=row,
+            show_axis_labels=is_last_row,
+            panel_titles=panel_titles,
+        )
+
+    per_dim_ari = tuple((row.dims, float(row.ari)) for row in inputs.rows)
+    _draw_multidim_caption(
+        fig,
+        per_dim_ari=per_dim_ari,
+        title_meta=first.title_meta,
+        bench_filename=first.bench_filename,
+        caption_bottom=0.35 * _MULTIDIM_CAPTION_IN / fig_h + 0.005,
     )
     return fig
 
@@ -698,7 +931,9 @@ def _disagreement_mask(
 
 
 __all__ = [
+    "MultiDimVisInputs",
     "VisInputs",
     "build_empty_vis_figure",
+    "build_multidim_vis_figure",
     "build_vis_figure",
 ]
