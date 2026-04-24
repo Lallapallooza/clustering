@@ -52,7 +52,7 @@ def _meta() -> RunMetadata:
 
 
 def _stub_run_one_factory(*, ari: float = 0.99, ours_peak_mb: float = 50.0):
-    def _stub_run_one(recipe, size, dims=None, params=None):
+    def _stub_run_one(recipe, size, dims=None, params=None, ours_only=False):
         effective_params = (
             dict(params) if params is not None else dict(recipe.default_params)
         )
