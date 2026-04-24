@@ -74,12 +74,14 @@ def _grid_inputs(
     extra_params: tuple[tuple[str, Any], ...] = (),
     drop: set[tuple[int, int, int]] | None = None,
     make_zero_ours: set[tuple[int, int, int]] | None = None,
+    make_sentinel: set[tuple[int, int, int]] | None = None,
     ari_threshold: float | None = 0.85,
     dataset_spec: str = "blobs centers=20",
     algo: str = "dbscan",
 ) -> BuildFigureInputs:
     drop = drop or set()
     make_zero_ours = make_zero_ours or set()
+    make_sentinel = make_sentinel or set()
     results: list[RunResult] = []
     for d in dims:
         for s in sizes:
@@ -90,6 +92,13 @@ def _grid_inputs(
                 if (d, s, nj) in make_zero_ours:
                     kwargs["ours_median_ms"] = 0.0
                     kwargs["ours_peak_mb"] = 0.0
+                if (d, s, nj) in make_sentinel:
+                    # Exact sentinel tuple the runner writes under --ours-only:
+                    # theirs_median_ms=0, theirs_peak_mb=0, ari=1.0, speedup=0.
+                    kwargs["theirs_median_ms"] = 0.0
+                    kwargs["theirs_peak_mb"] = 0.0
+                    kwargs["ari"] = 1.0
+                    kwargs["speedup"] = 0.0
                 results.append(
                     _make_result(
                         dims=d,
@@ -189,8 +198,9 @@ def test_figure_has_ours_and_theirs_line_per_njobs_per_axes() -> None:
 
 def test_fill_between_marks_win_region() -> None:
     # Every (size, dim, n_jobs) has ours < theirs (default fixture has
-    # ours=10ms, theirs=20ms), so every facet should produce at least one
-    # PolyCollection from fill_between per n_jobs.
+    # ours=10ms, theirs=20ms), so every facet renders a SINGLE facet-level
+    # win fill (green). Per-n_jobs fills were replaced with one envelope fill
+    # per facet because the per-n_jobs variant stacked into unreadable bands.
     inputs = _grid_inputs(
         dims=(2, 8),
         sizes=(1000, 5000, 10000),
@@ -199,8 +209,8 @@ def test_fill_between_marks_win_region() -> None:
     fig = build_figure(inputs)
     for ax in fig.axes:
         polys = [c for c in ax.collections if isinstance(c, PolyCollection)]
-        # One PolyCollection per n_jobs line.
-        assert len(polys) >= 2
+        # Exactly one PolyCollection per facet: the win envelope fill.
+        assert len(polys) == 1
 
 
 def test_viridis_color_ordering() -> None:
@@ -594,3 +604,226 @@ def test_figure_savefig_produces_nonempty_png(tmp_path: Any) -> None:
     fig.savefig(out)
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+def test_fully_ours_only_facet_renders_ours_only_annotation() -> None:
+    # Every row is the --ours-only sentinel tuple. The facet must drop the
+    # dashed theirs curve, the fill band, and the endpoint ratio label, and
+    # instead carry exactly one "ours-only" text annotation per facet.
+    sizes = (1000, 5000, 10000)
+    n_jobs = (1, 4)
+    dims = (2, 8)
+    make_sentinel = {(d, s, nj) for d in dims for s in sizes for nj in n_jobs}
+    inputs = _grid_inputs(
+        dims=dims,
+        sizes=sizes,
+        n_jobs=n_jobs,
+        make_sentinel=make_sentinel,
+    )
+    fig = build_figure(inputs)
+    for ax in fig.axes:
+        # No dashed theirs lines at all.
+        assert _dashed_lines(ax) == []
+        # No win-region fills.
+        polys = [c for c in ax.collections if isinstance(c, PolyCollection)]
+        assert polys == []
+        # Exactly one annotation: the "ours-only" placeholder. No ratio
+        # labels appear.
+        assert len(ax.texts) == 1
+        only = ax.texts[0].get_text().lower()
+        assert "ours-only" in only
+        # Solid ours lines still render normally, one per n_jobs.
+        assert len(_solid_lines(ax)) == len(n_jobs)
+
+
+def test_row_mixed_theirs_has_nan_gap_at_sentinel() -> None:
+    # Within a single (dim, n_jobs), some sizes are sentinel and others are
+    # real. The theirs dashed line must carry NaN at sentinel x-positions
+    # while the ours solid line remains finite there.
+    dims = (2,)
+    n_jobs = (1, 4)
+    sizes = (1000, 5000, 10000)
+    # Make the MIDDLE size a sentinel for nj=1 only, leaving the rightmost
+    # size as a real row so the endpoint label still renders for that n_jobs.
+    # For nj=4 make the RIGHTMOST size sentinel so its endpoint label must
+    # be suppressed.
+    make_sentinel = {(2, 5000, 1), (2, 10000, 4)}
+    inputs = _grid_inputs(
+        dims=dims,
+        sizes=sizes,
+        n_jobs=n_jobs,
+        make_sentinel=make_sentinel,
+    )
+    fig = build_figure(inputs)
+    time_ax = fig.axes[0]
+    # Ours lines: both finite everywhere.
+    for ln in _solid_lines(time_ax):
+        ys = list(ln.get_ydata())
+        for y in ys:
+            assert math.isfinite(y)
+    # Dashed line for nj=1: NaN at idx of the 5000 sentinel, finite at 1000
+    # and 10000.
+    dashed_nj1 = next(
+        ln for ln in _dashed_lines(time_ax) if ln.get_label() == "theirs n_jobs=1"
+    )
+    xs1 = list(dashed_nj1.get_xdata())
+    ys1 = list(dashed_nj1.get_ydata())
+    assert xs1 == list(sizes)
+    # Sentinel at x=5000 -> NaN; real rows at 1000 and 10000 -> finite.
+    idx_5000 = xs1.index(5000)
+    idx_10000 = xs1.index(10000)
+    assert math.isnan(ys1[idx_5000])
+    assert math.isfinite(ys1[idx_10000])
+    # Dashed line for nj=4: NaN at the rightmost x, endpoint label suppressed.
+    dashed_nj4 = next(
+        ln for ln in _dashed_lines(time_ax) if ln.get_label() == "theirs n_jobs=4"
+    )
+    xs4 = list(dashed_nj4.get_xdata())
+    ys4 = list(dashed_nj4.get_ydata())
+    idx_last4 = xs4.index(10000)
+    assert math.isnan(ys4[idx_last4])
+    # Endpoint ratio labels: one for nj=1 (real rightmost), zero for nj=4
+    # (rightmost is sentinel).
+    ratio_pattern = re.compile(r"^(\d+(\.\d+)?x|n/a)$")
+    ratio_labels = [t for t in time_ax.texts if ratio_pattern.match(t.get_text())]
+    assert len(ratio_labels) == 1
+
+
+def test_column_mixed_dims_handled() -> None:
+    # Some dims are fully ours-only (all sizes x n_jobs are sentinel). Others
+    # are fully matched. The ours-only dim renders the annotation; the matched
+    # dim renders normal dashed curves.
+    sizes = (1000, 5000)
+    n_jobs = (1, 4)
+    # Dim 2: fully matched (no sentinel). Dim 8: fully ours-only.
+    make_sentinel = {(8, s, nj) for s in sizes for nj in n_jobs}
+    inputs = _grid_inputs(
+        dims=(2, 8),
+        sizes=sizes,
+        n_jobs=n_jobs,
+        make_sentinel=make_sentinel,
+    )
+    fig = build_figure(inputs)
+    # Axes layout: [time_dim2, time_dim8, mem_dim2, mem_dim8].
+    time_dim2 = fig.axes[0]
+    time_dim8 = fig.axes[1]
+    mem_dim2 = fig.axes[2]
+    mem_dim8 = fig.axes[3]
+    # Matched dim: dashed curves present, endpoint labels present.
+    assert len(_dashed_lines(time_dim2)) == len(n_jobs)
+    assert len(_dashed_lines(mem_dim2)) == len(n_jobs)
+    for ax in (time_dim2, mem_dim2):
+        ratio_pattern = re.compile(r"^(\d+(\.\d+)?x|n/a)$")
+        assert any(ratio_pattern.match(t.get_text()) for t in ax.texts)
+    # Ours-only dim: no dashed curves, annotation present.
+    for ax in (time_dim8, mem_dim8):
+        assert _dashed_lines(ax) == []
+        assert len(ax.texts) == 1
+        assert "ours-only" in ax.texts[0].get_text().lower()
+
+
+def test_sentinel_predicate_requires_all_four_zeros() -> None:
+    # A row with only one or two sentinel fields is a REAL row, not a
+    # sentinel. Here theirs_median_ms=0 but theirs_peak_mb, ari, speedup are
+    # all non-sentinel values, so the predicate must NOT match.
+    results = [
+        _make_result(
+            size=1000,
+            dims=2,
+            n_jobs=1,
+            ours_median_ms=10.0,
+            theirs_median_ms=0.0,  # only one of the four matches
+            ours_peak_mb=40.0,
+            theirs_peak_mb=5.0,  # non-zero
+            ari=0.7,  # not 1.0
+            speedup=3.0,  # not 0.0
+        ),
+        _make_result(
+            size=5000,
+            dims=2,
+            n_jobs=1,
+            ours_median_ms=20.0,
+            theirs_median_ms=80.0,
+            ours_peak_mb=80.0,
+            theirs_peak_mb=200.0,
+            ari=0.9,
+            speedup=4.0,
+        ),
+    ]
+    inputs = BuildFigureInputs(
+        algo="dbscan",
+        partition_results=tuple(results),
+        dims_sorted=(2,),
+        title_meta=_meta(),
+        non_njobs_params=(),
+        dataset_spec="",
+        ari_threshold=None,
+    )
+    fig = build_figure(inputs)
+    time_ax = fig.axes[0]
+    # Facet treated as matched: dashed curve present, no "ours-only" annotation.
+    assert len(_dashed_lines(time_ax)) == 1
+    for txt in time_ax.texts:
+        assert "ours-only" not in txt.get_text().lower()
+    # Memory axis: theirs_peak_mb=5.0 at size=1000 is a real finite value, so
+    # the dashed mem curve's ydata at size=1000 is NOT NaN -- the sentinel
+    # predicate didn't match.
+    mem_ax = fig.axes[1]
+    dashed_mem = _dashed_lines(mem_ax)[0]
+    xs_mem = list(dashed_mem.get_xdata())
+    ys_mem = list(dashed_mem.get_ydata())
+    idx_1000 = xs_mem.index(1000)
+    assert math.isfinite(ys_mem[idx_1000])
+
+
+def test_sentinel_check_is_exact_float_equality() -> None:
+    # A row with theirs_median_ms=0.0000001 is NOT a sentinel -- the predicate
+    # uses exact == on the float, not math.isclose. The 1e-7 value is finite,
+    # positive, and must flow through as a real point.
+    results = [
+        _make_result(
+            size=1000,
+            dims=2,
+            n_jobs=1,
+            ours_median_ms=10.0,
+            theirs_median_ms=0.0000001,  # NOT exactly 0.0
+            ours_peak_mb=40.0,
+            theirs_peak_mb=0.0,
+            ari=1.0,
+            speedup=0.0,
+        ),
+        _make_result(
+            size=5000,
+            dims=2,
+            n_jobs=1,
+            ours_median_ms=20.0,
+            theirs_median_ms=40.0,
+            ours_peak_mb=80.0,
+            theirs_peak_mb=160.0,
+            ari=0.99,
+            speedup=2.0,
+        ),
+    ]
+    inputs = BuildFigureInputs(
+        algo="dbscan",
+        partition_results=tuple(results),
+        dims_sorted=(2,),
+        title_meta=_meta(),
+        non_njobs_params=(),
+        dataset_spec="",
+        ari_threshold=None,
+    )
+    fig = build_figure(inputs)
+    time_ax = fig.axes[0]
+    # Dashed theirs line exists (the sentinel predicate did not fire).
+    dashed = _dashed_lines(time_ax)
+    assert len(dashed) == 1
+    # No "ours-only" annotation, because row is not a sentinel.
+    for txt in time_ax.texts:
+        assert "ours-only" not in txt.get_text().lower()
+    xs = list(dashed[0].get_xdata())
+    ys = list(dashed[0].get_ydata())
+    # The 1e-7 value is finite and positive, so _to_positive_or_nan keeps it.
+    idx_1000 = xs.index(1000)
+    assert math.isfinite(ys[idx_1000])
+    assert ys[idx_1000] == 0.0000001

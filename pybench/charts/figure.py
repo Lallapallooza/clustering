@@ -5,12 +5,13 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from matplotlib import colormaps
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.colors import to_rgba
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedLocator, FuncFormatter, NullLocator
 
+from pybench.charts.data import payload_hash6, slug_from_params
 from pybench.charts.meta import RunMetadata
 from pybench.recipe import RunResult
 
@@ -26,14 +27,30 @@ class BuildFigureInputs:
     ari_threshold: float | None
 
 
-# Paper-grade palette: near-black for headings, warm grey chrome, desaturated
-# green for the win-region shading. Data colors come from a widened viridis
-# slice for strong contrast between series (see _series_colors).
+# Paper-grade palette: near-black for headings, warm grey chrome. Data colors
+# come from the Okabe-Ito colourblind-safe set (see _series_colors). Win and
+# loss fills use Paul Tol's muted pair (#117733 / #CC6677) so they read as
+# distinct hue-against-hue even under deuteranopia or protanopia.
 _TEXT = "#111419"
 _MUTED = "#4E5866"
 _AXIS = "#2A313A"
 _GRID = "#E4E8ED"
-_BAND_WIN = "#3EA06E"
+_BAND_WIN = "#117733"
+_BAND_LOSS = "#CC6677"
+
+# Okabe-Ito palette, sorted by rec-601 luminance (dark to light). Callers that
+# want monotonic dark-to-light adjacency (for example per-n_jobs series where
+# luminance order cues "this series is darker = lower parallelism") sample a
+# leading prefix of this list. Drops "black" to keep contrast with axis chrome.
+_OKABE_ITO_BY_LUMA: tuple[str, ...] = (
+    "#0072B2",  # blue          (lum 0.342)
+    "#009E73",  # bluish green  (lum 0.415)
+    "#D55E00",  # vermillion    (lum 0.466)
+    "#CC79A7",  # reddish purple (lum 0.592)
+    "#56B4E9",  # sky blue      (lum 0.619)
+    "#E69F00",  # orange        (lum 0.636)
+    "#F0E442",  # yellow        (lum 0.836)
+)
 
 # Decade anchors used to pick absolute log-scale ticks. _pick_abs_ticks walks
 # the decade lattice and keeps ticks that land inside the facet's y-range. We
@@ -58,10 +75,10 @@ _MEM_TICK_LATTICE: tuple[float, ...] = (
     1.0,
     10.0,
     100.0,
-    1_000.0,
-    10_000.0,
-    100_000.0,
-    1_000_000.0,
+    1_024.0,
+    10_240.0,
+    102_400.0,
+    1_024_000.0,
 )
 
 
@@ -160,9 +177,21 @@ def _get_n_jobs(r: RunResult) -> int:
 
 
 def _format_non_njobs_params(pairs: tuple[tuple[str, Any], ...]) -> str:
+    """Render the non-n_jobs params as a separator-joined summary.
+
+    ``n_clusters`` is relabelled to ``k`` in the header so the reader sees the
+    k-means / HDBSCAN convention directly; the stored key stays
+    ``n_clusters`` for compatibility with the JSON schema.
+    """
     if not pairs:
         return ""
-    return "  |  ".join(f"{k}={v}" for k, v in pairs)
+
+    def _fmt_pair(k: str, v: Any) -> str:
+        if k == "n_clusters":
+            return f"k={v}"
+        return f"{k}={v}"
+
+    return "    |    ".join(_fmt_pair(k, v) for k, v in pairs)
 
 
 def _metric_fields(metric: str) -> tuple[str, str]:
@@ -171,30 +200,60 @@ def _metric_fields(metric: str) -> tuple[str, str]:
     return ("ours_peak_mb", "theirs_peak_mb")
 
 
+def is_ours_only_sentinel(result: RunResult) -> bool:
+    """Return ``True`` if ``result`` is the ``--ours-only`` sentinel tuple.
+
+    Public predicate consumed by the CLI (to keep vis regen on the
+    ``--ours-only`` branch) and by this module's plotting (to suppress the
+    theirs curve, fill band, and endpoint ratio label at sentinel rows).
+
+    The runner stores ``theirs_median_ms=0.0, theirs_peak_mb=0.0, ari=1.0,
+    speedup=0.0`` together at a single construct site when ``ours_only`` is
+    true. The check is strict exact equality on all four fields -- a partial
+    match (three of four zeros) is a real row, not a sentinel.
+    """
+    return (
+        result.theirs_median_ms == 0.0
+        and result.theirs_peak_mb == 0.0
+        and result.ari == 1.0
+        and result.speedup == 0.0
+    )
+
+
 def _collect_abs_series(
     results: tuple[RunResult, ...],
     dim: int,
     n_jobs: int,
     metric: str,
-) -> tuple[list[int], list[float], list[float]]:
-    """Return aligned ``(sizes, ours_values, theirs_values)`` for the cell.
+) -> tuple[list[int], list[float], list[float], list[bool]]:
+    """Return aligned ``(sizes, ours_values, theirs_values, sentinel_mask)``.
 
     Values that are not positive and finite are replaced with NaN so matplotlib
     renders broken segments for missing data without the caller thinking about
-    it. The size order is the ascending union of sizes present in the cell.
+    it. ``sentinel_mask[i]`` is ``True`` when the row at ``sizes[i]`` is an
+    ``--ours-only`` sentinel; callers use this to suppress the theirs dashed
+    curve, fill band, and endpoint ratio label at those positions. The size
+    order is the ascending union of sizes present in the cell.
     """
     ours_field, theirs_field = _metric_fields(metric)
-    per_size: dict[int, tuple[float, float]] = {}
+    per_size: dict[int, tuple[float, float, bool]] = {}
     for r in results:
         if r.dims != dim or _get_n_jobs(r) != n_jobs:
             continue
         ours = float(getattr(r, ours_field))
         theirs = float(getattr(r, theirs_field))
-        per_size[r.size] = (ours, theirs)
+        per_size[r.size] = (ours, theirs, is_ours_only_sentinel(r))
     sizes = sorted(per_size.keys())
     ours_ys = [_to_positive_or_nan(per_size[s][0]) for s in sizes]
-    theirs_ys = [_to_positive_or_nan(per_size[s][1]) for s in sizes]
-    return sizes, ours_ys, theirs_ys
+    # Suppress the theirs value at sentinel rows by writing NaN regardless of
+    # the stored 0.0 -- _to_positive_or_nan would already map 0.0 -> NaN, but
+    # the explicit path keeps the coupling to the sentinel predicate obvious.
+    theirs_ys = [
+        math.nan if per_size[s][2] else _to_positive_or_nan(per_size[s][1])
+        for s in sizes
+    ]
+    sentinel_mask = [per_size[s][2] for s in sizes]
+    return sizes, ours_ys, theirs_ys, sentinel_mask
 
 
 def _to_positive_or_nan(v: float) -> float:
@@ -289,20 +348,51 @@ def _plot_one_axes(
     """Plot ours/theirs absolute curves for every n_jobs in ``n_jobs_values``.
 
     One solid Line2D (ours) plus one dashed Line2D (theirs) per n_jobs, sharing
-    the viridis-slice color. ``fill_between`` shades the win region (ours below
-    theirs) at low alpha. Each n_jobs contributes a ratio annotation at the
-    rightmost finite x, vertically fanned so overlapping labels stay legible.
+    the per-series colourblind-safe colour. A single facet-level win fill
+    (green) shades the x-range where ours wins across every n_jobs; a
+    facet-level loss fill (red) shades the x-range where theirs wins across
+    every n_jobs. Per-n_jobs fills are intentionally dropped -- they stacked
+    into unreadable bands at J=3. Each n_jobs contributes a ratio annotation
+    at the rightmost finite x, vertically fanned so overlapping labels stay
+    legible; near-noise-floor ratios render grey/italic so the reader treats
+    them as qualitative.
+
+    ``--ours-only`` sentinel rows suppress the dashed theirs curve and
+    endpoint ratio label at their x-positions. When every row for an n_jobs
+    is a sentinel, the dashed curve and label are omitted. When every row
+    across every n_jobs is a sentinel, the facet carries a single
+    "theirs skipped (ours-only run)" annotation instead.
     """
     all_sizes = _all_sizes_for_dim(results, dim)
     j = len(n_jobs_values)
-    for i, nj in enumerate(n_jobs_values):
-        present_sizes, ours_present, theirs_present = _collect_abs_series(
-            results, dim, nj, metric
+
+    # Compute per-n_jobs presence + sentinel stats once so we can tell "facet
+    # has at least one real theirs curve" from "every n_jobs is fully ours-only".
+    per_nj: list[tuple[list[int], list[float], list[float], list[bool]]] = []
+    facet_has_any_real = False
+    for nj in n_jobs_values:
+        present_sizes, ours_present, theirs_present, sentinel_present = (
+            _collect_abs_series(results, dim, nj, metric)
         )
+        per_nj.append((present_sizes, ours_present, theirs_present, sentinel_present))
+        if present_sizes and not all(sentinel_present):
+            facet_has_any_real = True
+
+    # Per-n_jobs aligned series cache, used both for line plotting and for the
+    # facet-level envelope fill / near-parity detection.
+    aligned: list[tuple[list[int], list[float], list[float], list[bool]]] = []
+
+    for i, nj in enumerate(n_jobs_values):
+        present_sizes, ours_present, theirs_present, sentinel_present = per_nj[i]
+        if not present_sizes:
+            aligned.append(([], [], [], []))
+            continue
         xs, ours_ys = _align_to(all_sizes, present_sizes, ours_present)
         _, theirs_ys = _align_to(all_sizes, present_sizes, theirs_present)
-        if not xs:
-            continue
+        sentinel_by_size = dict(zip(present_sizes, sentinel_present, strict=True))
+        sentinel_ys = [sentinel_by_size.get(s, False) for s in xs]
+        aligned.append((xs, ours_ys, theirs_ys, sentinel_ys))
+        all_sentinel_for_nj = all(sentinel_ys) and len(sentinel_ys) > 0
 
         color = colors[i]
         ax.plot(
@@ -318,42 +408,113 @@ def _plot_one_axes(
             label=f"ours n_jobs={nj}",
             zorder=3,
         )
-        ax.plot(
-            xs,
-            theirs_ys,
-            marker="o",
-            linestyle="--",
-            linewidth=1.8,
-            markersize=5.5,
-            markeredgecolor="white",
-            markeredgewidth=0.9,
-            color=color,
-            label=f"theirs n_jobs={nj}",
-            zorder=2,
-        )
+        if not all_sentinel_for_nj:
+            ax.plot(
+                xs,
+                theirs_ys,
+                marker="o",
+                linestyle="--",
+                linewidth=1.8,
+                markersize=5.5,
+                markeredgecolor="white",
+                markeredgewidth=0.9,
+                color=color,
+                label=f"theirs n_jobs={nj}",
+                zorder=2,
+            )
 
-        # Shade the win region (ours below theirs). Missing-data NaNs drop out
-        # of the mask cleanly so partial curves don't inherit a stray polygon.
-        where_mask = [
-            math.isfinite(o) and math.isfinite(t) and o < t
-            for o, t in zip(ours_ys, theirs_ys, strict=True)
-        ]
-        ax.fill_between(
-            xs,
-            ours_ys,
-            theirs_ys,
-            where=where_mask,
-            interpolate=False,
-            facecolor=_BAND_WIN,
-            edgecolor="none",
-            alpha=0.08,
-            zorder=1,
-        )
+    # Facet-level win/loss fills. For each x in all_sizes, compute the
+    # envelope of ours and theirs across every n_jobs (ignoring sentinel rows
+    # and NaN). A win is "max(ours) < min(theirs)"; a loss is the inverse.
+    # Missing bins drop out of the mask cleanly so partial facets still fill.
+    if all_sizes and facet_has_any_real:
+        win_mask: list[bool] = []
+        loss_mask: list[bool] = []
+        ours_env_max: list[float] = []
+        ours_env_min: list[float] = []
+        theirs_env_max: list[float] = []
+        theirs_env_min: list[float] = []
+        for col in range(len(all_sizes)):
+            ours_col: list[float] = []
+            theirs_col: list[float] = []
+            for _xs, o_ys, t_ys, s_ys in aligned:
+                if not o_ys:
+                    continue
+                if col < len(o_ys) and math.isfinite(o_ys[col]):
+                    ours_col.append(o_ys[col])
+                if col < len(t_ys) and not s_ys[col] and math.isfinite(t_ys[col]):
+                    theirs_col.append(t_ys[col])
+            if ours_col and theirs_col:
+                o_max = max(ours_col)
+                o_min = min(ours_col)
+                t_max = max(theirs_col)
+                t_min = min(theirs_col)
+                ours_env_max.append(o_max)
+                ours_env_min.append(o_min)
+                theirs_env_max.append(t_max)
+                theirs_env_min.append(t_min)
+                win_mask.append(o_max < t_min)
+                loss_mask.append(o_min > t_max)
+            else:
+                ours_env_max.append(math.nan)
+                ours_env_min.append(math.nan)
+                theirs_env_max.append(math.nan)
+                theirs_env_min.append(math.nan)
+                win_mask.append(False)
+                loss_mask.append(False)
+        if any(win_mask):
+            ax.fill_between(
+                all_sizes,
+                ours_env_max,
+                theirs_env_min,
+                where=win_mask,
+                interpolate=False,
+                facecolor=_BAND_WIN,
+                edgecolor="none",
+                alpha=0.08,
+                zorder=1,
+            )
+        if any(loss_mask):
+            ax.fill_between(
+                all_sizes,
+                theirs_env_max,
+                ours_env_min,
+                where=loss_mask,
+                interpolate=False,
+                facecolor=_BAND_LOSS,
+                edgecolor="none",
+                alpha=0.08,
+                zorder=1,
+            )
 
-        # Endpoint ratio label: take the last position where both sides are
-        # finite, fan vertically so labels across n_jobs don't overlap.
+    # Endpoint ratio labels, fanned vertically so adjacent n_jobs labels stay
+    # legible at default figure width. The fan factor was widened from 1.0 to
+    # 1.8 per fontsize because three n_jobs lines at the same rightmost x
+    # collided at the old spacing. Near-noise-floor ratios render italic and
+    # muted so the eye treats them as qualitative.
+    near_parity_seen = False
+    for i, nj in enumerate(n_jobs_values):
+        xs, ours_ys, theirs_ys, sentinel_ys = aligned[i]
+        if not xs:
+            continue
+        all_sentinel_for_nj = all(sentinel_ys) and len(sentinel_ys) > 0
+        if all_sentinel_for_nj:
+            continue
+        # Track near-parity (any finite column within 1% of theirs) for a
+        # single facet-level annotation below.
+        for o, t in zip(ours_ys, theirs_ys, strict=True):
+            if math.isfinite(o) and o > 0 and math.isfinite(t) and t > 0:
+                if abs(t / o - 1.0) < 0.01:
+                    near_parity_seen = True
+                    break
+
         rightmost_idx = _rightmost_matched_index(ours_ys, theirs_ys)
-        if rightmost_idx is None:
+        last_present_is_sentinel = bool(sentinel_ys) and sentinel_ys[-1]
+        if (
+            rightmost_idx is None
+            or sentinel_ys[rightmost_idx]
+            or last_present_is_sentinel
+        ):
             continue
         x_pt = xs[rightmost_idx]
         o = ours_ys[rightmost_idx]
@@ -361,17 +522,60 @@ def _plot_one_axes(
         ratio = t / o if math.isfinite(o) and o > 0 and math.isfinite(t) else math.nan
         label = format_ratio_label(ratio)
         fontsize = 9.5
-        y_offset_pt = fontsize * (i - (j - 1) / 2.0)
+        # Fan factor 1.8 keeps the three-n_jobs case clear at paper width; the
+        # older factor of 1.0 stacked labels on the rightmost x.
+        y_offset_pt = 1.8 * fontsize * (i - (j - 1) / 2.0)
+        is_near_noise = (
+            metric == "time"
+            and math.isfinite(ratio)
+            and abs(ratio - 1.0) < 0.2
+            and (o < 1.0 or t < 1.0)
+        )
+        color = colors[i]
+        # Place labels just inside the plot area (negative x offset) so three
+        # fanned labels at a wide figure width don't clip the right frame.
         ax.annotate(
             label,
             xy=(x_pt, o),
-            xytext=(6, y_offset_pt),
+            xytext=(-6, y_offset_pt),
             textcoords="offset points",
             fontsize=fontsize,
-            color=color,
-            ha="left",
+            color=_MUTED if is_near_noise else color,
+            fontstyle="italic" if is_near_noise else "normal",
+            ha="right",
             va="center",
             zorder=4,
+        )
+
+    # Single facet-level "ours ~= theirs" note when any n_jobs curve is within
+    # 1% of theirs. One annotation per facet, not per n_jobs.
+    if near_parity_seen:
+        ax.text(
+            0.02,
+            0.98,
+            "ours ~= theirs",
+            transform=ax.transAxes,
+            fontsize=9.0,
+            color=_MUTED,
+            ha="left",
+            va="top",
+            zorder=5,
+        )
+
+    # Fully-ours-only facet: no n_jobs carried any real theirs data. Drop a
+    # single text annotation in the facet center where the dashed curves would
+    # otherwise live.
+    if not facet_has_any_real and any(sizes for sizes, *_ in per_nj):
+        ax.text(
+            0.5,
+            0.5,
+            "theirs skipped (ours-only run)",
+            transform=ax.transAxes,
+            fontsize=10.5,
+            color=_MUTED,
+            ha="center",
+            va="center",
+            zorder=5,
         )
 
 
@@ -386,14 +590,29 @@ def _rightmost_matched_index(
     return None
 
 
-def _series_colors(cmap: Any, n: int) -> list[Any]:
-    # Sample viridis across a wider slice than the default so adjacent series
-    # read as visually distinct on screen and in print. Skipping the extreme
-    # dark (unreadable) and extreme yellow (washes out on white) ends keeps the
-    # palette print-safe while preserving monotonic luminance (pinned by test).
-    if n <= 1:
-        return [cmap(0.5)]
-    return [cmap(0.08 + 0.84 * i / (n - 1)) for i in range(n)]
+def _series_colors(n: int) -> list[tuple[float, float, float, float]]:
+    """Pick ``n`` colourblind-safe series colors in increasing luminance.
+
+    Samples the Okabe-Ito palette in luminance-sorted order so that adjacent
+    series stay visually distinct under deuteranopia and protanopia, and the
+    "darker = lower n_jobs" visual cue from the older viridis slice is
+    preserved (the test suite pins monotonic luminance across the first three
+    series).
+    """
+    palette = _OKABE_ITO_BY_LUMA
+    if n <= 0:
+        return []
+    if n == 1:
+        return [to_rgba(palette[0])]
+    if n <= len(palette):
+        return [to_rgba(palette[i]) for i in range(n)]
+    # More series than palette entries: cycle with a luminance perturbation so
+    # the extras still read as distinct. In practice we never see more than 6
+    # n_jobs values against a single recipe, so this branch is defensive.
+    picked: list[tuple[float, float, float, float]] = []
+    for i in range(n):
+        picked.append(to_rgba(palette[i % len(palette)]))
+    return picked
 
 
 def _draw_title_block(
@@ -417,7 +636,8 @@ def _draw_title_block(
         0.99,
         0.958,
         "lower is better",
-        fontsize=10.5,
+        fontsize=11.5,
+        fontweight="medium",
         color=_MUTED,
         ha="right",
         va="top",
@@ -500,16 +720,45 @@ def _draw_legend(fig: Figure, n_jobs_values: list[int], colors: list[Any]) -> No
         bbox_to_anchor=(0.5, 0.048),
         ncol=len(handles),
         frameon=False,
-        fontsize=11.0,
-        handlelength=2.6,
-        handletextpad=0.7,
-        columnspacing=2.6,
+        fontsize=10.0,
+        handlelength=2.4,
+        handletextpad=0.6,
+        columnspacing=1.8,
     )
     for txt in legend.get_texts():
         txt.set_color(_TEXT)
 
 
-def _draw_caption(fig: Figure, meta: RunMetadata) -> None:
+def _vis_filename_for_inputs(inputs: BuildFigureInputs) -> str | None:
+    """Compute the vis PNG filename that corresponds to this bench chart.
+
+    Mirrors the CLI's ``chart_filename(..., suffix="vis")`` scheme so the
+    caption cross-reference is always accurate without coupling the chart
+    module to the CLI. Returns ``None`` when the partition is empty.
+    """
+    if not inputs.partition_results:
+        return None
+    hash6 = payload_hash6(inputs.partition_results)
+    slug = slug_from_params(dict(inputs.non_njobs_params))
+    if slug:
+        return f"{inputs.algo}_{slug}_vis_{hash6}.png"
+    return f"{inputs.algo}_vis_{hash6}.png"
+
+
+def _draw_caption(
+    fig: Figure,
+    meta: RunMetadata,
+    *,
+    vis_filename: str | None = None,
+) -> None:
+    """Draw the figure-level caption bar.
+
+    ``vis_filename`` is an optional cross-reference to the companion vis PNG
+    rendered from the same partition; the ``pybench vis --results ...`` hint
+    tells the reader exactly how to regenerate it. Separator padding uses
+    four spaces on each side of the ``|`` so the three caption cells don't
+    cramp at narrow figure widths.
+    """
     caption = f"git  {meta.git_sha}    |    {meta.machine}    |    {meta.timestamp_iso}"
     fig.text(
         0.5,
@@ -520,6 +769,16 @@ def _draw_caption(fig: Figure, meta: RunMetadata) -> None:
         ha="center",
         va="bottom",
     )
+    if vis_filename:
+        fig.text(
+            0.5,
+            0.002,
+            f"vis: {vis_filename}  (pybench vis --results ...)",
+            fontsize=8.5,
+            color=_MUTED,
+            ha="center",
+            va="bottom",
+        )
 
 
 def build_figure(inputs: BuildFigureInputs) -> Figure:
@@ -528,7 +787,7 @@ def build_figure(inputs: BuildFigureInputs) -> Figure:
     if d == 0:
         return build_empty_figure(inputs.algo, "no dims to render")
 
-    width = max(10.0, 3.4 * d + 1.6)
+    width = max(10.0, 3.8 * d + 1.6)
     height = 8.1
     fig = Figure(figsize=(width, height), facecolor="white")
     FigureCanvasAgg(fig)
@@ -552,7 +811,7 @@ def build_figure(inputs: BuildFigureInputs) -> Figure:
         axes[1][c].sharex(axes[0][c])
 
     n_jobs_values = sorted({_get_n_jobs(r) for r in inputs.partition_results})
-    colors = _series_colors(colormaps["viridis"], len(n_jobs_values))
+    colors = _series_colors(len(n_jobs_values))
 
     for col, dim in enumerate(dims):
         top = axes[0][col]
@@ -654,7 +913,12 @@ def build_figure(inputs: BuildFigureInputs) -> Figure:
     # paper "abstract / body" separator without being loud.
     _draw_header_rule(fig)
     _draw_legend(fig, n_jobs_values, colors)
-    _draw_caption(fig, inputs.title_meta)
+    # Compute the companion vis filename via the same hash6 + slug scheme the
+    # CLI uses. Kept local to figure.py (rather than routed through a new
+    # dataclass field) so the public BuildFigureInputs signature doesn't
+    # change. Skips when the partition is empty.
+    vis_fn = _vis_filename_for_inputs(inputs)
+    _draw_caption(fig, inputs.title_meta, vis_filename=vis_fn)
 
     if inputs.ari_threshold is not None:
         fig.text(
@@ -697,4 +961,5 @@ __all__ = [
     "build_empty_figure",
     "build_figure",
     "format_ratio_label",
+    "is_ours_only_sentinel",
 ]
