@@ -1,31 +1,46 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from pybench.charts.data import partition, payload_hash6
-from pybench.charts.figure import BuildFigureInputs, build_figure
+from pybench.charts.data import (
+    PARTITION_EXCLUDED_PARAM_KEYS,
+    partition,
+    payload_hash6,
+)
+from pybench.charts.figure import BuildFigureInputs, build_figure, is_ours_only_sentinel
 from pybench.charts.filenames import chart_filename
 from pybench.charts.gates import GateFailure, evaluate_gates
 from pybench.charts.labels_io import (
     LabelCell,
+    LoadStatus,
     labels_sidecar_filename_for_params,
+    load_labels,
     save_labels,
 )
 from pybench.charts.meta import RunMetadata
 from pybench.charts.results_io import capture_metadata, load_results, save_results
+from pybench.charts.vis import VisInputs, build_vis_figure
 from pybench.recipe import Recipe, RunResult
 from pybench.recipes import all_recipes
-from pybench.runner import LabelsBundle, expand_param_grid, run_one_with_labels
+from pybench.runner import (
+    LabelsBundle,
+    expand_param_grid,
+    run_one_with_labels,
+)
 
 logger = logging.getLogger(__name__)
 
 _ANSI_RED = "\x1b[31m"
 _ANSI_RESET = "\x1b[0m"
+
+_SUBCOMMANDS = ("bench", "vis")
+_VIS_SUFFIX = "vis"
 
 
 def _list_recipes(recipes: dict) -> None:
@@ -58,11 +73,7 @@ def _list_recipes(recipes: dict) -> None:
         print(f"  total runs : {combos}")
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="benchmark",
-        description="Benchmark C++ clustering against sklearn.",
-    )
+def _add_bench_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--algo", nargs="*", help="Algorithm(s) to benchmark (default: all)"
     )
@@ -110,7 +121,99 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.set_defaults(capture_labels=True)
+
+
+def _add_vis_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--results",
+        type=str,
+        required=True,
+        help="Path to a results.json produced by pybench bench",
+    )
+    parser.add_argument(
+        "--out",
+        type=str,
+        required=True,
+        help="Directory to write vis PNG(s) into",
+    )
+    parser.add_argument(
+        "--recipe",
+        type=str,
+        default=None,
+        help="Only render partitions whose recipe_name matches",
+    )
+    parser.add_argument(
+        "--size",
+        type=int,
+        default=None,
+        help="Only render the cell at this size (otherwise the largest size is picked)",
+    )
+    parser.add_argument(
+        "--dims",
+        type=int,
+        default=None,
+        help="Only render the cell at this dims (otherwise the smallest dims is picked)",
+    )
+    parser.add_argument(
+        "--n-jobs",
+        "--n_jobs",
+        type=int,
+        dest="n_jobs",
+        default=None,
+        help="Only render the cell whose params.n_jobs matches (otherwise the first)",
+    )
+    parser.add_argument(
+        "--no-regen",
+        action="store_true",
+        help=(
+            "Error out when a sidecar is missing or mismatched rather than regenerating"
+            " labels + projection by re-running the recipe."
+        ),
+    )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="benchmark",
+        description="Benchmark C++ clustering against sklearn.",
+    )
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+    bench_parser = subparsers.add_parser(
+        "bench",
+        help="Run benchmarks, write results.json + charts + label sidecars",
+    )
+    _add_bench_args(bench_parser)
+    vis_parser = subparsers.add_parser(
+        "vis",
+        help="Render fixture-label vis PNGs from an existing results.json + sidecar",
+    )
+    _add_vis_args(vis_parser)
     return parser
+
+
+def _normalize_argv(argv: list[str]) -> list[str]:
+    """Compat shim: insert @c "bench" when the user supplied no subcommand.
+
+    If the first positional (non-flag) token is an explicit member of
+    :data:`_SUBCOMMANDS`, the invocation is already explicit. If the first
+    token is a flag (starts with @c "-") or the list is empty, we default to
+    @c "bench" so every pre-subparser invocation style (``benchmark --algo X``,
+    ``benchmark --replot PATH``, ``benchmark --list``, ``benchmark --help``)
+    still reaches the bench subparser unchanged. Any other first positional
+    token -- for example ``benchmark diff`` or ``benchmark vis-all`` -- is
+    treated as an unknown subcommand and rejected with a clear error rather
+    than silently routed to @c bench.
+    """
+    if not argv:
+        return ["bench"]
+    first = argv[0]
+    if first in _SUBCOMMANDS:
+        return list(argv)
+    if first.startswith("-"):
+        return ["bench", *argv]
+    raise SystemExit(
+        f"benchmark: invalid subcommand {first!r} (valid: {', '.join(_SUBCOMMANDS)})"
+    )
 
 
 def _validate_replot_args(
@@ -155,6 +258,16 @@ def _print_fail_banner(failures: Sequence[GateFailure]) -> None:
 
 def _dataset_spec_string(recipe: Recipe) -> str:
     return f"blobs centers={recipe.dataset.centers} std={recipe.dataset.cluster_std}"
+
+
+def _non_njobs_params_tuple(
+    params: dict[str, Any],
+) -> tuple[tuple[str, Any], ...]:
+    return tuple(
+        sorted(
+            (k, v) for k, v in params.items() if k not in PARTITION_EXCLUDED_PARAM_KEYS
+        )
+    )
 
 
 def _write_charts(
@@ -229,17 +342,9 @@ def _write_label_sidecars(
         tuple[str, tuple[tuple[str, Any], ...]],
         tuple[list[RunResult], list[LabelsBundle]],
     ] = {}
-    from pybench.charts.data import PARTITION_EXCLUDED_PARAM_KEYS
 
     for result, bundle in zip(results, bundles, strict=True):
-        non_njobs_params = tuple(
-            sorted(
-                (k, v)
-                for k, v in result.params.items()
-                if k not in PARTITION_EXCLUDED_PARAM_KEYS
-            )
-        )
-        key = (result.recipe_name, non_njobs_params)
+        key = (result.recipe_name, _non_njobs_params_tuple(result.params))
         r_list, b_list = groups.setdefault(key, ([], []))
         r_list.append(result)
         b_list.append(bundle)
@@ -264,6 +369,20 @@ def _write_label_sidecars(
         save_labels(sidecar_path, hash6, algo, cells)
         written.append(sidecar_path)
     return written
+
+
+def _run_bench(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
+    if args.list:
+        _list_recipes(recipes)
+        return 0
+
+    if not recipes:
+        print("No recipes found. Exiting.", file=sys.stderr)
+        return 1
+
+    if args.replot is not None:
+        return _run_replot(args, recipes)
+    return _run_live(args, recipes)
 
 
 def _run_live(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
@@ -381,25 +500,325 @@ def _run_replot(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
     return 0
 
 
+def _pick_vis_cell(
+    partition_results: list[RunResult],
+    *,
+    size_filter: int | None,
+    dims_filter: int | None,
+    n_jobs_filter: int | None,
+) -> RunResult | None:
+    """Pick one representative cell per partition for vis rendering.
+
+    Default (no filters): largest @c size at the smallest @c dims; ties on
+    @c (size, dims) broken by the first insertion order so the pick is
+    deterministic. @c size_filter / @c dims_filter / @c n_jobs_filter narrow
+    to the exact cell if supplied. Returns @c None when no cell matches.
+    """
+    candidates = list(partition_results)
+    if size_filter is not None:
+        candidates = [r for r in candidates if r.size == size_filter]
+    if dims_filter is not None:
+        candidates = [r for r in candidates if r.dims == dims_filter]
+    if n_jobs_filter is not None:
+        candidates = [r for r in candidates if r.params.get("n_jobs") == n_jobs_filter]
+    if not candidates:
+        return None
+    if size_filter is not None and dims_filter is not None:
+        return candidates[0]
+    # default pick: largest size first, tie-broken by smallest dims.
+    candidates.sort(key=lambda r: (-r.size, r.dims))
+    return candidates[0]
+
+
+def _subsample_seed_from_hash6(hash6: str) -> int:
+    """Derive a deterministic 32-bit seed from the partition @c hash6.
+
+    @c hash6 is already a deterministic fingerprint of the partition payload;
+    we hash it once more and take the low 32 bits so the seed is independent
+    of the 24 bits used by the chart filename. Two runs against the same
+    partition produce byte-identical figures.
+    """
+    digest = hashlib.sha256(hash6.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "little", signed=False)
+
+
+def _regen_cell(
+    recipe: Recipe, result: RunResult, *, ours_only: bool
+) -> tuple[LabelsBundle, RunResult]:
+    """Re-run @p recipe for the @p result's cell to rebuild a @c LabelsBundle.
+
+    Used by @c pybench vis when the sidecar is missing or its envelope does
+    not match. @p ours_only is propagated from the original run so a cell that
+    skipped the sklearn baseline is not silently re-measured: the regen will
+    also skip @c theirs, matching what the user asked for at bench time. The
+    caller detects this via :func:`is_ours_only_sentinel` on the stored cell.
+    Returns both the fresh bundle and the fresh :class:`RunResult` (so the
+    caller can use the regenerated @c ari instead of the stale one).
+    """
+    fresh_result, bundle = run_one_with_labels(
+        recipe,
+        result.size,
+        dims=result.dims,
+        params=dict(result.params),
+        ours_only=ours_only,
+        capture_labels=True,
+    )
+    assert bundle is not None
+    return bundle, fresh_result
+
+
+def _save_vis_figure(
+    fig: Any,
+    algo: str,
+    non_njobs_params: tuple[tuple[str, Any], ...],
+    hash6: str,
+    out_dir: Path,
+) -> Path:
+    params_dict = dict(non_njobs_params)
+    filename = chart_filename(algo, params_dict, hash6, suffix=_VIS_SUFFIX)
+    out_path = out_dir / filename
+    fig.savefig(out_path, dpi=200)
+    return out_path
+
+
+def _build_vis_for_cell(
+    *,
+    algo: str,
+    recipe: Recipe,
+    result: RunResult,
+    bundle: LabelsBundle,
+    non_njobs_params: tuple[tuple[str, Any], ...],
+    meta: RunMetadata,
+    subsample_seed: int,
+    bench_filename: str | None = None,
+) -> Any:
+    inputs = VisInputs(
+        algo=algo,
+        recipe_name=recipe.name,
+        size=result.size,
+        dims=result.dims,
+        non_njobs_params=non_njobs_params,
+        n_jobs=int(result.params.get("n_jobs", 1)),
+        ari=float(result.ari),
+        title_meta=meta,
+        gt_labels=bundle.gt_labels,
+        ours_labels=bundle.ours_labels,
+        theirs_labels=bundle.theirs_labels,
+        projection_2d=bundle.projection_2d,
+        subsample_seed=subsample_seed,
+        bench_filename=bench_filename,
+    )
+    return build_vis_figure(inputs)
+
+
+def _run_vis(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
+    json_path = Path(args.results)
+    if not json_path.is_file():
+        print(f"vis: results file not found: {json_path}", file=sys.stderr)
+        return 1
+
+    meta, all_results = load_results(json_path)
+    sidecar_dir = json_path.parent
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.recipe is not None:
+        filtered = [r for r in all_results if r.recipe_name == args.recipe]
+        if not filtered:
+            print(
+                f"vis: no results matched --recipe {args.recipe!r}",
+                file=sys.stderr,
+            )
+            return 1
+        all_results = filtered
+
+    partitions = partition(all_results)
+    if not partitions:
+        print("vis: no partitions to render", file=sys.stderr)
+        return 1
+
+    written: list[Path] = []
+    for key, part_results in partitions.items():
+        algo, non_njobs_params = key[0], tuple(key[1])
+        recipe = recipes.get(algo)
+        if recipe is None:
+            print(
+                f"vis: unknown recipe {algo!r}; cannot render, skipping",
+                file=sys.stderr,
+            )
+            continue
+
+        hash6 = payload_hash6(part_results)
+        subsample_seed = _subsample_seed_from_hash6(hash6)
+
+        sidecar_name = labels_sidecar_filename_for_params(
+            algo, part_results[0].params, hash6
+        )
+        sidecar_path = sidecar_dir / sidecar_name
+        load_result = load_labels(
+            sidecar_path,
+            expected_hash6=hash6,
+            expected_recipe_name=algo,
+        )
+
+        cell = _pick_vis_cell(
+            part_results,
+            size_filter=args.size,
+            dims_filter=args.dims,
+            n_jobs_filter=args.n_jobs,
+        )
+        if cell is None:
+            print(
+                f"vis: no cell matched filters for partition {algo!r} "
+                f"params={dict(non_njobs_params)}",
+                file=sys.stderr,
+            )
+            continue
+
+        resolved = _resolve_bundle_for_cell(
+            load_result=load_result,
+            sidecar_path=sidecar_path,
+            recipe=recipe,
+            cell=cell,
+            no_regen=args.no_regen,
+        )
+        if resolved is None:
+            return 1
+        bundle, authoritative_result = resolved
+        # When regen fires we prefer the fresh @c RunResult so the figure caption
+        # reports the ari of the labels actually drawn; a sidecar hit returns
+        # @p cell unchanged.
+        bench_fn = chart_filename(algo, dict(non_njobs_params), hash6)
+        fig = _build_vis_for_cell(
+            algo=algo,
+            recipe=recipe,
+            result=authoritative_result,
+            bundle=bundle,
+            non_njobs_params=non_njobs_params,
+            meta=meta,
+            subsample_seed=subsample_seed,
+            bench_filename=bench_fn,
+        )
+        out_path = _save_vis_figure(fig, algo, non_njobs_params, hash6, out_dir)
+        written.append(out_path)
+
+    print(f"Vis PNGs saved to {out_dir}/ ({len(written)} PNG(s))")
+    return 0 if written else 1
+
+
+def _bundle_from_cell(cell_dict: LabelCell) -> LabelsBundle:
+    return LabelsBundle(
+        gt_labels=cell_dict.gt_labels,
+        ours_labels=cell_dict.ours_labels,
+        theirs_labels=cell_dict.theirs_labels,
+        projection_2d=cell_dict.projection_2d,
+    )
+
+
+def _resolve_bundle_for_cell(
+    *,
+    load_result: Any,
+    sidecar_path: Path,
+    recipe: Recipe,
+    cell: RunResult,
+    no_regen: bool,
+) -> tuple[LabelsBundle, RunResult] | None:
+    """Resolve a :class:`LabelsBundle` and the authoritative :class:`RunResult`.
+
+    The returned :class:`RunResult` is @p cell when the sidecar was consumed
+    as-is, and the regenerated @c RunResult when a fresh re-run produced the
+    bundle; callers should use it for anything that risks drifting between
+    bench time and vis time (notably @c ari in the figure caption).
+
+    @c OK / @c WARN with the cell present -> return the sidecar cell bundle
+    paired with @p cell (emitting a warning on @c WARN). @c ERROR or cell
+    missing -> regen fallback unless @p no_regen is set, in which case we
+    fail with a clear error and return @c None.
+
+    The @c --ours-only sentinel on @p cell is honored: regen propagates
+    @c ours_only=True so a cell the user explicitly skipped the sklearn
+    baseline on is not silently re-measured. The resulting bundle's
+    @c theirs_labels is @c None, matching the original run's semantics.
+    """
+    cell_key = _labels_cell_key(cell)
+    cell_is_sentinel = is_ours_only_sentinel(cell)
+
+    if load_result.status == LoadStatus.OK:
+        sidecar_cell = load_result.cells.get(cell_key)
+        if sidecar_cell is None:
+            if no_regen:
+                print(
+                    f"vis: sidecar present but missing cell {cell_key!r}; "
+                    f"--no-regen was set. Path: {sidecar_path}",
+                    file=sys.stderr,
+                )
+                return None
+            logger.warning(
+                "vis: sidecar %s is OK but missing cell %r; regenerating",
+                sidecar_path,
+                cell_key,
+            )
+            bundle, fresh = _regen_cell(recipe, cell, ours_only=cell_is_sentinel)
+            return bundle, fresh
+        return _bundle_from_cell(sidecar_cell), cell
+
+    if load_result.status == LoadStatus.WARN:
+        logger.warning(
+            "vis: sidecar %s has a soft mismatch (%s); proceeding with cached arrays",
+            sidecar_path,
+            load_result.reason,
+        )
+        sidecar_cell = load_result.cells.get(cell_key)
+        if sidecar_cell is not None:
+            return _bundle_from_cell(sidecar_cell), cell
+        if no_regen:
+            print(
+                f"vis: sidecar WARN and missing cell {cell_key!r}; --no-regen was set. "
+                f"Path: {sidecar_path}",
+                file=sys.stderr,
+            )
+            return None
+        bundle, fresh = _regen_cell(recipe, cell, ours_only=cell_is_sentinel)
+        return bundle, fresh
+
+    # status == ERROR
+    if no_regen:
+        print(
+            f"vis: sidecar error for {sidecar_path}: {load_result.reason}; "
+            "--no-regen was set. Re-run bench to produce a fresh sidecar, "
+            "or drop --no-regen to regenerate in place.",
+            file=sys.stderr,
+        )
+        return None
+    logger.warning(
+        "vis: sidecar %s unavailable (%s); regenerating cell %r",
+        sidecar_path,
+        load_result.reason,
+        cell_key,
+    )
+    bundle, fresh = _regen_cell(recipe, cell, ours_only=cell_is_sentinel)
+    return bundle, fresh
+
+
 def main() -> None:
+    argv = sys.argv[1:]
+    argv = _normalize_argv(argv)
+
     parser = _build_parser()
-    args = parser.parse_args()
-    _validate_replot_args(parser, args)
+    args = parser.parse_args(argv)
 
     recipes = all_recipes()
 
-    if args.list:
-        _list_recipes(recipes)
-        return
-
-    if not recipes:
-        print("No recipes found. Exiting.", file=sys.stderr)
-        sys.exit(1)
-
-    if args.replot is not None:
-        rc = _run_replot(args, recipes)
+    if args.subcommand == "bench":
+        _validate_replot_args(parser, args)
+        rc = _run_bench(args, recipes)
+    elif args.subcommand == "vis":
+        rc = _run_vis(args, recipes)
     else:
-        rc = _run_live(args, recipes)
+        parser.error(f"unknown subcommand {args.subcommand!r}")
+        return  # argparse.error exits, but for type narrowing.
+
     if rc != 0:
         sys.exit(rc)
 
