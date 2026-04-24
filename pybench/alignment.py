@@ -37,18 +37,18 @@ def as_aligned(data: np.ndarray, alignment: int = AVX2_ALIGN) -> np.ndarray:
     @param alignment  Required byte alignment of the first element. Must be a multiple of the
                       output dtype's itemsize.
     """
-    if (
-        data.flags.c_contiguous
-        and data.dtype == np.float32
-        and _is_aligned(data, alignment)
-    ):
-        return data
     dtype = np.float32
     itemsize = np.dtype(dtype).itemsize
     if alignment % itemsize != 0:
         raise ValueError(
             f"alignment {alignment} is not a multiple of itemsize {itemsize}"
         )
+    if (
+        data.flags.c_contiguous
+        and data.dtype == np.float32
+        and _is_aligned(data, alignment)
+    ):
+        return data
     headroom = alignment // itemsize
     buf = np.empty(data.size + headroom, dtype=dtype)
     offset = ((-buf.ctypes.data) % alignment) // itemsize
