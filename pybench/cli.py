@@ -82,6 +82,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to an existing results.json; regenerate charts without benchmarking",
     )
+    parser.add_argument(
+        "--ours-only",
+        action="store_true",
+        help=(
+            "CPU-perf-only fast path: time the @c ours implementation only, skip the @c theirs"
+            " sklearn baseline, the ARI gate, and the memray peak-RSS tracker. Useful for"
+            " tight perf iteration loops on large shapes where the baseline is minutes per"
+            " cell."
+        ),
+    )
     return parser
 
 
@@ -206,25 +216,37 @@ def _run_live(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
                         end=" ",
                         flush=True,
                     )
-                    result = run_one(recipe, size, dims=dim, params=params)
-                    status = "PASS" if result.ari >= recipe.ari_threshold else "FAIL"
+                    result = run_one(
+                        recipe, size, dims=dim, params=params, ours_only=args.ours_only
+                    )
                     eps_info = ""
                     if "eps" in result.effective_params:
                         eps_info = f" eps={result.effective_params['eps']:.2f}"
-                    print(
-                        f"ari={result.ari:.2f} ({status})"
-                        f"  {result.speedup:.1f}x"
-                        f"  {result.ours_median_ms:.1f}ms vs {result.theirs_median_ms:.1f}ms"
-                        f"  mem: {result.ours_peak_mb:.1f}MB vs {result.theirs_peak_mb:.1f}MB"
-                        f"{eps_info}"
-                    )
+                    if args.ours_only:
+                        print(
+                            f"ours={result.ours_median_ms:.1f}ms"
+                            f"  mem: {result.ours_peak_mb:.1f}MB"
+                            f"{eps_info}"
+                        )
+                    else:
+                        status = (
+                            "PASS" if result.ari >= recipe.ari_threshold else "FAIL"
+                        )
+                        print(
+                            f"ari={result.ari:.2f} ({status})"
+                            f"  {result.speedup:.1f}x"
+                            f"  {result.ours_median_ms:.1f}ms vs {result.theirs_median_ms:.1f}ms"
+                            f"  mem: {result.ours_peak_mb:.1f}MB vs {result.theirs_peak_mb:.1f}MB"
+                            f"{eps_info}"
+                        )
                     all_results.append(result)
 
-    ari_thresholds = {name: r.ari_threshold for name, r in recipes_run.items()}
-    failures = evaluate_gates(all_results, ari_thresholds)
-    if failures:
-        _print_fail_banner(failures)
-        return 2
+    if not args.ours_only:
+        ari_thresholds = {name: r.ari_threshold for name, r in recipes_run.items()}
+        failures = evaluate_gates(all_results, ari_thresholds)
+        if failures:
+            _print_fail_banner(failures)
+            return 2
 
     json_path = out_dir / "results.json"
     save_results(json_path, meta, all_results)

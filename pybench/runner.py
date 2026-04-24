@@ -187,8 +187,16 @@ def run_one(
     size: int,
     dims: int | None = None,
     params: dict[str, Any] | None = None,
+    ours_only: bool = False,
 ) -> RunResult:
-    """Run both implementations n_runs times, return median timing + ARI."""
+    """Run both implementations n_runs times, return median timing + ARI.
+
+    When @p ours_only is @c True, skip the @c theirs (sklearn) run, ARI computation, and the
+    memray peak-RSS tracker for both sides; @c theirs_median_ms / @c theirs_peak_mb collapse
+    to @c 0.0, @c speedup to @c nan, @c ari to @c 1.0 (so the gate stays green when the CLI
+    chooses not to enforce it). Intended for CPU-perf iteration on large shapes where the
+    baseline alone is minutes per cell.
+    """
     from dataclasses import replace
 
     if params is None:
@@ -203,35 +211,50 @@ def run_one(
 
     data = make_data(size, dataset)
 
-    theirs_fn = _with_thread_limits(recipe.theirs, params.get("n_jobs"))
-
     effective = _prepare_params(recipe, data, params)
 
     ours_times: list[float] = []
     theirs_times: list[float] = []
+
+    theirs_fn = (
+        _with_thread_limits(recipe.theirs, params.get("n_jobs"))
+        if not ours_only
+        else None
+    )
 
     for _ in range(recipe.n_runs):
         t0 = time.perf_counter()
         result_ours = recipe.ours(data, **effective)
         ours_times.append(time.perf_counter() - t0)
 
-        t0 = time.perf_counter()
-        result_theirs = theirs_fn(data, **effective)
-        theirs_times.append(time.perf_counter() - t0)
+        if theirs_fn is not None:
+            t0 = time.perf_counter()
+            result_theirs = theirs_fn(data, **effective)
+            theirs_times.append(time.perf_counter() - t0)
 
     ours_labels = result_ours
-    theirs_labels = result_theirs
-
-    ours_peak_mb = _measure_peak_rss_mb(recipe.ours, data, effective)
-    theirs_peak_mb = _measure_peak_rss_mb(theirs_fn, data, effective)
-
     ours_median_ms = median(ours_times) * 1000.0
-    theirs_median_ms = median(theirs_times) * 1000.0
-    speedup = theirs_median_ms / ours_median_ms if ours_median_ms > 0 else float("inf")
-
-    ari = float(adjusted_rand_score(theirs_labels, ours_labels))
     ours_noise_frac = float(np.mean(ours_labels == -1))
-    theirs_noise_frac = float(np.mean(theirs_labels == -1))
+
+    if ours_only:
+        ours_peak_mb = 0.0
+        theirs_peak_mb = 0.0
+        theirs_median_ms = 0.0
+        # 0.0 rather than NaN so the canonical JSON serializer accepts the row; callers that
+        # care about the comparison must not pass --ours-only.
+        speedup = 0.0
+        ari = 1.0
+        theirs_noise_frac = 0.0
+    else:
+        theirs_labels = result_theirs
+        ours_peak_mb = _measure_peak_rss_mb(recipe.ours, data, effective)
+        theirs_peak_mb = _measure_peak_rss_mb(theirs_fn, data, effective)
+        theirs_median_ms = median(theirs_times) * 1000.0
+        speedup = (
+            theirs_median_ms / ours_median_ms if ours_median_ms > 0 else float("inf")
+        )
+        ari = float(adjusted_rand_score(theirs_labels, ours_labels))
+        theirs_noise_frac = float(np.mean(theirs_labels == -1))
 
     return RunResult(
         recipe_name=recipe.name,
