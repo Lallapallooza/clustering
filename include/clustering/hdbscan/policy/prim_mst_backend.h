@@ -1,9 +1,13 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -12,6 +16,7 @@
 #include "clustering/hdbscan/mst_output.h"
 #include "clustering/index/kdtree.h"
 #include "clustering/math/detail/avx2_helpers.h"
+#include "clustering/math/detail/sq_distances_block.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
@@ -46,6 +51,8 @@ inline constexpr std::size_t kPrimMrdMatrixByteBudget = kPrimMaxN * kPrimMaxN * 
 inline constexpr std::size_t kPrimDenseCoreMinN = 1024;
 inline constexpr std::size_t kPrimDenseCoreMinD = 17;
 inline constexpr std::size_t kPrimDenseCoreMaxMinSamples = 64;
+inline constexpr std::size_t kPrimPersistentRelaxMinWorkers = 8;
+inline constexpr std::size_t kPrimPersistentRelaxMinOpsPerWorker = std::size_t{1} << 14;
 
 /**
  * @brief Exact minimum-spanning-tree backend over mutual-reachability distance, streaming Prim.
@@ -129,7 +136,7 @@ public:
         rowNorms[i] = rowsAligned32 ? math::detail::dotRowAligned32Ptr(row, row, d)
                                     : math::detail::dotRowPtr(row, row, d);
       }
-      computeDenseCoreDistances(X, rowNorms, minSamples, rowsAligned32, coreDistData);
+      computeDenseCoreDistances(X, rowNorms, minSamples, rowsAligned32, pool, coreDistData);
     } else {
       // Shapes that fail @c shouldUseDenseCore take the KDTree kNN path: the dense symmetric
       // scan does not amortise at small @c n, low @c d, or large @c minSamples (where the per-
@@ -229,6 +236,156 @@ public:
       return {bestV, bestW};
     };
 
+    auto persistentRelaxFrom = [&]() -> bool {
+      if (!shouldUsePersistentParallelRelax(n, d, useDenseCore, pool)) {
+        return false;
+      }
+
+      // Pack the per-worker barrier flag into the same 64 B cache line as its local-best
+      // reduction slot. Each line is written only by its owning participant (worker or main),
+      // and read by main only when @c done matches the current phase counter, so the release
+      // store on @c done synchronises the non-atomic @c vertex and @c weight writes that
+      // preceded it. Per-line ownership eliminates the cross-core RMW contention a shared
+      // @c completed counter would incur on each phase close.
+      struct alignas(64) LocalBest {
+        std::atomic<std::uint32_t> done{0};
+        std::int32_t vertex = -1;
+        T weight = std::numeric_limits<T>::max();
+      };
+
+      const std::size_t workerTasks = pool.workerCount() - 1;
+      const std::size_t participantCount = workerTasks + 1;
+      std::vector<LocalBest> localBest(participantCount);
+
+      auto blockBegin = [&](std::size_t id) noexcept { return (n * id) / participantCount; };
+      auto blockEnd = [&](std::size_t id) noexcept { return (n * (id + 1)) / participantCount; };
+      auto relaxBlock = [&](std::size_t id,
+                            std::int32_t target) noexcept -> std::pair<std::int32_t, T> {
+        const auto tIdx = static_cast<std::size_t>(target);
+        const T coreT = coreDistData[tIdx];
+        const T *const rowT = xData + (tIdx * d);
+        std::int32_t bestV = -1;
+        T bestW = std::numeric_limits<T>::max();
+        for (std::size_t v = blockBegin(id); v < blockEnd(id); ++v) {
+          if (visited[v] != 0U) {
+            continue;
+          }
+          const T sq = sqDistance(rowT, tIdx, v);
+          T w = sq;
+          if (coreT > w) {
+            w = coreT;
+          }
+          const T coreV = coreDistData[v];
+          if (coreV > w) {
+            w = coreV;
+          }
+          if (w < edgeWeight[v]) {
+            parent[v] = target;
+            edgeWeight[v] = w;
+          }
+          if (edgeWeight[v] < bestW) {
+            bestW = edgeWeight[v];
+            bestV = static_cast<std::int32_t>(v);
+          }
+        }
+        return {bestV, bestW};
+      };
+
+      std::atomic<std::uint32_t> phase{0};
+      std::atomic<std::uint32_t> ready{0};
+      std::atomic<bool> stop{false};
+      std::int32_t currentTarget = 0;
+
+      auto workerLoop = [&](std::size_t id) {
+        std::uint32_t seen = phase.load(std::memory_order_acquire);
+        ready.fetch_add(1, std::memory_order_release);
+        for (;;) {
+          std::uint32_t next = phase.load(std::memory_order_acquire);
+          while (next == seen) {
+            spinPause();
+            next = phase.load(std::memory_order_acquire);
+          }
+          seen = next;
+          if (stop.load(std::memory_order_acquire)) {
+            return;
+          }
+          auto [bv, bw] = relaxBlock(id, currentTarget);
+          localBest[id].vertex = bv;
+          localBest[id].weight = bw;
+          localBest[id].done.store(seen, std::memory_order_release);
+        }
+      };
+
+      std::vector<std::future<void>> futures;
+      futures.reserve(workerTasks);
+      for (std::size_t id = 1; id < participantCount; ++id) {
+        futures.emplace_back(pool.pool->submit_task([&, id] { workerLoop(id); }));
+      }
+      while (ready.load(std::memory_order_acquire) != workerTasks) {
+        spinPause();
+      }
+
+      auto reduceBest = [&]() noexcept -> std::pair<std::int32_t, T> {
+        std::int32_t bestV = -1;
+        T bestW = std::numeric_limits<T>::max();
+        for (const LocalBest &candidate : localBest) {
+          if (candidate.vertex >= 0 && candidate.weight < bestW) {
+            bestW = candidate.weight;
+            bestV = candidate.vertex;
+          }
+        }
+        return {bestV, bestW};
+      };
+
+      auto relaxRound = [&](std::int32_t target) noexcept -> std::pair<std::int32_t, T> {
+        currentTarget = target;
+        const std::uint32_t newPhase =
+            phase.fetch_add(1, std::memory_order_acq_rel) + std::uint32_t{1};
+        auto [bv, bw] = relaxBlock(0, target);
+        localBest[0].vertex = bv;
+        localBest[0].weight = bw;
+        // Per-worker flag wait: one cache line per worker, written exactly once per phase by
+        // its owner and read exactly once per phase by main. Replaces a shared atomic counter
+        // whose cross-core RMW serialised the barrier close.
+        for (std::size_t id = 1; id < participantCount; ++id) {
+          while (localBest[id].done.load(std::memory_order_acquire) != newPhase) {
+            spinPause();
+          }
+        }
+        return reduceBest();
+      };
+
+      visited[0] = 1U;
+      edgeWeight[0] = T{0};
+      auto [nextV, nextW] = relaxRound(static_cast<std::int32_t>(0));
+
+      while (out.edges.size() + 1 < n) {
+        CLUSTERING_ALWAYS_ASSERT(nextV >= 0);
+
+        const auto bIdx = static_cast<std::size_t>(nextV);
+        visited[bIdx] = 1U;
+        out.edges.push_back(MstEdge<T>{parent[bIdx], nextV, nextW});
+
+        if (out.edges.size() + 1 == n) {
+          break;
+        }
+        auto next = relaxRound(nextV);
+        nextV = next.first;
+        nextW = next.second;
+      }
+
+      stop.store(true, std::memory_order_release);
+      phase.fetch_add(1, std::memory_order_release);
+      for (auto &future : futures) {
+        future.get();
+      }
+      return true;
+    };
+
+    if (persistentRelaxFrom()) {
+      return;
+    }
+
     auto relaxFrom = [&](std::int32_t target) noexcept -> std::pair<std::int32_t, T> {
       const auto tIdx = static_cast<std::size_t>(target);
       const T coreT = coreDistData[tIdx];
@@ -279,6 +436,22 @@ private:
            minSamples <= kPrimDenseCoreMaxMinSamples;
   }
 
+  [[nodiscard]] static bool shouldUsePersistentParallelRelax(std::size_t n, std::size_t d,
+                                                             bool useDenseCore,
+                                                             math::Pool pool) noexcept {
+    return useDenseCore && pool.pool != nullptr &&
+           pool.workerCount() >= kPrimPersistentRelaxMinWorkers &&
+           pool.shouldParallelizeWork(n * d, kPrimPersistentRelaxMinOpsPerWorker);
+  }
+
+  static void spinPause() noexcept {
+#ifdef CLUSTERING_USE_AVX2
+    _mm_pause();
+#else
+    std::this_thread::yield();
+#endif
+  }
+
   /// Maintain the per-row top-@c minSamples set of smallest squared distances seen so far,
   /// keyed by the slot holding the current worst (largest) entry. The cached @c worstSlot lets
   /// the common "new distance is not smaller than our worst" case exit in O(1); only on a swap
@@ -311,13 +484,30 @@ private:
   /// `||a-b||^2` = ||a||^2 + ||b||^2 - 2<a,b>, which lets the inner kernel be a fused-multiply-
   /// add dot instead of a compensated subtract-and-square.
   static void computeDenseCoreDistances(const NDArray<T, 2> &X, const std::vector<T> &rowNorms,
-                                        std::size_t minSamples, bool rowsAligned32,
+                                        std::size_t minSamples, bool rowsAligned32, math::Pool pool,
                                         T *coreDistData) {
     const std::size_t n = X.dim(0);
     const std::size_t d = X.dim(1);
     const T *const xData = X.data();
     std::vector<T> topK(n * minSamples, std::numeric_limits<T>::max());
     std::vector<std::size_t> worstSlot(n, 0);
+
+    // With enough workers, row-independent scans win despite computing each pair twice: every row
+    // owns its top-k state, so the pool path has no cross-row writes and can reuse the batched
+    // four-neighbour distance kernel that amortises AVX2 horizontal sums.
+    if (pool.pool != nullptr && pool.workerCount() >= 4 && pool.shouldParallelizeWork(n * n * d)) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, n,
+                          [&](std::size_t lo, std::size_t hi) {
+                            computeDenseCoreDistancesRows(X, minSamples, lo, hi, topK.data(),
+                                                          worstSlot);
+                          })
+          .wait();
+      for (std::size_t i = 0; i < n; ++i) {
+        coreDistData[i] = topK[(i * minSamples) + worstSlot[i]];
+      }
+      return;
+    }
 
     for (std::size_t i = 0; i < n; ++i) {
       const T *const rowI = xData + (i * d);
@@ -334,6 +524,30 @@ private:
 
     for (std::size_t i = 0; i < n; ++i) {
       coreDistData[i] = topK[(i * minSamples) + worstSlot[i]];
+    }
+  }
+
+  static void computeDenseCoreDistancesRows(const NDArray<T, 2> &X, std::size_t minSamples,
+                                            std::size_t lo, std::size_t hi, T *topK,
+                                            std::vector<std::size_t> &worstSlot) noexcept {
+    constexpr std::size_t kBlockRows = 64;
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const T *const xData = X.data();
+    std::array<T, kBlockRows> distances{};
+
+    for (std::size_t i = lo; i < hi; ++i) {
+      const T *const rowI = xData + (i * d);
+      for (std::size_t base = 0; base < n; base += kBlockRows) {
+        const std::size_t count = std::min(kBlockRows, n - base);
+        math::detail::sqDistancesAosBlock(rowI, xData + (base * d), count, d, distances.data());
+        for (std::size_t offset = 0; offset < count; ++offset) {
+          const std::size_t j = base + offset;
+          if (j != i) {
+            updateTopK(topK, worstSlot, minSamples, i, distances[offset]);
+          }
+        }
+      }
     }
   }
 };

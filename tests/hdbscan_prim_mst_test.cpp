@@ -299,6 +299,30 @@ TEST(PrimMstDenseCore, CoreDistancesAgreeWithReferenceAtDim32) {
   }
 }
 
+TEST(PrimMstDenseCore, ParallelCoreDistancesMatchSerialAtDim32) {
+  const std::size_t n = 1100;
+  const std::size_t d = 32;
+  const std::size_t minSamples = 5;
+  const auto X = makeGaussianPoints(n, d, 0xD32C0A5FULL);
+
+  PrimMstBackend<float> serialBackend;
+  MstOutput<float> serialOut;
+  serialBackend.run(X, minSamples, Pool{}, serialOut);
+
+  BS::light_thread_pool workers(4);
+  PrimMstBackend<float> parallelBackend;
+  MstOutput<float> parallelOut;
+  parallelBackend.run(X, minSamples, Pool{&workers}, parallelOut);
+
+  ASSERT_EQ(parallelOut.edges.size(), serialOut.edges.size());
+  ASSERT_EQ(parallelOut.coreDistances.dim(0), serialOut.coreDistances.dim(0));
+  for (std::size_t i = 0; i < n; ++i) {
+    const float expected = serialOut.coreDistances(i);
+    const float tol = 1e-4F * std::max(1.0F, std::abs(expected));
+    EXPECT_NEAR(parallelOut.coreDistances(i), expected, tol) << "i=" << i;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Out-of-budget assertion: a shape whose MRD matrix exceeds kPrimMrdMatrixByteBudget fires
 // CLUSTERING_ALWAYS_ASSERT before allocating. Death test: size chosen so n*n*sizeof(float)
