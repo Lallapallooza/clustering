@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 import matplotlib._pylab_helpers as pylab_helpers
 import pytest
+from matplotlib.collections import PolyCollection
 from matplotlib.lines import Line2D
 
 from pybench.charts.figure import (
@@ -108,12 +110,11 @@ def _grid_inputs(
     )
 
 
-def _ratio_lines(ax: Any) -> list[Line2D]:
-    # Solid lines are the per-n_jobs series; the dashed one is the parity line.
+def _solid_lines(ax: Any) -> list[Line2D]:
     return [ln for ln in ax.get_lines() if ln.get_linestyle() == "-"]
 
 
-def _parity_lines(ax: Any) -> list[Line2D]:
+def _dashed_lines(ax: Any) -> list[Line2D]:
     return [ln for ln in ax.get_lines() if ln.get_linestyle() == "--"]
 
 
@@ -130,7 +131,10 @@ def test_figure_has_2xD_axes_for_D_dims() -> None:
         assert ax.get_yscale() == "log"
 
 
-def test_figure_has_one_parity_line_per_axes() -> None:
+def test_figure_has_no_parity_line_per_axes() -> None:
+    # Absolute-value chart: there is no parity "theirs = ours" line. The
+    # dashed Line2Ds on each axes are the per-n_jobs "theirs" curves, none of
+    # which sit at y=1.0 across every x.
     inputs = _grid_inputs(
         dims=(2, 8),
         sizes=(1000, 5000),
@@ -138,21 +142,65 @@ def test_figure_has_one_parity_line_per_axes() -> None:
     )
     fig = build_figure(inputs)
     for ax in fig.axes:
-        parity = _parity_lines(ax)
-        assert len(parity) == 1
-        ydata = parity[0].get_ydata()
-        assert all(y == 1.0 for y in ydata)
+        for ln in ax.get_lines():
+            ydata = list(ln.get_ydata())
+            if not ydata:
+                continue
+            flat_at_one = all(y == 1.0 for y in ydata)
+            assert not flat_at_one
 
 
-def test_figure_has_one_line_per_njobs_per_axes() -> None:
+def test_figure_has_no_axhspan_win_loss_bands() -> None:
+    inputs = _grid_inputs(
+        dims=(2, 8),
+        sizes=(1000, 5000),
+        n_jobs=(1, 4),
+    )
+    fig = build_figure(inputs)
+    # axhspan creates a Rectangle patch whose transform uses blended
+    # axes+data coords; we assert there is no large rectangle patch covering
+    # the axis by checking that no axes carries Rectangle patches outside of
+    # the matplotlib-internal frame.
+    from matplotlib.patches import Rectangle
+
+    for ax in fig.axes:
+        # The standard axes frame rectangles live in ax.patch, not ax.patches.
+        patches = [p for p in ax.patches if isinstance(p, Rectangle)]
+        assert patches == []
+
+
+def test_figure_has_ours_and_theirs_line_per_njobs_per_axes() -> None:
+    # 2 * J lines per facet: one solid "ours" + one dashed "theirs" per n_jobs.
     inputs = _grid_inputs(
         dims=(2, 8),
         sizes=(1000, 5000, 10000),
         n_jobs=(1, 4, 8),
     )
     fig = build_figure(inputs)
+    n_njobs = 3
     for ax in fig.axes:
-        assert len(_ratio_lines(ax)) == 3
+        solid = _solid_lines(ax)
+        dashed = _dashed_lines(ax)
+        assert len(solid) == n_njobs
+        assert len(dashed) == n_njobs
+        # Sanity: total Line2Ds on the data axes is 2 * J.
+        assert len(ax.get_lines()) == 2 * n_njobs
+
+
+def test_fill_between_marks_win_region() -> None:
+    # Every (size, dim, n_jobs) has ours < theirs (default fixture has
+    # ours=10ms, theirs=20ms), so every facet should produce at least one
+    # PolyCollection from fill_between per n_jobs.
+    inputs = _grid_inputs(
+        dims=(2, 8),
+        sizes=(1000, 5000, 10000),
+        n_jobs=(1, 4),
+    )
+    fig = build_figure(inputs)
+    for ax in fig.axes:
+        polys = [c for c in ax.collections if isinstance(c, PolyCollection)]
+        # One PolyCollection per n_jobs line.
+        assert len(polys) >= 2
 
 
 def test_viridis_color_ordering() -> None:
@@ -163,15 +211,34 @@ def test_viridis_color_ordering() -> None:
     )
     fig = build_figure(inputs)
     top_ax = fig.axes[0]
-    ratio_lines = _ratio_lines(top_ax)
-    assert len(ratio_lines) == 3
-    # Sort by the n_jobs encoded in the label.
-    ratio_lines.sort(key=lambda ln: int(ln.get_label().split("=")[1]))
-    colors = [ln.get_color() for ln in ratio_lines]
+    solid = _solid_lines(top_ax)
+    assert len(solid) == 3
+    # Sort by the n_jobs encoded in the label (format "ours n_jobs=K").
+    solid.sort(key=lambda ln: int(ln.get_label().split("=")[1]))
+    colors = [ln.get_color() for ln in solid]
     # Viridis goes dark/low-luminance to light/high-luminance. Compare perceived
     # luminance (rec 601 weights) so ordering survives the RGBA encoding.
     lumas = [0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] for c in colors]
     assert lumas[0] < lumas[1] < lumas[2]
+
+
+def test_ours_and_theirs_share_color_per_njobs() -> None:
+    inputs = _grid_inputs(
+        dims=(2,),
+        sizes=(1000, 5000),
+        n_jobs=(1, 4, 16),
+    )
+    fig = build_figure(inputs)
+    top_ax = fig.axes[0]
+    solid = {
+        int(ln.get_label().split("=")[1]): ln.get_color() for ln in _solid_lines(top_ax)
+    }
+    dashed = {
+        int(ln.get_label().split("=")[1]): ln.get_color()
+        for ln in _dashed_lines(top_ax)
+    }
+    for nj in (1, 4, 16):
+        assert solid[nj] == dashed[nj]
 
 
 def test_missing_cells_render_as_gaps() -> None:
@@ -184,13 +251,15 @@ def test_missing_cells_render_as_gaps() -> None:
     fig = build_figure(inputs)
     top_ax = fig.axes[0]
     line_for_nj4 = next(
-        ln for ln in _ratio_lines(top_ax) if ln.get_label() == "n_jobs=4"
+        ln for ln in _solid_lines(top_ax) if ln.get_label() == "ours n_jobs=4"
     )
     ys = list(line_for_nj4.get_ydata())
     assert any(math.isnan(y) for y in ys)
 
 
-def test_ratio_is_nan_when_ours_is_zero() -> None:
+def test_zero_ours_renders_as_nan_gap() -> None:
+    # Defensive: a zero (non-finite on log scale) ours value should not emit
+    # inf/nan propagation; the curve simply breaks at that point.
     inputs = _grid_inputs(
         dims=(2,),
         sizes=(1000, 5000),
@@ -199,7 +268,7 @@ def test_ratio_is_nan_when_ours_is_zero() -> None:
     )
     fig = build_figure(inputs)
     for ax in fig.axes[:2]:
-        for ln in _ratio_lines(ax):
+        for ln in _solid_lines(ax):
             ys = list(ln.get_ydata())
             assert not any(math.isinf(y) for y in ys)
             assert any(math.isnan(y) for y in ys)
@@ -242,7 +311,7 @@ def test_title_contains_meta() -> None:
     assert "Xeon-7777" in all_title_text
 
 
-def test_figure_legend_lists_each_njobs_and_parity() -> None:
+def test_figure_legend_lists_each_njobs_and_curve_style() -> None:
     inputs = _grid_inputs(
         dims=(2, 8),
         sizes=(1000, 5000),
@@ -251,14 +320,19 @@ def test_figure_legend_lists_each_njobs_and_parity() -> None:
     fig = build_figure(inputs)
     assert len(fig.legends) == 1
     labels = [t.get_text() for t in fig.legends[0].get_texts()]
+    # ours + theirs style swatches exactly once.
+    assert labels.count("ours") == 1
+    assert labels.count("theirs") == 1
+    # One n_jobs entry per observed n_jobs value.
     for nj in (1, 4, 8):
         assert any(f"n_jobs = {nj}" == lbl for lbl in labels)
-    assert any("parity" in lbl for lbl in labels)
+    # No parity entry on an absolute-value chart.
+    assert not any("parity" in lbl for lbl in labels)
 
 
-def test_axes_have_no_text_annotations() -> None:
-    # Former endpoint labels overlapped; identification now lives in the
-    # figure-level legend, so data axes stay free of ad-hoc text artifacts.
+def test_axes_have_endpoint_label_per_njobs() -> None:
+    # Each data facet carries exactly J text annotations -- one ratio label per
+    # n_jobs curve at its rightmost finite x.
     inputs = _grid_inputs(
         dims=(2, 8),
         sizes=(1000, 5000),
@@ -266,7 +340,186 @@ def test_axes_have_no_text_annotations() -> None:
     )
     fig = build_figure(inputs)
     for ax in fig.axes:
-        assert list(ax.texts) == []
+        assert len(ax.texts) == 2
+        ratio_pattern = re.compile(r"^(\d+(\.\d+)?x|n/a)$")
+        for txt in ax.texts:
+            assert ratio_pattern.match(txt.get_text())
+
+
+def test_endpoint_label_uses_format_ratio_label() -> None:
+    # One cell, three different (size, n_jobs) combinations with distinct
+    # ratios so the rightmost label matches format_ratio_label exactly.
+    results = [
+        _make_result(
+            size=1000, dims=2, n_jobs=1, ours_median_ms=5.0, theirs_median_ms=15.0
+        ),
+        _make_result(
+            size=2000, dims=2, n_jobs=1, ours_median_ms=4.0, theirs_median_ms=12.0
+        ),
+        _make_result(
+            size=1000, dims=2, n_jobs=4, ours_median_ms=3.0, theirs_median_ms=9.0
+        ),
+        _make_result(
+            size=2000, dims=2, n_jobs=4, ours_median_ms=2.0, theirs_median_ms=6.0
+        ),
+    ]
+    inputs = BuildFigureInputs(
+        algo="dbscan",
+        partition_results=tuple(results),
+        dims_sorted=(2,),
+        title_meta=_meta(),
+        non_njobs_params=(),
+        dataset_spec="",
+        ari_threshold=None,
+    )
+    fig = build_figure(inputs)
+    top_ax = fig.axes[0]
+    assert len(top_ax.texts) == 2
+    # At rightmost size (2000), ratios are theirs/ours = 12/4 = 3.0 (nj=1) and
+    # 6/2 = 3.0 (nj=4); both render as "3.0x".
+    labels = sorted(t.get_text() for t in top_ax.texts)
+    assert labels == ["3.0x", "3.0x"]
+    # Memory row uses the default ours=50, theirs=100 -> 2.0x.
+    bot_ax = fig.axes[1]
+    labels_mem = sorted(t.get_text() for t in bot_ax.texts)
+    assert labels_mem == ["2.0x", "2.0x"]
+
+
+def test_ours_curve_ydata_equals_run_result_field() -> None:
+    # Hand-built single-cell input: the solid line's ydata must equal
+    # ours_median_ms on the time axis and ours_peak_mb on the memory axis.
+    # Same invariant for dashed = theirs.
+    results = [
+        _make_result(
+            size=1000,
+            dims=2,
+            n_jobs=1,
+            ours_median_ms=7.5,
+            theirs_median_ms=11.0,
+            ours_peak_mb=42.0,
+            theirs_peak_mb=97.0,
+        ),
+        _make_result(
+            size=5000,
+            dims=2,
+            n_jobs=1,
+            ours_median_ms=23.0,
+            theirs_median_ms=80.0,
+            ours_peak_mb=120.0,
+            theirs_peak_mb=310.0,
+        ),
+    ]
+    inputs = BuildFigureInputs(
+        algo="dbscan",
+        partition_results=tuple(results),
+        dims_sorted=(2,),
+        title_meta=_meta(),
+        non_njobs_params=(),
+        dataset_spec="",
+        ari_threshold=None,
+    )
+    fig = build_figure(inputs)
+    top_ax = fig.axes[0]
+    bot_ax = fig.axes[1]
+    solid_top = _solid_lines(top_ax)[0]
+    dashed_top = _dashed_lines(top_ax)[0]
+    assert list(solid_top.get_ydata()) == [7.5, 23.0]
+    assert list(dashed_top.get_ydata()) == [11.0, 80.0]
+    solid_bot = _solid_lines(bot_ax)[0]
+    dashed_bot = _dashed_lines(bot_ax)[0]
+    assert list(solid_bot.get_ydata()) == [42.0, 120.0]
+    assert list(dashed_bot.get_ydata()) == [97.0, 310.0]
+
+
+def test_time_row_y_ticks_format_as_ms_or_s() -> None:
+    # Time axis labels read as "12 ms", "1.2 s", etc -- not as ratio "12x".
+    # We ensure the data range crosses the ms/s boundary so both units appear.
+    results = [
+        _make_result(
+            size=s, dims=2, n_jobs=1, ours_median_ms=ms_ours, theirs_median_ms=ms_theirs
+        )
+        for s, ms_ours, ms_theirs in (
+            (1000, 5.0, 10.0),
+            (5000, 50.0, 100.0),
+            (10000, 500.0, 1000.0),
+            (50000, 5000.0, 10000.0),
+        )
+    ]
+    inputs = BuildFigureInputs(
+        algo="kmeans",
+        partition_results=tuple(results),
+        dims_sorted=(2,),
+        title_meta=_meta(),
+        non_njobs_params=(),
+        dataset_spec="",
+        ari_threshold=None,
+    )
+    fig = build_figure(inputs)
+    time_ax = fig.axes[0]
+    # Force a draw so tick labels materialize.
+    fig.canvas.draw()
+    labels = [t.get_text() for t in time_ax.get_yticklabels() if t.get_text().strip()]
+    assert labels, "time axis produced no tick labels"
+    # Every non-empty label ends with an ms or s unit; no ratio "x".
+    for lbl in labels:
+        stripped = lbl.strip()
+        assert not stripped.endswith("x"), f"time label {lbl!r} looks like a ratio"
+        assert stripped.endswith("ms") or stripped.endswith("s"), (
+            f"time label {lbl!r} missing ms/s suffix"
+        )
+
+
+def test_mem_row_y_ticks_format_as_MB_or_GB() -> None:
+    results = [
+        _make_result(
+            size=s, dims=2, n_jobs=1, ours_peak_mb=mb_ours, theirs_peak_mb=mb_theirs
+        )
+        for s, mb_ours, mb_theirs in (
+            (1000, 5.0, 10.0),
+            (5000, 50.0, 200.0),
+            (10000, 500.0, 2000.0),
+        )
+    ]
+    inputs = BuildFigureInputs(
+        algo="kmeans",
+        partition_results=tuple(results),
+        dims_sorted=(2,),
+        title_meta=_meta(),
+        non_njobs_params=(),
+        dataset_spec="",
+        ari_threshold=None,
+    )
+    fig = build_figure(inputs)
+    mem_ax = fig.axes[1]
+    fig.canvas.draw()
+    labels = [t.get_text() for t in mem_ax.get_yticklabels() if t.get_text().strip()]
+    assert labels, "memory axis produced no tick labels"
+    for lbl in labels:
+        stripped = lbl.strip()
+        assert not stripped.endswith("x"), f"memory label {lbl!r} looks like a ratio"
+        assert (
+            stripped.endswith("MB")
+            or stripped.endswith("GB")
+            or stripped.endswith("KB")
+        ), f"memory label {lbl!r} missing MB/GB/KB suffix"
+
+
+def test_row_ylabels_describe_absolute_metric() -> None:
+    inputs = _grid_inputs(
+        dims=(2, 8),
+        sizes=(1000, 5000),
+        n_jobs=(1,),
+    )
+    fig = build_figure(inputs)
+    top_left = fig.axes[0]
+    bot_left = fig.axes[2]
+    # The leftmost-column axes carry the row labels; others leave it blank to
+    # avoid repetition.
+    assert "time" in top_left.get_ylabel()
+    assert "memory" in bot_left.get_ylabel()
+    # Crucially, the label does NOT read "theirs / ours" (old ratio chart).
+    assert "theirs / ours" not in top_left.get_ylabel()
+    assert "theirs / ours" not in bot_left.get_ylabel()
 
 
 def test_build_empty_figure() -> None:
@@ -294,9 +547,9 @@ def test_format_ratio_label(r: float, expected: str) -> None:
     assert format_ratio_label(r) == expected
 
 
-def test_facet_has_major_yticks_when_ratios_sit_below_parity() -> None:
-    # Regression: when every ratio for a facet is well below 1x (e.g. memory
-    # ratios of 0.1x-0.5x), the axis must still carry labeled gridlines.
+def test_facet_has_major_yticks_for_memory_in_MB_range() -> None:
+    # Regression: the memory axis must always carry labeled gridlines, no
+    # matter where the data sits on the log scale.
     results = [
         _make_result(
             size=s,

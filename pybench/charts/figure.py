@@ -11,7 +11,6 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedLocator, FuncFormatter, NullLocator
 
-from pybench.charts.data import safe_ratio
 from pybench.charts.meta import RunMetadata
 from pybench.recipe import RunResult
 
@@ -28,74 +27,73 @@ class BuildFigureInputs:
 
 
 # Paper-grade palette: near-black for headings, warm grey chrome, desaturated
-# green/red for the win/loss bands. Data colors come from a widened viridis
+# green for the win-region shading. Data colors come from a widened viridis
 # slice for strong contrast between series (see _series_colors).
 _TEXT = "#111419"
 _MUTED = "#4E5866"
 _AXIS = "#2A313A"
 _GRID = "#E4E8ED"
-_PARITY = "#6C7480"
 _BAND_WIN = "#3EA06E"
-_BAND_LOSS = "#D06963"
 
-# Tiered tick lists ordered coarse -> fine. _pick_log_ticks walks the tiers and
-# picks the first one that produces 3-7 ticks inside a facet's y-range. Every
-# tier includes 1.0 so parity lines up on a gridline whenever it's in view. The
-# low end extends below 0.1 so facets where one side dominates (e.g. memory
-# ratios of 0.1x-0.5x) still get labeled gridlines instead of a blank axis.
-_TICK_TIERS: tuple[tuple[float, ...], ...] = (
-    (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0),
-    (
-        0.03,
-        0.05,
-        0.1,
-        0.2,
-        0.3,
-        0.5,
-        0.7,
-        1.0,
-        1.5,
-        2.0,
-        3.0,
-        5.0,
-        7.0,
-        10.0,
-        20.0,
-        50.0,
-        100.0,
-    ),
-    (0.2, 0.3, 0.5, 0.7, 0.85, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0),
-    (0.7, 0.8, 0.85, 0.95, 1.0, 1.1, 1.2, 1.35, 1.5, 1.7, 2.0, 2.5, 3.0),
-    (0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.2, 1.3, 1.4, 1.5, 1.7, 2.0, 2.5),
+# Decade anchors used to pick absolute log-scale ticks. _pick_abs_ticks walks
+# the decade lattice and keeps ticks that land inside the facet's y-range. We
+# thin the list when it would produce more than ~7 labels so the axis reads
+# cleanly at paper width.
+_TIME_TICK_LATTICE: tuple[float, ...] = (
+    0.001,
+    0.01,
+    0.1,
+    1.0,
+    10.0,
+    100.0,
+    1_000.0,
+    10_000.0,
+    100_000.0,
+    1_000_000.0,
+)
+_MEM_TICK_LATTICE: tuple[float, ...] = (
+    0.001,
+    0.01,
+    0.1,
+    1.0,
+    10.0,
+    100.0,
+    1_000.0,
+    10_000.0,
+    100_000.0,
+    1_000_000.0,
 )
 
 
-def _pick_log_ticks(
-    lo: float, hi: float, *, target_min: int = 3, target_max: int = 7
+def _pick_abs_ticks(
+    lattice: tuple[float, ...],
+    lo: float,
+    hi: float,
+    *,
+    target_max: int = 7,
 ) -> list[float]:
-    """Pick a clean set of major ticks for a log-scale range ``[lo, hi]``.
+    """Pick a clean set of absolute log-scale ticks inside ``[lo, hi]``.
 
-    Walks the curated tiers coarse -> fine and returns the first that lands in
-    the target count window. If no tier matches, returns the non-empty tier
-    whose count is closest to the window so the axis never renders blank.
+    Walks the decade lattice and keeps every anchor that falls within the
+    padded range. When too many anchors match we thin uniformly so the axis
+    never carries more than ~7 labels.
     """
-    best: list[float] = []
-    best_score = math.inf
-    for tier in _TICK_TIERS:
-        in_range = [t for t in tier if lo <= t <= hi]
-        n = len(in_range)
-        if target_min <= n <= target_max:
-            return in_range
-        if n == 0:
-            continue
-        score = target_min - n if n < target_min else n - target_max
-        if score < best_score:
-            best_score = score
-            best = in_range
-    if len(best) > target_max:
-        step = (len(best) - 1) / (target_max - 1)
-        return [best[round(i * step)] for i in range(target_max)]
-    return best
+    in_range = [t for t in lattice if lo <= t <= hi]
+    if not in_range:
+        # Fall back to the two anchors bracketing the range so the axis always
+        # labels something.
+        below = [t for t in lattice if t < lo]
+        above = [t for t in lattice if t > hi]
+        bracket: list[float] = []
+        if below:
+            bracket.append(below[-1])
+        if above:
+            bracket.append(above[0])
+        return bracket
+    if len(in_range) <= target_max:
+        return in_range
+    step = (len(in_range) - 1) / (target_max - 1)
+    return [in_range[round(i * step)] for i in range(target_max)]
 
 
 def _padded_log_range(
@@ -103,10 +101,9 @@ def _padded_log_range(
 ) -> tuple[float, float]:
     """Tight log-scale bounds around ``values`` with a small multiplicative pad.
 
-    Intentionally does NOT force parity (1.0) into view -- when every value is
-    comfortably above 1x, including 1x would drag the scale down and compress
-    the data. The green/red win/loss shading continues to mark the parity
-    crossover wherever it falls inside the axis range.
+    Only considers finite, strictly positive values. Returns a sensible default
+    ``[1/pad_fold, pad_fold]`` when no valid sample exists, so a fully-missing
+    facet still renders a labeled axis instead of an empty canvas.
     """
     finite = [v for v in values if math.isfinite(v) and v > 0]
     if not finite:
@@ -131,6 +128,33 @@ def format_ratio_label(r: float) -> str:
     return f"{_round_half_up(r, 0)}x"
 
 
+def _fmt_time_tick(y: float, _pos: int) -> str:
+    if y <= 0 or not math.isfinite(y):
+        return ""
+    if y < 1.0:
+        return f"{y * 1000:g} us" if y * 1000 < 1000 else f"{y:g} ms"
+    if y < 1000.0:
+        v = y
+        return f"{int(v)} ms" if v == int(v) else f"{v:g} ms"
+    if y < 60_000.0:
+        v = y / 1000.0
+        return f"{int(v)} s" if v == int(v) else f"{v:g} s"
+    v = y / 60_000.0
+    return f"{int(v)} min" if v == int(v) else f"{v:g} min"
+
+
+def _fmt_mem_tick(y: float, _pos: int) -> str:
+    if y <= 0 or not math.isfinite(y):
+        return ""
+    if y < 1.0:
+        v = y * 1024.0
+        return f"{int(v)} KB" if v == int(v) else f"{v:g} KB"
+    if y < 1024.0:
+        return f"{int(y)} MB" if y == int(y) else f"{y:g} MB"
+    v = y / 1024.0
+    return f"{int(v)} GB" if v == int(v) else f"{v:g} GB"
+
+
 def _get_n_jobs(r: RunResult) -> int:
     return int(r.params.get("n_jobs", -1))
 
@@ -141,38 +165,55 @@ def _format_non_njobs_params(pairs: tuple[tuple[str, Any], ...]) -> str:
     return "  |  ".join(f"{k}={v}" for k, v in pairs)
 
 
-def _collect_line(
+def _metric_fields(metric: str) -> tuple[str, str]:
+    if metric == "time":
+        return ("ours_median_ms", "theirs_median_ms")
+    return ("ours_peak_mb", "theirs_peak_mb")
+
+
+def _collect_abs_series(
     results: tuple[RunResult, ...],
     dim: int,
     n_jobs: int,
     metric: str,
-) -> tuple[list[int], list[float]]:
-    by_size: dict[int, float] = {}
+) -> tuple[list[int], list[float], list[float]]:
+    """Return aligned ``(sizes, ours_values, theirs_values)`` for the cell.
+
+    Values that are not positive and finite are replaced with NaN so matplotlib
+    renders broken segments for missing data without the caller thinking about
+    it. The size order is the ascending union of sizes present in the cell.
+    """
+    ours_field, theirs_field = _metric_fields(metric)
+    per_size: dict[int, tuple[float, float]] = {}
     for r in results:
         if r.dims != dim or _get_n_jobs(r) != n_jobs:
             continue
-        if metric == "time":
-            ratio = safe_ratio(r.theirs_median_ms, r.ours_median_ms)
-        else:
-            ratio = safe_ratio(r.theirs_peak_mb, r.ours_peak_mb)
-        by_size[r.size] = ratio
-    sizes = sorted(by_size.keys())
-    ratios = [by_size[s] for s in sizes]
-    return sizes, ratios
+        ours = float(getattr(r, ours_field))
+        theirs = float(getattr(r, theirs_field))
+        per_size[r.size] = (ours, theirs)
+    sizes = sorted(per_size.keys())
+    ours_ys = [_to_positive_or_nan(per_size[s][0]) for s in sizes]
+    theirs_ys = [_to_positive_or_nan(per_size[s][1]) for s in sizes]
+    return sizes, ours_ys, theirs_ys
+
+
+def _to_positive_or_nan(v: float) -> float:
+    if math.isfinite(v) and v > 0:
+        return v
+    return math.nan
 
 
 def _all_sizes_for_dim(results: tuple[RunResult, ...], dim: int) -> list[int]:
     return sorted({r.size for r in results if r.dims == dim})
 
 
-def _fill_gaps(
+def _align_to(
     all_sizes: list[int],
     present_sizes: list[int],
-    ratios: list[float],
+    values: list[float],
 ) -> tuple[list[int], list[float]]:
-    # NaN entries render as broken segments, which is the desired visual for
-    # a missing (size, n_jobs) cell.
-    present = dict(zip(present_sizes, ratios, strict=True))
+    """Pad ``values`` with NaN so each column in ``all_sizes`` is covered."""
+    present = dict(zip(present_sizes, values, strict=True))
     aligned = [present.get(s, math.nan) for s in all_sizes]
     return list(all_sizes), aligned
 
@@ -187,17 +228,7 @@ def _fmt_size_tick(x: float, _pos: int) -> str:
     return f"{x:g}"
 
 
-def _fmt_ratio_tick(y: float, _pos: int) -> str:
-    if y <= 0 or not math.isfinite(y):
-        return ""
-    if y >= 1.0:
-        if y == int(y):
-            return f"{int(y)}x"
-        return f"{y:g}x"
-    return f"{y:g}x"
-
-
-def _style_axes(ax: Any, *, sizes: list[int]) -> None:
+def _style_axes(ax: Any, *, sizes: list[int], metric: str) -> None:
     ax.set_xscale("log")
     ax.set_yscale("log")
 
@@ -232,7 +263,10 @@ def _style_axes(ax: Any, *, sizes: list[int]) -> None:
     ax.tick_params(axis="both", which="minor", length=0)
 
     # Y-major ticks are pinned later (per-facet) once we know the data range.
-    ax.yaxis.set_major_formatter(FuncFormatter(_fmt_ratio_tick))
+    if metric == "time":
+        ax.yaxis.set_major_formatter(FuncFormatter(_fmt_time_tick))
+    else:
+        ax.yaxis.set_major_formatter(FuncFormatter(_fmt_mem_tick))
     ax.yaxis.set_minor_locator(NullLocator())
 
     # Pin x-major ticks to the actual dataset sizes so each data column lines up
@@ -241,11 +275,6 @@ def _style_axes(ax: Any, *, sizes: list[int]) -> None:
         ax.xaxis.set_major_locator(FixedLocator(sizes))
     ax.xaxis.set_major_formatter(FuncFormatter(_fmt_size_tick))
     ax.xaxis.set_minor_locator(NullLocator())
-
-    # Every facet carries its own x- and y-tick labels. Rows no longer share a
-    # y-scale (each (metric, dim) has its own natural range), and the speedup
-    # row would otherwise sit above unlabeled x-ticks -- so we label every axis
-    # instead of relying on the shared-axis convention.
 
 
 def _plot_one_axes(
@@ -257,40 +286,104 @@ def _plot_one_axes(
     metric: str,
     colors: list[Any],
 ) -> None:
-    # Win/loss bands first so they sit under everything else. A touch more
-    # saturated than a typical paper preprint so the reader sees at a glance
-    # which side of parity the curve lives on.
-    ax.axhspan(1.0, 1e8, facecolor=_BAND_WIN, alpha=0.07, zorder=0)
-    ax.axhspan(1e-8, 1.0, facecolor=_BAND_LOSS, alpha=0.07, zorder=0)
-    # Parity line (dashed). A Line2D with linestyle="--" is what the tests
-    # distinguish from the solid series lines.
-    ax.axhline(
-        1.0,
-        linestyle="--",
-        linewidth=1.1,
-        color=_PARITY,
-        alpha=0.95,
-        zorder=1,
-    )
+    """Plot ours/theirs absolute curves for every n_jobs in ``n_jobs_values``.
+
+    One solid Line2D (ours) plus one dashed Line2D (theirs) per n_jobs, sharing
+    the viridis-slice color. ``fill_between`` shades the win region (ours below
+    theirs) at low alpha. Each n_jobs contributes a ratio annotation at the
+    rightmost finite x, vertically fanned so overlapping labels stay legible.
+    """
     all_sizes = _all_sizes_for_dim(results, dim)
+    j = len(n_jobs_values)
     for i, nj in enumerate(n_jobs_values):
-        present_sizes, ratios = _collect_line(results, dim, nj, metric)
-        xs, ys = _fill_gaps(all_sizes, present_sizes, ratios)
+        present_sizes, ours_present, theirs_present = _collect_abs_series(
+            results, dim, nj, metric
+        )
+        xs, ours_ys = _align_to(all_sizes, present_sizes, ours_present)
+        _, theirs_ys = _align_to(all_sizes, present_sizes, theirs_present)
         if not xs:
             continue
+
+        color = colors[i]
         ax.plot(
             xs,
-            ys,
+            ours_ys,
             marker="o",
             linestyle="-",
-            linewidth=2.3,
-            markersize=7.0,
+            linewidth=2.2,
+            markersize=6.5,
             markeredgecolor="white",
-            markeredgewidth=1.1,
-            color=colors[i],
-            label=f"n_jobs={nj}",
+            markeredgewidth=1.0,
+            color=color,
+            label=f"ours n_jobs={nj}",
             zorder=3,
         )
+        ax.plot(
+            xs,
+            theirs_ys,
+            marker="o",
+            linestyle="--",
+            linewidth=1.8,
+            markersize=5.5,
+            markeredgecolor="white",
+            markeredgewidth=0.9,
+            color=color,
+            label=f"theirs n_jobs={nj}",
+            zorder=2,
+        )
+
+        # Shade the win region (ours below theirs). Missing-data NaNs drop out
+        # of the mask cleanly so partial curves don't inherit a stray polygon.
+        where_mask = [
+            math.isfinite(o) and math.isfinite(t) and o < t
+            for o, t in zip(ours_ys, theirs_ys, strict=True)
+        ]
+        ax.fill_between(
+            xs,
+            ours_ys,
+            theirs_ys,
+            where=where_mask,
+            interpolate=False,
+            facecolor=_BAND_WIN,
+            edgecolor="none",
+            alpha=0.08,
+            zorder=1,
+        )
+
+        # Endpoint ratio label: take the last position where both sides are
+        # finite, fan vertically so labels across n_jobs don't overlap.
+        rightmost_idx = _rightmost_matched_index(ours_ys, theirs_ys)
+        if rightmost_idx is None:
+            continue
+        x_pt = xs[rightmost_idx]
+        o = ours_ys[rightmost_idx]
+        t = theirs_ys[rightmost_idx]
+        ratio = t / o if math.isfinite(o) and o > 0 and math.isfinite(t) else math.nan
+        label = format_ratio_label(ratio)
+        fontsize = 9.5
+        y_offset_pt = fontsize * (i - (j - 1) / 2.0)
+        ax.annotate(
+            label,
+            xy=(x_pt, o),
+            xytext=(6, y_offset_pt),
+            textcoords="offset points",
+            fontsize=fontsize,
+            color=color,
+            ha="left",
+            va="center",
+            zorder=4,
+        )
+
+
+def _rightmost_matched_index(
+    ours_ys: list[float], theirs_ys: list[float]
+) -> int | None:
+    for idx in range(len(ours_ys) - 1, -1, -1):
+        o = ours_ys[idx]
+        t = theirs_ys[idx]
+        if math.isfinite(o) and o > 0 and math.isfinite(t) and t > 0:
+            return idx
+    return None
 
 
 def _series_colors(cmap: Any, n: int) -> list[Any]:
@@ -323,7 +416,7 @@ def _draw_title_block(
     fig.text(
         0.99,
         0.958,
-        "higher is better",
+        "lower is better",
         fontsize=10.5,
         color=_MUTED,
         ha="right",
@@ -358,32 +451,49 @@ def _draw_header_rule(fig: Figure) -> None:
 
 
 def _draw_legend(fig: Figure, n_jobs_values: list[int], colors: list[Any]) -> None:
-    handles: list[Line2D] = []
+    # Two style entries ("ours" solid, "theirs" dashed) rendered in a neutral
+    # grey because color is the n_jobs axis. Then one swatch per n_jobs in the
+    # viridis slice. No parity entry -- absolute chart has no parity line.
+    handles: list[Line2D] = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="-",
+            linewidth=2.2,
+            markersize=6.5,
+            markeredgecolor="white",
+            markeredgewidth=1.0,
+            color=_AXIS,
+            label="ours",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="--",
+            linewidth=1.8,
+            markersize=5.5,
+            markeredgecolor="white",
+            markeredgewidth=0.9,
+            color=_AXIS,
+            label="theirs",
+        ),
+    ]
     for i, nj in enumerate(n_jobs_values):
         handles.append(
             Line2D(
                 [0],
                 [0],
-                marker="o",
-                linestyle="-",
-                linewidth=2.3,
-                markersize=7.0,
+                marker="s",
+                linestyle="none",
+                markersize=9.0,
                 markeredgecolor="white",
-                markeredgewidth=1.1,
+                markeredgewidth=0.8,
                 color=colors[i],
                 label=f"n_jobs = {nj}",
             )
         )
-    handles.append(
-        Line2D(
-            [0],
-            [0],
-            linestyle="--",
-            linewidth=1.1,
-            color=_PARITY,
-            label="parity (theirs = ours)",
-        )
-    )
     legend = fig.legend(
         handles=handles,
         loc="lower center",
@@ -448,8 +558,8 @@ def build_figure(inputs: BuildFigureInputs) -> Figure:
         top = axes[0][col]
         bot = axes[1][col]
         sizes_for_dim = _all_sizes_for_dim(inputs.partition_results, dim)
-        _style_axes(top, sizes=sizes_for_dim)
-        _style_axes(bot, sizes=sizes_for_dim)
+        _style_axes(top, sizes=sizes_for_dim, metric="time")
+        _style_axes(bot, sizes=sizes_for_dim, metric="mem")
 
         top.set_title(
             f"d = {dim}",
@@ -479,35 +589,42 @@ def build_figure(inputs: BuildFigureInputs) -> Figure:
 
         if col == 0:
             top.set_ylabel(
-                "time speedup   (theirs / ours)",
+                "time (ms, log)",
                 fontsize=11.5,
                 fontweight="medium",
                 color=_TEXT,
                 labelpad=8,
             )
             bot.set_ylabel(
-                "memory savings   (theirs / ours)",
+                "peak memory (MB, log)",
                 fontsize=11.5,
                 fontweight="medium",
                 color=_TEXT,
                 labelpad=8,
             )
 
-    # Pin axis limits AFTER drawing so the win/loss axhspans (extending to
-    # +/-1e8 to clip the plot area) can't drag the autoscaled range out to
-    # something meaningless. Each facet gets a y-range tight to its own data
-    # so the curves actually fill the plot area, and its tick list is picked
-    # to match that range's width.
+    # Pin axis limits AFTER drawing so autoscaled ranges don't run away when a
+    # facet has only one finite point. Each facet gets a tight y-range around
+    # the union of ours and theirs in its own (metric, dim) cell.
     for c, dim in enumerate(dims):
         facet = [r for r in inputs.partition_results if r.dims == dim]
-        time_vals = [safe_ratio(r.theirs_median_ms, r.ours_median_ms) for r in facet]
-        mem_vals = [safe_ratio(r.theirs_peak_mb, r.ours_peak_mb) for r in facet]
+        time_vals: list[float] = []
+        mem_vals: list[float] = []
+        for r in facet:
+            time_vals.append(float(r.ours_median_ms))
+            time_vals.append(float(r.theirs_median_ms))
+            mem_vals.append(float(r.ours_peak_mb))
+            mem_vals.append(float(r.theirs_peak_mb))
         t_lo, t_hi = _padded_log_range(time_vals)
         m_lo, m_hi = _padded_log_range(mem_vals)
         axes[0][c].set_ylim(t_lo, t_hi)
         axes[1][c].set_ylim(m_lo, m_hi)
-        axes[0][c].yaxis.set_major_locator(FixedLocator(_pick_log_ticks(t_lo, t_hi)))
-        axes[1][c].yaxis.set_major_locator(FixedLocator(_pick_log_ticks(m_lo, m_hi)))
+        axes[0][c].yaxis.set_major_locator(
+            FixedLocator(_pick_abs_ticks(_TIME_TICK_LATTICE, t_lo, t_hi))
+        )
+        axes[1][c].yaxis.set_major_locator(
+            FixedLocator(_pick_abs_ticks(_MEM_TICK_LATTICE, m_lo, m_hi))
+        )
         sizes_for_dim = _all_sizes_for_dim(inputs.partition_results, dim)
         if sizes_for_dim:
             lo = sizes_for_dim[0] / 1.15
