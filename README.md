@@ -122,7 +122,11 @@ uv run benchmark                                    # full suite
 uv run benchmark --algo dbscan --sizes 1000 10000   # quick run
 uv run benchmark --algo kmeans --sizes 5000 50000   # quick run
 uv run benchmark --list                             # show available recipes
+uv run benchmark vis --results benchmark_results/results.json \
+    --out benchmark_results/                        # cluster panels per dim
 ```
+
+`bench` writes a `.labels.npz` sidecar next to each PNG; `vis` reads it and renders ground-truth / ours / theirs / disagreement panels for the low / mid / high dims of the partition (or `--all-dims`). Pass `--no-labels` to skip.
 
 k-means vs scikit-learn (n_clusters=16, varying n and n_jobs)
 ![kmeans](resources/kmeans_benchmark.png)
