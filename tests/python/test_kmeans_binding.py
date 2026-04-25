@@ -125,6 +125,139 @@ def test_solver_reusable_after_first_kmeans_call() -> None:
     _assert(labels2.shape == (300,) and centroids2.shape == (5, 8), "second call shape")
 
 
+def test_kmeans_best_of_n_init_1_matches_kmeans() -> None:
+    # n_init=1 must reduce to a strict superset of the single-shot binding: one restart with
+    # seed=seed_first is bit-equal to kmeans(seed=seed_first). Bytes-level equality on labels
+    # and centroids; hex-level equality on the float64 inertia.
+    for n, d, k, s in [
+        (300, 8, 5, 0),
+        (400, 4, 6, 7),
+        (500, 12, 8, 99),
+        (200, 4, 3, 21),
+    ]:
+        X = _make_blobs(n=n, d=d, k=k, seed=s)
+        ref_labels, ref_centroids, ref_inertia, ref_n_iter, ref_conv = m.kmeans(
+            X, k=k, max_iter=100, tol=1e-4, seed=s, n_jobs=1
+        )
+        labels, centroids, inertia, n_iter, converged = m.kmeans_best_of(
+            X, k=k, max_iter=100, tol=1e-4, seed_first=s, n_jobs=1, n_init=1
+        )
+        _assert(
+            np.array_equal(labels, ref_labels),
+            f"labels diverge at (n={n}, d={d}, k={k}, s={s}) for n_init=1 vs kmeans",
+        )
+        _assert(
+            centroids.tobytes() == ref_centroids.tobytes(),
+            f"centroids differ bitwise at (n={n}, d={d}, k={k}, s={s}) for n_init=1 vs kmeans",
+        )
+        _assert(
+            inertia.hex() == ref_inertia.hex(),
+            f"inertia differs bitwise at (n={n}, d={d}, k={k}, s={s}): "
+            f"{inertia} vs {ref_inertia}",
+        )
+        _assert(
+            n_iter == ref_n_iter,
+            f"n_iter differs at (n={n}, d={d}, k={k}, s={s}): {n_iter} vs {ref_n_iter}",
+        )
+        _assert(
+            converged == ref_conv,
+            f"converged differs at (n={n}, d={d}, k={k}, s={s}): "
+            f"{converged} vs {ref_conv}",
+        )
+
+
+def test_kmeans_best_of_returns_best_inertia_run() -> None:
+    # Run the Python equivalent of kmeans_best_of: loop seed_first..seed_first+N-1, collect
+    # each restart's (inertia, labels, centroids, n_iter, converged), then assert that the
+    # single C++ kmeans_best_of call returns the lowest-inertia entry's outputs (not an
+    # arbitrary restart's).
+    X = _make_blobs(n=400, d=8, k=6, seed=33)
+    n_init = 5
+    seed_first = 10
+    runs = []
+    for i in range(n_init):
+        labels, centroids, inertia, n_iter, converged = m.kmeans(
+            X, k=6, max_iter=100, tol=1e-4, seed=seed_first + i, n_jobs=1
+        )
+        runs.append((inertia, labels, centroids, n_iter, converged))
+    best_idx = min(range(n_init), key=lambda i: runs[i][0])
+    (
+        expected_inertia,
+        expected_labels,
+        expected_centroids,
+        expected_n_iter,
+        expected_conv,
+    ) = runs[best_idx]
+
+    bo_labels, bo_centroids, bo_inertia, bo_n_iter, bo_converged = m.kmeans_best_of(
+        X, k=6, max_iter=100, tol=1e-4, seed_first=seed_first, n_jobs=1, n_init=n_init
+    )
+    _assert(
+        bo_inertia.hex() == expected_inertia.hex(),
+        f"best-of inertia diverges from best Python-loop inertia: "
+        f"{bo_inertia} vs {expected_inertia} (best_idx={best_idx})",
+    )
+    _assert(
+        np.array_equal(bo_labels, expected_labels),
+        f"best-of labels do not match the labels of the best-inertia run "
+        f"(best_idx={best_idx})",
+    )
+    _assert(
+        bo_centroids.tobytes() == expected_centroids.tobytes(),
+        f"best-of centroids do not match the centroids of the best-inertia run "
+        f"(best_idx={best_idx})",
+    )
+    _assert(
+        bo_n_iter == expected_n_iter,
+        f"best-of n_iter mismatch: {bo_n_iter} vs {expected_n_iter}",
+    )
+    _assert(
+        bo_converged == expected_conv,
+        f"best-of converged mismatch: {bo_converged} vs {expected_conv}",
+    )
+
+
+def test_kmeans_best_of_inertia_within_tolerance() -> None:
+    # Spec acceptance criterion: best inertia from the binding's restart loop differs from
+    # the equivalent Python loop's best by at most 1e-6 * best_python_loop. With matched
+    # seeds and a reused solver instance the two must agree bit-for-bit, but the spec's
+    # explicit tolerance is the one we lock in here.
+    X = _make_blobs(n=600, d=16, k=8, seed=44)
+    n_init = 5
+    seed_first = 100
+
+    best_python = float("inf")
+    for i in range(n_init):
+        _, _, inertia, _, _ = m.kmeans(
+            X, k=8, max_iter=100, tol=1e-4, seed=seed_first + i, n_jobs=1
+        )
+        if inertia < best_python:
+            best_python = inertia
+
+    _, _, best_binding, _, _ = m.kmeans_best_of(
+        X, k=8, max_iter=100, tol=1e-4, seed_first=seed_first, n_jobs=1, n_init=n_init
+    )
+
+    tol = 1e-6 * best_python
+    _assert(
+        abs(best_binding - best_python) <= tol,
+        f"best-of inertia {best_binding} differs from python-loop best {best_python} "
+        f"by more than {tol}",
+    )
+
+
+def test_kmeans_best_of_validation() -> None:
+    # n_init=0 must reject before any work happens; mirrors the existing k=0 / max_iter=0
+    # validation surface on kmeans_binding.
+    X = _make_blobs(n=200, d=4, k=3, seed=55)
+    raised = False
+    try:
+        m.kmeans_best_of(X, k=3, n_init=0)
+    except ValueError:
+        raised = True
+    _assert(raised, "kmeans_best_of with n_init=0 should raise ValueError")
+
+
 def main() -> int:
     tests = [
         test_shape_and_dtype_contract,
@@ -133,6 +266,10 @@ def main() -> int:
         test_converged_flag_roundtrip,
         test_high_k_completes_via_auto_dispatch,
         test_solver_reusable_after_first_kmeans_call,
+        test_kmeans_best_of_n_init_1_matches_kmeans,
+        test_kmeans_best_of_returns_best_inertia_run,
+        test_kmeans_best_of_inertia_within_tolerance,
+        test_kmeans_best_of_validation,
     ]
     failures = 0
     for test in tests:

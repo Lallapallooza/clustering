@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 import numpy as np
-from _clustering import kmeans as cpp_kmeans
+from _clustering import kmeans_best_of as cpp_kmeans_best_of
 from sklearn.cluster import KMeans
 
 from pybench.alignment import as_aligned
@@ -13,20 +13,20 @@ _N_INIT = 5
 
 
 def _ours(data: np.ndarray, *, n_clusters: int, n_jobs: int = 1) -> np.ndarray:
-    # One-shot align before the n_init loop so every fit borrows the same aligned
-    # buffer rather than forcing the C++ binding through its memcpy fallback.
+    # One-shot align so the C++ binding takes its zero-copy borrow path rather than
+    # the memcpy fallback. The n_init loop now lives inside the binding so a single
+    # KMeans<float> instance, thread pool, and policy scratch amortize across restarts.
     data = as_aligned(data)
-    best_labels: np.ndarray | None = None
-    best_inertia = float("inf")
-    for seed in range(_N_INIT):
-        labels, _, inertia, _, _ = cpp_kmeans(
-            data, k=n_clusters, max_iter=300, tol=1e-4, seed=seed, n_jobs=n_jobs
-        )
-        if inertia < best_inertia:
-            best_inertia = inertia
-            best_labels = labels
-    assert best_labels is not None
-    return best_labels
+    labels, _, _, _, _ = cpp_kmeans_best_of(
+        data,
+        k=n_clusters,
+        max_iter=300,
+        tol=1e-4,
+        seed_first=0,
+        n_jobs=n_jobs,
+        n_init=_N_INIT,
+    )
+    return labels
 
 
 def _theirs(data: np.ndarray, *, n_clusters: int, **_: object) -> np.ndarray:

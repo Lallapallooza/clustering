@@ -152,6 +152,96 @@ kmeans_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> da
 }
 
 static std::tuple<nb::ndarray<nb::numpy, std::int32_t, nb::ndim<1>>,
+                  nb::ndarray<nb::numpy, float, nb::ndim<2>>, double, std::size_t, bool>
+kmeans_best_of_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> data,
+                       std::size_t k, std::size_t max_iter, float tol, std::uint64_t seed_first,
+                       int n_jobs, std::size_t n_init) {
+  // Mirrors @c kmeans_binding's argument validation. The orchestration moves the @c n_init
+  // restart loop from Python into one C++ call so a single @c KMeans<float> instance, its
+  // thread pool, and its policy scratch (centroids, packed-B panels, GEMM plans, cached
+  // norms) amortize across all @c n_init restarts.
+  const std::size_t jobs = (n_jobs <= 0)
+                               ? static_cast<std::size_t>(std::thread::hardware_concurrency())
+                               : static_cast<std::size_t>(n_jobs);
+
+  const std::size_t N = data.shape(0);
+  const std::size_t D = data.shape(1);
+
+  if (k == 0) {
+    throw nb::value_error("k must be >= 1");
+  }
+  if (N > 0 && k > N) {
+    throw nb::value_error("k must be <= number of rows");
+  }
+  if (D == 0 && N > 0) {
+    throw nb::value_error("data must have d >= 1");
+  }
+  if (max_iter == 0) {
+    throw nb::value_error("max_iter must be >= 1");
+  }
+  if (!(tol >= 0.0F)) {
+    throw nb::value_error("tol must be >= 0");
+  }
+  if (n_init == 0) {
+    throw nb::value_error("n_init must be >= 1");
+  }
+
+  // Borrow the numpy buffer directly when it is 32-byte aligned: @c KMeans treats @p X as
+  // read-only and several AVX2 tiers assume 32-byte aligned loads on @p X through the
+  // @c NDArray::isAligned<32>() gate. Borrowing a loosely-aligned numpy array would force the
+  // dispatcher down fallback paths whose interactions are less thoroughly exercised. See
+  // @c kmeans_binding for the full rationale.
+  constexpr std::size_t kAvx2Align = 32;
+  const bool dataAligned = (reinterpret_cast<std::uintptr_t>(data.data()) % kAvx2Align) == 0;
+  NDArray<float, 2> xOwned({0, 0});
+  auto X = [&] {
+    if (dataAligned) {
+      return clustering::python::borrowFromNumpyContig<float>(data);
+    }
+    xOwned = NDArray<float, 2>({N, D});
+    std::memcpy(xOwned.data(), data.data(), N * D * sizeof(float));
+    return NDArray<float, 2, clustering::Layout::Contig>::borrow(xOwned.data(), {N, D});
+  }();
+
+  KMeans<float> algo(k, jobs);
+
+  // Best snapshot accumulated across the @c n_init restarts. Owned buffers are allocated here
+  // (rather than one snapshot per restart) so we copy on improvement and discard otherwise.
+  NDArray<std::int32_t, 1> best_labels({N});
+  NDArray<float, 2> best_centroids({k, D});
+  double best_inertia = std::numeric_limits<double>::infinity();
+  std::size_t best_n_iter = 0;
+  bool best_converged = false;
+  bool any_improvement = false;
+
+  {
+    nb::gil_scoped_release release;
+    for (std::size_t i = 0; i < n_init; ++i) {
+      const std::uint64_t seed = seed_first + static_cast<std::uint64_t>(i);
+      algo.run(X, max_iter, tol, seed);
+      const double inertia = algo.inertia();
+      if (!any_improvement || inertia < best_inertia) {
+        any_improvement = true;
+        best_inertia = inertia;
+        best_n_iter = algo.nIter();
+        best_converged = algo.converged();
+        if (N > 0) {
+          std::memcpy(best_labels.data(), algo.labels().data(), N * sizeof(std::int32_t));
+        }
+        std::memcpy(best_centroids.data(), algo.centroids().data(), k * D * sizeof(float));
+      }
+    }
+  }
+  // GIL re-acquired for the numpy allocation + wrap.
+
+  auto labels_np = wrapAsNumpy<std::int32_t>(std::move(best_labels));
+  auto centroids_np = wrapAsNumpy<float>(std::move(best_centroids));
+
+  return std::make_tuple(std::move(labels_np), std::move(centroids_np), best_inertia, best_n_iter,
+                         best_converged);
+}
+
+static std::tuple<nb::ndarray<nb::numpy, std::int32_t, nb::ndim<1>>,
                   nb::ndarray<nb::numpy, float, nb::ndim<1>>, std::size_t>
 hdbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> data,
                 std::size_t min_cluster_size, std::size_t min_samples, const std::string &method,
@@ -340,6 +430,15 @@ NB_MODULE(_clustering, m) {
         "(labels, centroids, inertia, n_iter, converged) where labels is int32 (N,), "
         "centroids is float32 (k, D), inertia is float64, n_iter is the iteration count, "
         "and converged is True iff the centroid shift fell at or below tol.");
+
+  m.def("kmeans_best_of", &kmeans_best_of_binding, nb::arg("data"), nb::arg("k"),
+        nb::arg("max_iter") = 300, nb::arg("tol") = 1e-4F, nb::arg("seed_first") = 0,
+        nb::arg("n_jobs") = -1, nb::arg("n_init") = 1,
+        "Run k-means n_init times against the same data and return the lowest-inertia "
+        "restart. Seeds advance as seed_first, seed_first+1, ..., seed_first+n_init-1, "
+        "and one KMeans<float> instance is reused across all restarts so the thread pool "
+        "and policy scratch amortize. Returns the same tuple as kmeans(...). With "
+        "n_init=1 the output is bit-equal to kmeans(data, k, ..., seed=seed_first, ...).");
 
   m.def("hdbscan", &hdbscan_binding, nb::arg("data"), nb::arg("min_cluster_size") = 5,
         nb::arg("min_samples") = 0, nb::arg("method") = "eom", nb::arg("n_jobs") = -1,
