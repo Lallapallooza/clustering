@@ -54,41 +54,70 @@ inline double horizontalSumAvx2(__m256d v) noexcept {
 }
 
 inline float sqEuclideanRowAvx2(const float *xRow, const float *yRow, std::size_t d) noexcept {
-  __m256 acc = _mm256_setzero_ps();
+  // Two independent FMA chains halve the dependency height: a single-accumulator chain stalls
+  // on the FMA latency at every iteration, while two interleaved chains let the second FMA
+  // issue while the first is in flight. Splitting even/odd 8-lane chunks into two
+  // accumulators bounds the per-chain depth at d/16.
+  __m256 ae = _mm256_setzero_ps();
+  __m256 ao = _mm256_setzero_ps();
   const bool xAligned = (reinterpret_cast<std::uintptr_t>(xRow) % 32) == 0;
   const bool yAligned = (reinterpret_cast<std::uintptr_t>(yRow) % 32) == 0;
   std::size_t k = 0;
-  for (; k + 8 <= d; k += 8) {
+  for (; k + 16 <= d; k += 16) {
+    const __m256 vx0 = xAligned ? _mm256_load_ps(xRow + k) : _mm256_loadu_ps(xRow + k);
+    const __m256 vy0 = yAligned ? _mm256_load_ps(yRow + k) : _mm256_loadu_ps(yRow + k);
+    const __m256 d0 = _mm256_sub_ps(vx0, vy0);
+    ae = _mm256_fmadd_ps(d0, d0, ae);
+    const __m256 vx1 = xAligned ? _mm256_load_ps(xRow + k + 8) : _mm256_loadu_ps(xRow + k + 8);
+    const __m256 vy1 = yAligned ? _mm256_load_ps(yRow + k + 8) : _mm256_loadu_ps(yRow + k + 8);
+    const __m256 d1 = _mm256_sub_ps(vx1, vy1);
+    ao = _mm256_fmadd_ps(d1, d1, ao);
+  }
+  if (k + 8 <= d) {
     const __m256 vx = xAligned ? _mm256_load_ps(xRow + k) : _mm256_loadu_ps(xRow + k);
     const __m256 vy = yAligned ? _mm256_load_ps(yRow + k) : _mm256_loadu_ps(yRow + k);
     const __m256 diff = _mm256_sub_ps(vx, vy);
-    acc = _mm256_add_ps(acc, _mm256_mul_ps(diff, diff));
+    ae = _mm256_fmadd_ps(diff, diff, ae);
+    k += 8;
   }
   float tail = 0.0F;
   for (; k < d; ++k) {
     const float diff = xRow[k] - yRow[k];
     tail += diff * diff;
   }
-  return horizontalSumAvx2(acc) + tail;
+  return horizontalSumAvx2(_mm256_add_ps(ae, ao)) + tail;
 }
 
 inline double sqEuclideanRowAvx2(const double *xRow, const double *yRow, std::size_t d) noexcept {
-  __m256d acc = _mm256_setzero_pd();
+  // See float overload: two FMA chains break the latency-bound add chain at high d.
+  __m256d ae = _mm256_setzero_pd();
+  __m256d ao = _mm256_setzero_pd();
   const bool xAligned = (reinterpret_cast<std::uintptr_t>(xRow) % 32) == 0;
   const bool yAligned = (reinterpret_cast<std::uintptr_t>(yRow) % 32) == 0;
   std::size_t k = 0;
-  for (; k + 4 <= d; k += 4) {
+  for (; k + 8 <= d; k += 8) {
+    const __m256d vx0 = xAligned ? _mm256_load_pd(xRow + k) : _mm256_loadu_pd(xRow + k);
+    const __m256d vy0 = yAligned ? _mm256_load_pd(yRow + k) : _mm256_loadu_pd(yRow + k);
+    const __m256d d0 = _mm256_sub_pd(vx0, vy0);
+    ae = _mm256_fmadd_pd(d0, d0, ae);
+    const __m256d vx1 = xAligned ? _mm256_load_pd(xRow + k + 4) : _mm256_loadu_pd(xRow + k + 4);
+    const __m256d vy1 = yAligned ? _mm256_load_pd(yRow + k + 4) : _mm256_loadu_pd(yRow + k + 4);
+    const __m256d d1 = _mm256_sub_pd(vx1, vy1);
+    ao = _mm256_fmadd_pd(d1, d1, ao);
+  }
+  if (k + 4 <= d) {
     const __m256d vx = xAligned ? _mm256_load_pd(xRow + k) : _mm256_loadu_pd(xRow + k);
     const __m256d vy = yAligned ? _mm256_load_pd(yRow + k) : _mm256_loadu_pd(yRow + k);
     const __m256d diff = _mm256_sub_pd(vx, vy);
-    acc = _mm256_add_pd(acc, _mm256_mul_pd(diff, diff));
+    ae = _mm256_fmadd_pd(diff, diff, ae);
+    k += 4;
   }
   double tail = 0.0;
   for (; k < d; ++k) {
     const double diff = xRow[k] - yRow[k];
     tail += diff * diff;
   }
-  return horizontalSumAvx2(acc) + tail;
+  return horizontalSumAvx2(_mm256_add_pd(ae, ao)) + tail;
 }
 
 #endif // CLUSTERING_USE_AVX2
@@ -119,33 +148,49 @@ inline T sqEuclideanRow(const NDArray<T, 2, LX> &X, std::size_t i, const NDArray
 #ifdef CLUSTERING_USE_AVX2
 
 inline float sqNormRowAvx2(const float *xRow, std::size_t d) noexcept {
-  __m256 acc = _mm256_setzero_ps();
+  __m256 ae = _mm256_setzero_ps();
+  __m256 ao = _mm256_setzero_ps();
   const bool aligned = (reinterpret_cast<std::uintptr_t>(xRow) % 32) == 0;
   std::size_t k = 0;
-  for (; k + 8 <= d; k += 8) {
+  for (; k + 16 <= d; k += 16) {
+    const __m256 v0 = aligned ? _mm256_load_ps(xRow + k) : _mm256_loadu_ps(xRow + k);
+    ae = _mm256_fmadd_ps(v0, v0, ae);
+    const __m256 v1 = aligned ? _mm256_load_ps(xRow + k + 8) : _mm256_loadu_ps(xRow + k + 8);
+    ao = _mm256_fmadd_ps(v1, v1, ao);
+  }
+  if (k + 8 <= d) {
     const __m256 v = aligned ? _mm256_load_ps(xRow + k) : _mm256_loadu_ps(xRow + k);
-    acc = _mm256_add_ps(acc, _mm256_mul_ps(v, v));
+    ae = _mm256_fmadd_ps(v, v, ae);
+    k += 8;
   }
   float tail = 0.0F;
   for (; k < d; ++k) {
     tail += xRow[k] * xRow[k];
   }
-  return horizontalSumAvx2(acc) + tail;
+  return horizontalSumAvx2(_mm256_add_ps(ae, ao)) + tail;
 }
 
 inline double sqNormRowAvx2(const double *xRow, std::size_t d) noexcept {
-  __m256d acc = _mm256_setzero_pd();
+  __m256d ae = _mm256_setzero_pd();
+  __m256d ao = _mm256_setzero_pd();
   const bool aligned = (reinterpret_cast<std::uintptr_t>(xRow) % 32) == 0;
   std::size_t k = 0;
-  for (; k + 4 <= d; k += 4) {
+  for (; k + 8 <= d; k += 8) {
+    const __m256d v0 = aligned ? _mm256_load_pd(xRow + k) : _mm256_loadu_pd(xRow + k);
+    ae = _mm256_fmadd_pd(v0, v0, ae);
+    const __m256d v1 = aligned ? _mm256_load_pd(xRow + k + 4) : _mm256_loadu_pd(xRow + k + 4);
+    ao = _mm256_fmadd_pd(v1, v1, ao);
+  }
+  if (k + 4 <= d) {
     const __m256d v = aligned ? _mm256_load_pd(xRow + k) : _mm256_loadu_pd(xRow + k);
-    acc = _mm256_add_pd(acc, _mm256_mul_pd(v, v));
+    ae = _mm256_fmadd_pd(v, v, ae);
+    k += 4;
   }
   double tail = 0.0;
   for (; k < d; ++k) {
     tail += xRow[k] * xRow[k];
   }
-  return horizontalSumAvx2(acc) + tail;
+  return horizontalSumAvx2(_mm256_add_pd(ae, ao)) + tail;
 }
 
 #endif // CLUSTERING_USE_AVX2

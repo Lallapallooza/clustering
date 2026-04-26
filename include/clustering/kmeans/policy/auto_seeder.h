@@ -11,7 +11,7 @@
 
 namespace clustering::kmeans {
 
-enum class AutoSeederMode { kSingleRun, kBestOf };
+enum class AutoSeederMode : std::uint8_t { kSingleRun, kBestOf };
 
 /**
  * @brief Seeder that picks between greedy k-means++ and AFK-MC2 against workload shape.

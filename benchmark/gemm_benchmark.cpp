@@ -18,7 +18,9 @@
 #include <cblas.h>
 // Some dev environments (e.g. Nix) layer BLIS's cblas.h shim ahead of OpenBLAS's in -isystem
 // order, so the OpenBLAS-specific thread-control prototype is not visible through <cblas.h>.
-// We link against libopenblas unconditionally under this gate, so forward-declare the symbol.
+// We link against libopenblas unconditionally under this gate, so forward-declare the symbol;
+// the redundant-declaration check fires only when an OpenBLAS-flavoured cblas.h is found first.
+// NOLINTNEXTLINE(readability-redundant-declaration)
 extern "C" void openblas_set_num_threads(int num_threads);
 #endif
 
