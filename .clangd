@@ -1,0 +1,32 @@
+# clangd configuration for editor-only ergonomics. The actual build comes from
+# CMake (`build/compile_commands.json` is symlinked at repo root), so files
+# present in the compile DB use the real flags. This file only patches up files
+# clangd cannot map to a TU on its own:
+#
+#   1. `python/src/_bindings.cpp` -- built by scikit-build-core into `.venv/`,
+#      not by the top-level CMake; needs nanobind + Python headers.
+#   2. `scratch/**/*.cpp` -- out-of-tree profiling drivers; never enter CMake.
+#
+# In-tree TUs under `tests/`, `benchmark/`, `app/`, and `include/` keep using
+# `build/compile_commands.json` -- this file does not replace it.
+
+CompileFlags:
+  Add:
+    - -std=c++20
+    - -Iinclude
+    - -Ibuild/_deps/bshoshany_thread_pool-src/include
+    - -mavx2
+    - -mfma
+    - -DCLUSTERING_USE_AVX2
+
+---
+# nanobind binding TU. Python.h paths vary across machines (uv stores it under
+# `~/.local/share/uv/python/...`, system Python under `/usr/include/python3.X`,
+# etc.); clangd will still resolve nanobind headers and the rest of the binding
+# from the venv-local path below. If Python.h itself trips diagnostics, add a
+# personal `~/.config/clangd/config.yaml` with the absolute path on your box.
+If:
+  PathMatch: python/src/.*\.cpp
+CompileFlags:
+  Add:
+    - -I.venv/lib/python3.11/site-packages/nanobind/include
