@@ -380,8 +380,18 @@ public:
     const auto first = static_cast<std::size_t>(math::randUniformU64(rng) % n);
     std::memcpy(centroidsData, xData + (first * d), d * sizeof(T));
 
-    for (std::size_t i = 0; i < n; ++i) {
-      minSq[i] = detail::sqEuclideanRowPtr(xData + (i * d), centroidsData, d);
+    {
+      const T *firstRow = centroidsData;
+      auto initRange = [&](std::size_t lo, std::size_t hi) noexcept {
+        for (std::size_t i = lo; i < hi; ++i) {
+          minSq[i] = detail::sqEuclideanRowPtr(xData + (i * d), firstRow, d);
+        }
+      };
+      if (pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr) {
+        pool.pool->submit_blocks(std::size_t{0}, n, initRange, pool.workerCount()).wait();
+      } else {
+        initRange(0, n);
+      }
     }
 
     if (k == 1) {
@@ -406,11 +416,19 @@ public:
       if (!(total > T{0})) {
         const auto pick = static_cast<std::size_t>(math::randUniformU64(rng) % n);
         std::memcpy(centroidsData + (c * d), xData + (pick * d), d * sizeof(T));
-        for (std::size_t i = 0; i < n; ++i) {
-          const T cand = detail::sqEuclideanRowPtr(xData + (i * d), centroidsData + (c * d), d);
-          if (cand < minSq[i]) {
-            minSq[i] = cand;
+        const T *cRow = centroidsData + (c * d);
+        auto degenRange = [&](std::size_t lo, std::size_t hi) noexcept {
+          for (std::size_t i = lo; i < hi; ++i) {
+            const T cand = detail::sqEuclideanRowPtr(xData + (i * d), cRow, d);
+            if (cand < minSq[i]) {
+              minSq[i] = cand;
+            }
           }
+        };
+        if (pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr) {
+          pool.pool->submit_blocks(std::size_t{0}, n, degenRange, pool.workerCount()).wait();
+        } else {
+          degenRange(0, n);
         }
         continue;
       }
@@ -459,54 +477,115 @@ public:
               dstK[t] = 0.0F;
             }
           }
+          // Per-worker score accumulators are reused from @ref m_localScores; the candDistSq
+          // writes are row-local so partitioning by `i` is aliasing-free. Falls back to a
+          // single worker-zero path when the pool is null or the workload is too small.
+          const bool willParallelizeT = pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr;
+          const std::size_t workersT = willParallelizeT ? pool.workerCount() : std::size_t{1};
+          T *localScoresT = m_localScores.data();
+          for (std::size_t e = 0; e < workersT * nLocalTrials; ++e) {
+            localScoresT[e] = T{0};
+          }
+
           if (transposedWidth == 16) {
-            __m256 scoresLoAcc = _mm256_setzero_ps();
-            __m256 scoresHiAcc = _mm256_setzero_ps();
-            for (std::size_t i = 0; i < n; ++i) {
-              const float *xi = xData + (i * d);
-              const __m256 miVec = _mm256_set1_ps(minSq[i]);
-              float *dstRow = candDistSqData + (i * transposedWidth);
-              detail::sqEuclideanRowAgainst16Transposed(xi, candRowsTData, d, dstRow);
-              const __m256 dLo = _mm256_loadu_ps(dstRow);
-              const __m256 dHi = _mm256_loadu_ps(dstRow + 8);
-              scoresLoAcc = _mm256_add_ps(scoresLoAcc, _mm256_min_ps(dLo, miVec));
-              scoresHiAcc = _mm256_add_ps(scoresHiAcc, _mm256_min_ps(dHi, miVec));
-            }
-            std::array<float, 16> tmp{};
-            _mm256_storeu_ps(tmp.data(), scoresLoAcc);
-            _mm256_storeu_ps(tmp.data() + 8, scoresHiAcc);
-            for (std::size_t t = 0; t < nLocalTrials; ++t) {
-              scores[t] = tmp[t];
+            auto rangeFn = [&](std::size_t lo, std::size_t hi, T *dst) noexcept {
+              __m256 scoresLoAcc = _mm256_setzero_ps();
+              __m256 scoresHiAcc = _mm256_setzero_ps();
+              for (std::size_t i = lo; i < hi; ++i) {
+                const float *xi = xData + (i * d);
+                const __m256 miVec = _mm256_set1_ps(minSq[i]);
+                float *dstRow = candDistSqData + (i * transposedWidth);
+                detail::sqEuclideanRowAgainst16Transposed(xi, candRowsTData, d, dstRow);
+                const __m256 dLo = _mm256_loadu_ps(dstRow);
+                const __m256 dHi = _mm256_loadu_ps(dstRow + 8);
+                scoresLoAcc = _mm256_add_ps(scoresLoAcc, _mm256_min_ps(dLo, miVec));
+                scoresHiAcc = _mm256_add_ps(scoresHiAcc, _mm256_min_ps(dHi, miVec));
+              }
+              std::array<float, 16> tmp{};
+              _mm256_storeu_ps(tmp.data(), scoresLoAcc);
+              _mm256_storeu_ps(tmp.data() + 8, scoresHiAcc);
+              for (std::size_t t = 0; t < nLocalTrials; ++t) {
+                dst[t] += tmp[t];
+              }
+            };
+            if (willParallelizeT) {
+              pool.pool
+                  ->submit_blocks(
+                      std::size_t{0}, n,
+                      [&](std::size_t lo, std::size_t hi) {
+                        const std::size_t w = math::Pool::workerIndex();
+                        rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
+                      },
+                      workersT)
+                  .wait();
+            } else {
+              rangeFn(0, n, localScoresT);
             }
           } else if (transposedWidth == 8) {
-            __m256 scoresAcc = _mm256_setzero_ps();
-            for (std::size_t i = 0; i < n; ++i) {
-              const float *xi = xData + (i * d);
-              const __m256 miVec = _mm256_set1_ps(minSq[i]);
-              float *dstRow = candDistSqData + (i * transposedWidth);
-              detail::sqEuclideanRowAgainst8Transposed(xi, candRowsTData, d, dstRow);
-              const __m256 dv = _mm256_loadu_ps(dstRow);
-              scoresAcc = _mm256_add_ps(scoresAcc, _mm256_min_ps(dv, miVec));
-            }
-            std::array<float, 8> tmp{};
-            _mm256_storeu_ps(tmp.data(), scoresAcc);
-            for (std::size_t t = 0; t < nLocalTrials; ++t) {
-              scores[t] = tmp[t];
+            auto rangeFn = [&](std::size_t lo, std::size_t hi, T *dst) noexcept {
+              __m256 scoresAcc = _mm256_setzero_ps();
+              for (std::size_t i = lo; i < hi; ++i) {
+                const float *xi = xData + (i * d);
+                const __m256 miVec = _mm256_set1_ps(minSq[i]);
+                float *dstRow = candDistSqData + (i * transposedWidth);
+                detail::sqEuclideanRowAgainst8Transposed(xi, candRowsTData, d, dstRow);
+                const __m256 dv = _mm256_loadu_ps(dstRow);
+                scoresAcc = _mm256_add_ps(scoresAcc, _mm256_min_ps(dv, miVec));
+              }
+              std::array<float, 8> tmp{};
+              _mm256_storeu_ps(tmp.data(), scoresAcc);
+              for (std::size_t t = 0; t < nLocalTrials; ++t) {
+                dst[t] += tmp[t];
+              }
+            };
+            if (willParallelizeT) {
+              pool.pool
+                  ->submit_blocks(
+                      std::size_t{0}, n,
+                      [&](std::size_t lo, std::size_t hi) {
+                        const std::size_t w = math::Pool::workerIndex();
+                        rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
+                      },
+                      workersT)
+                  .wait();
+            } else {
+              rangeFn(0, n, localScoresT);
             }
           } else {
             // Generic chunked path for L > 16 (very high k). Walk the transposed layout 8 lanes
             // at a time so each chunk stays on the fully unrolled 8-wide kernel.
-            for (std::size_t i = 0; i < n; ++i) {
-              const float *xi = xData + (i * d);
-              const float mi = minSq[i];
-              float *dstRow = candDistSqData + (i * transposedWidth);
-              for (std::size_t base = 0; base < transposedWidth; base += 8) {
-                detail::sqEuclideanRowAgainst8TransposedStrided(xi, candRowsTData + base, d,
-                                                                transposedWidth, dstRow + base);
+            auto rangeFn = [&](std::size_t lo, std::size_t hi, T *dst) noexcept {
+              for (std::size_t i = lo; i < hi; ++i) {
+                const float *xi = xData + (i * d);
+                const float mi = minSq[i];
+                float *dstRow = candDistSqData + (i * transposedWidth);
+                for (std::size_t base = 0; base < transposedWidth; base += 8) {
+                  detail::sqEuclideanRowAgainst8TransposedStrided(xi, candRowsTData + base, d,
+                                                                  transposedWidth, dstRow + base);
+                }
+                for (std::size_t t = 0; t < nLocalTrials; ++t) {
+                  dst[t] += (dstRow[t] < mi) ? dstRow[t] : mi;
+                }
               }
-              for (std::size_t t = 0; t < nLocalTrials; ++t) {
-                scores[t] += (dstRow[t] < mi) ? dstRow[t] : mi;
-              }
+            };
+            if (willParallelizeT) {
+              pool.pool
+                  ->submit_blocks(
+                      std::size_t{0}, n,
+                      [&](std::size_t lo, std::size_t hi) {
+                        const std::size_t w = math::Pool::workerIndex();
+                        rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
+                      },
+                      workersT)
+                  .wait();
+            } else {
+              rangeFn(0, n, localScoresT);
+            }
+          }
+          for (std::size_t w = 0; w < workersT; ++w) {
+            const T *row = localScoresT + (w * nLocalTrials);
+            for (std::size_t t = 0; t < nLocalTrials; ++t) {
+              scores[t] += row[t];
             }
           }
           scoredViaTransposed = true;
@@ -698,11 +777,18 @@ public:
       // cached candidate-distance plane, skipping a fresh O(n*d) scan against the winner row.
       const T *winnerRow = xData + (bestCandidate * d);
       std::memcpy(centroidsData + (c * d), winnerRow, d * sizeof(T));
-      for (std::size_t i = 0; i < n; ++i) {
-        const T cand = candDistSqData[(i * transposedWidth) + bestT];
-        if (cand < minSq[i]) {
-          minSq[i] = cand;
+      auto winnerRange = [&](std::size_t lo, std::size_t hi) noexcept {
+        for (std::size_t i = lo; i < hi; ++i) {
+          const T cand = candDistSqData[(i * transposedWidth) + bestT];
+          if (cand < minSq[i]) {
+            minSq[i] = cand;
+          }
         }
+      };
+      if (pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr) {
+        pool.pool->submit_blocks(std::size_t{0}, n, winnerRange, pool.workerCount()).wait();
+      } else {
+        winnerRange(0, n);
       }
     }
   }
