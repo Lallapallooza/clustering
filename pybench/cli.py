@@ -132,6 +132,17 @@ def _add_bench_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.set_defaults(capture_labels=True)
+    parser.add_argument(
+        "--baseline",
+        choices=("sklearn", "intelex"),
+        default="sklearn",
+        help=(
+            "Which library backs the @c theirs side. @c sklearn (default) uses stock"
+            " scikit-learn. @c intelex routes via @c sklearnex.patch_sklearn() so the"
+            " same recipes hit Intel oneDAL's accelerated implementations; install"
+            " @c scikit-learn-intelex into the env first."
+        ),
+    )
 
 
 def _add_vis_args(parser: argparse.ArgumentParser) -> None:
@@ -950,6 +961,20 @@ def main() -> None:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # Apply the intelex patch BEFORE recipe discovery: recipe modules import
+    # sklearn at module-import time, and sklearnex.patch_sklearn() only takes
+    # effect for sklearn imports that happen after it runs.
+    if getattr(args, "baseline", "sklearn") == "intelex":
+        try:
+            from sklearnex import patch_sklearn
+        except ImportError as exc:
+            parser.error(
+                f"--baseline intelex requires scikit-learn-intelex: {exc}. "
+                "Install with `uv pip install scikit-learn-intelex`."
+            )
+        patch_sklearn()
+        logger.info("scikit-learn-intelex patch applied; theirs runs on oneDAL")
 
     recipes = all_recipes()
 

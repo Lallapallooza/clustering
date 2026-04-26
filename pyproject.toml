@@ -26,6 +26,12 @@ dev = [
     "commitizen>=4.0",
     "pytest>=8",
 ]
+# Optional `--baseline intelex` dependency. Not in `dev` because oneDAL has a
+# heavy install footprint and a narrower platform matrix (linux/x86_64 only,
+# minimum AVX2). Install on demand: `uv sync --group intelex`.
+intelex = [
+    "scikit-learn-intelex>=2024.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]

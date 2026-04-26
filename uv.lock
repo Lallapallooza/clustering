@@ -153,6 +153,9 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+intelex = [
+    { name = "scikit-learn-intelex" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -172,6 +175,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.15" },
 ]
+intelex = [{ name = "scikit-learn-intelex", specifier = ">=2024.0" }]
 
 [[package]]
 name = "colorama"
@@ -368,6 +372,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a9/95/a3dbbb5028f35eafb79008e7522a75244477d2838f38cbb722248dabc2a8/cycler-0.12.1.tar.gz", hash = "sha256:88bb128f02ba341da8ef447245a9e138fae777f6a23943da4540077d3601eb1c", size = 7615, upload-time = "2023-10-07T05:32:18.335Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl", hash = "sha256:85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30", size = 8321, upload-time = "2023-10-07T05:32:16.783Z" },
+]
+
+[[package]]
+name = "daal"
+version = "2026.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tbb" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b5/bd/4619123ceabb1d3a1322485c76fbab1fcee3d1906d5e12cc66bb07c59027/daal-2026.0.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:7d5d922b88d961535a375d9899a2bf416fda8fac819365acbe5382bb63440ae3", size = 32001099, upload-time = "2026-04-24T14:14:30.754Z" },
+    { url = "https://files.pythonhosted.org/packages/37/92/9bc996afa15f3e6ea85af122a6aca169577685d911e91defcaa39f0cfa30/daal-2026.0.0-py2.py3-none-win_amd64.whl", hash = "sha256:ddf4f62bb346dfe9d5b895ce9f99c712a9a18e84cbbb7aa5cd73a7240a7e5e76", size = 25320605, upload-time = "2026-04-24T14:11:38.878Z" },
 ]
 
 [[package]]
@@ -1500,6 +1516,30 @@ wheels = [
 ]
 
 [[package]]
+name = "scikit-learn-intelex"
+version = "2026.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "daal" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/88/adad354d9ed2457f3094c6fcdcec407c627c9ecec71f9270ba6dfed1130b/scikit_learn_intelex-2026.0.0-py310-none-manylinux_2_28_x86_64.whl", hash = "sha256:020d871d9d231d3ec818933cad3d10d2fc40abae1e276c4e7028c4b1874bcdbf", size = 3178472, upload-time = "2026-04-24T14:14:46.913Z" },
+    { url = "https://files.pythonhosted.org/packages/96/f2/433b6f7bad6de32436c8dc15d805943343ed6e56b5329a4b5d434f842b37/scikit_learn_intelex-2026.0.0-py310-none-win_amd64.whl", hash = "sha256:b2bb68fdd12692beede10a0746f5c81003ee0619adcf11ce23501a1f7e782d9d", size = 1976003, upload-time = "2026-04-24T14:11:11.868Z" },
+    { url = "https://files.pythonhosted.org/packages/17/70/6355193a0686d74894f5da068fa4dd001b180986ce64e9adb25ecee0606b/scikit_learn_intelex-2026.0.0-py311-none-manylinux_2_28_x86_64.whl", hash = "sha256:2260820b61592aa065a8938d52286cb41e841cf27fdd082082fb56e9ed577246", size = 3139592, upload-time = "2026-04-24T14:14:36.682Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/8c/56b70bed1c0bb2eaf3a108c0feac1db83665108f41aab185b1b384a7732d/scikit_learn_intelex-2026.0.0-py311-none-win_amd64.whl", hash = "sha256:3500deb001892729cabe18f9fdb5d67f2d94e9a6348e360d031ff7ef4dece103", size = 1976745, upload-time = "2026-04-24T14:11:02.33Z" },
+    { url = "https://files.pythonhosted.org/packages/01/47/7235b751da501470f1479e200b4c4ff80c0c9442b195dc9c4bfd9e2a9164/scikit_learn_intelex-2026.0.0-py312-none-manylinux_2_28_x86_64.whl", hash = "sha256:6e85e5ed13eb3741ce64097fc6f61869c2dea9c3e3cb094a66e1d08cac5cc969", size = 3105685, upload-time = "2026-04-24T14:14:42.052Z" },
+    { url = "https://files.pythonhosted.org/packages/67/79/79880ae9a1f6e154b6c52f4c50bed83450fe94cd91b2f9d417424dd0bcec/scikit_learn_intelex-2026.0.0-py312-none-win_amd64.whl", hash = "sha256:7a49ad6b7d8d549c79e3ee3d73b25725f079a08de7a58f8e225dd759ddd540e4", size = 1966205, upload-time = "2026-04-24T14:11:27.468Z" },
+    { url = "https://files.pythonhosted.org/packages/91/90/fd4e122e46d69533502e360fb1967c84b96a16a1676ebd8b8a75eb0963fb/scikit_learn_intelex-2026.0.0-py313-none-manylinux_2_28_x86_64.whl", hash = "sha256:44337736c5b58c026ae0669b167198cbeddfa25f1067d8ccb6dcdad73913e62a", size = 3108863, upload-time = "2026-04-24T14:15:07.923Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/51/d75674cd997d3bf4e0918d5e400e49a4a91225c911dc21421e4a1e498cf6/scikit_learn_intelex-2026.0.0-py313-none-win_amd64.whl", hash = "sha256:5d853d23f6aabd485c34c6e67ef2b0a3e3263d140bb43eeffc678605cff558cc", size = 1966553, upload-time = "2026-04-24T14:11:20.061Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/51/5016dafadfec2975ab9155958021b06415eac5f39ccda166cfa390f3e07f/scikit_learn_intelex-2026.0.0-py314-none-manylinux_2_28_x86_64.whl", hash = "sha256:c6063ecc38239f503a8980538b40a48e41f64095358db9d4ac3d0f5f4935f10c", size = 3113334, upload-time = "2026-04-24T14:14:33.893Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/6e/65bfb1c44c778449933a66deb537fafc6f9726811f454c16826b2b3cd9da/scikit_learn_intelex-2026.0.0-py314-none-win_amd64.whl", hash = "sha256:199ade100f5c8e854f73abd9937180388ba3b15b82b703b730400a3840bf4a46", size = 1968272, upload-time = "2026-04-24T14:11:25.124Z" },
+]
+
+[[package]]
 name = "scipy"
 version = "1.15.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1639,6 +1679,27 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "tbb"
+version = "2023.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tcmlib" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/d2/9a994ce9b18182b04783282eba77e236d23919acf42a886d72fe14fc78a4/tbb-2023.0.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:482f57656386ea14b96e8da36b3fcc4cd880834ef0f328ba09e8e2e3c639285e", size = 6785156, upload-time = "2026-04-24T14:10:01.59Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/f8/dd5e1d9955c91ebd301d855232163750489b20ea5a8c4e40954269493dcc/tbb-2023.0.0-py3-none-win_amd64.whl", hash = "sha256:82d1c2b4b6881d5b4f2e67288ca1c864f54e3cd82c7e428aaf912aa30ab21d01", size = 427718, upload-time = "2026-04-24T14:10:47.885Z" },
+]
+
+[[package]]
+name = "tcmlib"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/24/aa409bb20703acc70cf4d3bc620a55c789639c2995b2667fb44ae7236ec9/tcmlib-1.5.0-py2.py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:9d7c01cff35aae9bf5390b620680ebdf10a7d211c22d6488a27a029502e7d0aa", size = 2812669, upload-time = "2026-04-24T14:14:18.557Z" },
+    { url = "https://files.pythonhosted.org/packages/67/6d/9095c93326d0f8a5469ab22480d02795f24c08f1e7f383c73316ff106347/tcmlib-1.5.0-py2.py3-none-win_amd64.whl", hash = "sha256:f7b62787214083d490b39d7650f1e477eeacc875e7f86799feb9aa1fd34460d4", size = 366719, upload-time = "2026-04-24T14:09:45.977Z" },
 ]
 
 [[package]]
