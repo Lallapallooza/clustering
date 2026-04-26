@@ -48,6 +48,11 @@ kmppScoreSoaRowsAvx2F32(const float *xData, std::size_t n, std::size_t d, const 
 
   const std::size_t nTiles = n / 8;
 
+  std::array<__m256, L> scoreAcc;
+  for (std::size_t t = 0; t < L; ++t) {
+    scoreAcc[t] = _mm256_setzero_ps();
+  }
+
   for (std::size_t tile = 0; tile < nTiles; ++tile) {
     const std::size_t iBase = tile * 8;
     const float *xTileBase = xData + (iBase * d);
@@ -156,11 +161,7 @@ kmppScoreSoaRowsAvx2F32(const float *xData, std::size_t n, std::size_t d, const 
     alignas(32) std::array<float, L * 8> distScatter{};
     for (std::size_t t = 0; t < L; ++t) {
       const __m256 capped = _mm256_min_ps(acc[t], vMin);
-      const __m256 perm = _mm256_permute2f128_ps(capped, capped, 1);
-      const __m256 s1 = _mm256_add_ps(capped, perm);
-      const __m256 s2 = _mm256_hadd_ps(s1, s1);
-      const __m256 s3 = _mm256_hadd_ps(s2, s2);
-      scoresOut[t] += _mm_cvtss_f32(_mm256_castps256_ps128(s3));
+      scoreAcc[t] = _mm256_add_ps(scoreAcc[t], capped);
       _mm256_store_ps(distScatter.data() + (t * 8), acc[t]);
     }
     for (std::size_t r = 0; r < 8; ++r) {
@@ -169,6 +170,14 @@ kmppScoreSoaRowsAvx2F32(const float *xData, std::size_t n, std::size_t d, const 
         dstRow[t] = distScatter[(t * 8) + r];
       }
     }
+  }
+
+  for (std::size_t t = 0; t < L; ++t) {
+    const __m256 perm = _mm256_permute2f128_ps(scoreAcc[t], scoreAcc[t], 1);
+    const __m256 s1 = _mm256_add_ps(scoreAcc[t], perm);
+    const __m256 s2 = _mm256_hadd_ps(s1, s1);
+    const __m256 s3 = _mm256_hadd_ps(s2, s2);
+    scoresOut[t] += _mm_cvtss_f32(_mm256_castps256_ps128(s3));
   }
 
   for (std::size_t i = nTiles * 8; i < n; ++i) {

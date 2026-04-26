@@ -19,6 +19,8 @@
 #include "clustering/hdbscan/policy/nn_descent_mst_backend.h"
 #include "clustering/hdbscan/policy/prim_mst_backend.h"
 #include "clustering/kmeans.h"
+#include "clustering/kmeans/policy/auto_seeder.h"
+#include "clustering/kmeans/policy/lloyd_fused_gemm.h"
 #include "clustering/ndarray.h"
 
 #include "ndarray_adapter.h"
@@ -29,10 +31,60 @@ using clustering::HDBSCAN;
 using clustering::KMeans;
 using clustering::NDArray;
 using clustering::hdbscan::ClusterSelectionMethod;
+using clustering::kmeans::AutoSeeder;
+using clustering::kmeans::AutoSeederMode;
+using clustering::kmeans::LloydFusedGemm;
 using clustering::python::borrowFromNumpyContig;
 using clustering::python::borrowFromNumpyContigReadOnly;
 using clustering::python::borrowFromNumpyStrided;
 using clustering::python::wrapAsNumpy;
+
+namespace {
+
+struct KMeansBestOfResult {
+  NDArray<std::int32_t, 1> labels;
+  NDArray<float, 2> centroids;
+  double inertia;
+  std::size_t nIter;
+  bool converged;
+};
+
+template <class Seeder>
+KMeansBestOfResult runKMeansBestOf(const NDArray<float, 2> &X, std::size_t k, std::size_t maxIter,
+                                   float tol, std::uint64_t seedFirst, std::size_t jobs,
+                                   std::size_t nInit) {
+  const std::size_t n = X.dim(0);
+  const std::size_t d = X.dim(1);
+
+  KMeans<float, LloydFusedGemm<float>, Seeder> algo(k, jobs);
+
+  KMeansBestOfResult best{.labels = NDArray<std::int32_t, 1>({n}),
+                          .centroids = NDArray<float, 2>({k, d}),
+                          .inertia = std::numeric_limits<double>::infinity(),
+                          .nIter = 0,
+                          .converged = false};
+  bool anyImprovement = false;
+
+  for (std::size_t i = 0; i < nInit; ++i) {
+    const std::uint64_t seed = seedFirst + static_cast<std::uint64_t>(i);
+    algo.run(X, maxIter, tol, seed);
+    const double inertia = algo.inertia();
+    if (!anyImprovement || inertia < best.inertia) {
+      anyImprovement = true;
+      best.inertia = inertia;
+      best.nIter = algo.nIter();
+      best.converged = algo.converged();
+      if (n > 0) {
+        std::memcpy(best.labels.data(), algo.labels().data(), n * sizeof(std::int32_t));
+      }
+      std::memcpy(best.centroids.data(), algo.centroids().data(), k * d * sizeof(float));
+    }
+  }
+
+  return best;
+}
+
+} // namespace
 
 static nb::ndarray<nb::numpy, std::int32_t, nb::ndim<1>>
 dbscan_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu> data, float eps,
@@ -203,42 +255,21 @@ kmeans_best_of_binding(nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device:
     return NDArray<float, 2, clustering::Layout::Contig>::borrow(xOwned.data(), {N, D});
   }();
 
-  KMeans<float> algo(k, jobs);
-
-  // Best snapshot accumulated across the @c n_init restarts. Owned buffers are allocated here
-  // (rather than one snapshot per restart) so we copy on improvement and discard otherwise.
-  NDArray<std::int32_t, 1> best_labels({N});
-  NDArray<float, 2> best_centroids({k, D});
-  double best_inertia = std::numeric_limits<double>::infinity();
-  std::size_t best_n_iter = 0;
-  bool best_converged = false;
-  bool any_improvement = false;
-
-  {
+  KMeansBestOfResult best = [&] {
     nb::gil_scoped_release release;
-    for (std::size_t i = 0; i < n_init; ++i) {
-      const std::uint64_t seed = seed_first + static_cast<std::uint64_t>(i);
-      algo.run(X, max_iter, tol, seed);
-      const double inertia = algo.inertia();
-      if (!any_improvement || inertia < best_inertia) {
-        any_improvement = true;
-        best_inertia = inertia;
-        best_n_iter = algo.nIter();
-        best_converged = algo.converged();
-        if (N > 0) {
-          std::memcpy(best_labels.data(), algo.labels().data(), N * sizeof(std::int32_t));
-        }
-        std::memcpy(best_centroids.data(), algo.centroids().data(), k * D * sizeof(float));
-      }
+    if (n_init > 1) {
+      return runKMeansBestOf<AutoSeeder<float, AutoSeederMode::kBestOf>>(X, k, max_iter, tol,
+                                                                         seed_first, jobs, n_init);
     }
-  }
+    return runKMeansBestOf<AutoSeeder<float>>(X, k, max_iter, tol, seed_first, jobs, n_init);
+  }();
   // GIL re-acquired for the numpy allocation + wrap.
 
-  auto labels_np = wrapAsNumpy<std::int32_t>(std::move(best_labels));
-  auto centroids_np = wrapAsNumpy<float>(std::move(best_centroids));
+  auto labels_np = wrapAsNumpy<std::int32_t>(std::move(best.labels));
+  auto centroids_np = wrapAsNumpy<float>(std::move(best.centroids));
 
-  return std::make_tuple(std::move(labels_np), std::move(centroids_np), best_inertia, best_n_iter,
-                         best_converged);
+  return std::make_tuple(std::move(labels_np), std::move(centroids_np), best.inertia, best.nIter,
+                         best.converged);
 }
 
 static std::tuple<nb::ndarray<nb::numpy, std::int32_t, nb::ndim<1>>,

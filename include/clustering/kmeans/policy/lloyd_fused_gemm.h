@@ -187,13 +187,12 @@ public:
     std::size_t iter = 0;
     bool converged = false;
 
-    // Hamerly pruning lights up only at the @c d that forces the chunked materialized path; the
-    // direct small-@c d and fused argmin paths are already so dense that the per-iter bound
-    // bookkeeping outweighs the saved distance work. @c k is capped by @c kHamerlyMaxK because
-    // the per-row scan uses a stack-allocated distance buffer; above that we fall back to the
-    // unbounded chunked assignment every iteration.
-    const bool hamerlyEligible =
-        (d > math::defaults::pairwiseArgminMaxD) && (k <= kHamerlyMaxK) && (k >= 2);
+    // Hamerly pruning starts once @c d leaves the direct small-D path. Fused-argmin shapes seed
+    // valid per-point bounds after the first dense assignment; chunked shapes seed them inline
+    // during the argmin post-pass. @c k is capped by @c kHamerlyMaxK because the per-row scan
+    // uses a stack-allocated distance buffer; above that, Elkan handles bounded shapes and the
+    // rest fall back to unbounded assignment.
+    const bool hamerlyEligible = (d > detail::kDirectArgminMaxD) && (k <= kHamerlyMaxK) && (k >= 2);
     // Elkan keeps k lower bounds per sample instead of Hamerly's one, pruning far more distance
     // work once k exceeds Hamerly's regime. The @c n * k bound matrix grows linearly in both,
     // so we gate on an @c n * k envelope bound (memory ceiling) and require @c k above the
@@ -207,12 +206,14 @@ public:
       } else if (elkanEligible && iter > 0) {
         runElkanAssignment(X, centroids, outLabels, pool);
       } else {
-        // First iteration (or no-prune shape) goes through the dispatcher. For the chunked path
-        // Hamerly's @c m_u and @c m_l are seeded inline from the argmin post-pass and Elkan's
-        // @c m_elkanBounds matrix is filled from the same per-sample scan; other tiers leave
-        // them stale, but the prune paths only fire at @c d above the chunked threshold so
-        // those tiers never read them.
+        // First iteration (or no-prune shape) goes through the dispatcher. The chunked path
+        // seeds Hamerly's @c m_u and @c m_l inline from the argmin post-pass, and Elkan's
+        // @c m_elkanBounds matrix is filled from the same per-sample scan. The fused path only
+        // returns the winning distance, so seed Hamerly's conservative lower bound separately.
         runAssignment(X, centroids, outLabels, pool);
+        if (hamerlyEligible && iter == 0 && assignmentUsesFusedArgmin(X, centroids)) {
+          seedHamerlyBoundsFromLabels(X, centroids, outLabels, pool);
+        }
       }
 
       std::memcpy(m_centroidsOld.data(), centroids.data(),
@@ -477,6 +478,25 @@ private:
       const std::size_t d = X.dim(1);
       return X.template isAligned<32>() && C.template isAligned<32>() && d != 0 &&
              d <= detail::kDirectArgminMaxD;
+    } else {
+      (void)X;
+      (void)C;
+      return false;
+    }
+#else
+    (void)X;
+    (void)C;
+    return false;
+#endif
+  }
+
+  [[nodiscard]] bool assignmentUsesFusedArgmin(const NDArray<T, 2, Layout::Contig> &X,
+                                               const NDArray<T, 2, Layout::Contig> &C) noexcept {
+#ifdef CLUSTERING_USE_AVX2
+    if constexpr (std::is_same_v<T, float>) {
+      const std::size_t d = X.dim(1);
+      return X.template isAligned<32>() && C.template isAligned<32>() &&
+             d > detail::kDirectArgminMaxD && d <= math::defaults::pairwiseArgminMaxD;
     } else {
       (void)X;
       (void)C;
@@ -818,6 +838,45 @@ private:
           .wait();
     } else {
       runRowRange(0, n);
+    }
+  }
+
+  void seedHamerlyBoundsFromLabels(const NDArray<T, 2, Layout::Contig> &X,
+                                   const NDArray<T, 2, Layout::Contig> &centroids,
+                                   const NDArray<std::int32_t, 1> &labels,
+                                   math::Pool pool) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const std::size_t k = centroids.dim(0);
+    if (n == 0 || d == 0 || k == 0) {
+      return;
+    }
+
+    auto seedRange = [&](std::size_t lo, std::size_t hi) noexcept {
+      for (std::size_t i = lo; i < hi; ++i) {
+        const std::int32_t lbl = labels(i);
+        if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
+          m_minDistSq(i) = T{0};
+          m_u(i) = std::numeric_limits<T>::infinity();
+          m_l(i) = T{0};
+          continue;
+        }
+        const T *xRow = X.data() + (i * d);
+        const T *cRow = centroids.data() + (static_cast<std::size_t>(lbl) * d);
+        const T tightSq = math::detail::sqEuclideanRowPtr<T>(xRow, cRow, d);
+        m_minDistSq(i) = tightSq;
+        m_u(i) = std::sqrt(tightSq);
+        m_l(i) = T{0};
+      }
+    };
+
+    if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
+      pool.pool
+          ->submit_blocks(std::size_t{0}, n,
+                          [&](std::size_t lo, std::size_t hi) { seedRange(lo, hi); })
+          .wait();
+    } else {
+      seedRange(0, n);
     }
   }
 
