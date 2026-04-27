@@ -4,8 +4,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #if defined(CLUSTERING_USE_BS_POOL)
 #include <BS_thread_pool.hpp>
@@ -29,6 +33,24 @@ using OwnedPool = BS::light_thread_pool;
 #else
 using OwnedPool = citor::ThreadPool;
 #endif
+
+/**
+ * @brief Process-wide pool registry, keyed by worker count.
+ *
+ * Returns the same @ref OwnedPool every time it's called with a given @p nJobs. Algorithm
+ * wrappers (@c KMeans, @c DBSCAN, @c HDBSCAN) borrow from this registry by default so a
+ * Python harness or repeated C++ caller doesn't pay the per-call thread-spawn cost. The
+ * registry is created lazily on first request and lives for the duration of the process;
+ * destroying long-lived worker pools is expensive enough that we deliberately leak the
+ * lifetime to the loader.
+ *
+ * Callers who need a private pool (tests, embedded use, multi-tenant scoping) construct
+ * their own @ref OwnedPool and pass it to the algorithm's external-pool constructor.
+ *
+ * @param nJobs Worker count; passed through @ref clampedJobCount before lookup.
+ * @return Reference to the cached pool. Stable across calls with the same effective @p nJobs.
+ */
+inline OwnedPool &sharedPool(std::size_t nJobs);
 
 /**
  * @brief Clamp a caller-supplied @p nJobs to a valid worker count.
@@ -183,7 +205,7 @@ struct Pool {
    * @tparam Body   Callable invocable as `Body(std::size_t lo, std::size_t hi)`.
    * @param first     Inclusive lower bound of the iteration range.
    * @param last      Exclusive upper bound of the iteration range.
-   * @param numBlocks Suggested block count; @c 0 selects `workerCount()`.
+   * @param numBlocks Requested block count; @c 0 selects the backend's default partition.
    * @param body      Callable invoked once per block.
    */
   template <class HintsT = citor::BulkBalancedHints, class Body>
@@ -196,7 +218,10 @@ struct Pool {
     const std::size_t blocks = numBlocks == 0 ? workerCount() : numBlocks;
     pool->submit_blocks(first, last, body, blocks).wait();
 #else
-    (void)numBlocks; // citor partitions per its own balance hint
+    if (numBlocks != 0) {
+      parallelForExactBlocks<HintsT>(first, last, numBlocks, std::move(body));
+      return;
+    }
     pool->template parallelFor<HintsT>(first, last, body);
 #endif
   }
@@ -338,6 +363,59 @@ struct Pool {
   }
 
   /**
+   * @brief Reduce `[first, last)` with the backend's reduction primitive.
+   *
+   * On the citor backend this forwards to `ThreadPool::parallelReduce<HintsT>`, preserving
+   * citor's chunk-id tree and determinism policy. On the BS backend the same surface is
+   * emulated with one partial per worker-count slot, then folded by the producer in slot order.
+   *
+   * @tparam HintsT  citor reduction hint type, e.g. @c citor::FixedBlockReduceHints or
+   *                 @c citor::KahanReduceHints.
+   * @tparam T       Reduction value type.
+   * @tparam Map     Callable invocable as `T(std::size_t lo, std::size_t hi)`.
+   * @tparam Combine Callable invocable as `T(T a, T b)`.
+   * @param first    Inclusive lower bound of the iteration range.
+   * @param last     Exclusive upper bound of the iteration range.
+   * @param init     Identity value.
+   * @param map      Per-block mapper.
+   * @param combine  Producer-side combiner.
+   * @return Combined reduction value.
+   */
+  template <class HintsT = citor::FixedBlockReduceHints, class T, class Map, class Combine>
+  [[nodiscard]] T parallelReduce(std::size_t first, std::size_t last, T init, Map map,
+                                 Combine combine) {
+    if (first >= last) {
+      return init;
+    }
+    if (pool == nullptr) {
+      return combine(std::move(init), map(first, last));
+    }
+#if defined(CLUSTERING_USE_BS_POOL)
+    const std::size_t blocks = workerCount();
+    std::vector<T> partials(blocks);
+    std::vector<unsigned char> active(blocks, 0);
+    parallelForExactBlocksWithSlot<HintsT>(first, last, blocks,
+                                           [&](std::size_t lo, std::size_t hi, std::size_t slot) {
+                                             if (lo >= hi) {
+                                               return;
+                                             }
+                                             partials[slot] = map(lo, hi);
+                                             active[slot] = 1;
+                                           });
+    T result = std::move(init);
+    for (std::size_t slot = 0; slot < blocks; ++slot) {
+      if (active[slot] != 0) {
+        result = combine(std::move(result), std::move(partials[slot]));
+      }
+    }
+    return result;
+#else
+    return pool->template parallelReduce<HintsT>(first, last, std::move(init), std::move(map),
+                                                 std::move(combine));
+#endif
+  }
+
+  /**
    * @brief Run @p phaseFn for @p nPhases persistent-worker phases over `[0, n)`.
    *
    * Maps to @c citor::ThreadPool::runPlex<HintsT> on the citor backend, which keeps
@@ -425,5 +503,20 @@ struct Pool {
 #endif
   }
 };
+
+inline OwnedPool &sharedPool(std::size_t nJobs) {
+  const std::size_t effective = clampedJobCount(nJobs);
+  // Inline-static map: shared across translation units thanks to the inline keyword on the
+  // enclosing function. Mutex protects the registry against first-time-init races; lookups
+  // are O(1) and gated by Python's GIL or other caller-side serialization in practice.
+  static std::unordered_map<std::size_t, std::unique_ptr<OwnedPool>> registry;
+  static std::mutex registryMutex;
+  std::lock_guard<std::mutex> guard{registryMutex};
+  auto &slot = registry[effective];
+  if (!slot) {
+    slot = std::make_unique<OwnedPool>(effective);
+  }
+  return *slot;
+}
 
 } // namespace clustering::math

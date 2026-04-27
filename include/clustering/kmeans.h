@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <type_traits>
 
 #include "clustering/always_assert.h"
@@ -50,11 +49,23 @@ public:
    *              @ref math::Pool helpers.
    */
   explicit KMeans(std::size_t k, std::size_t nJobs = 0)
-      : m_k(k), m_nJobs(math::clampedJobCount(nJobs)), m_centroids({0, 0}), m_labels({0}) {
+      : m_k(k), m_nJobs(math::clampedJobCount(nJobs)),
+        m_pool(m_nJobs > 1 ? &math::sharedPool(m_nJobs) : nullptr), m_centroids({0, 0}),
+        m_labels({0}) {
     CLUSTERING_ALWAYS_ASSERT(k >= 1);
-    // Defer pool construction to @ref run: at small shapes every hot phase gates serial, and
-    // spawning nJobs workers in the ctor burns tens of microseconds of thread-create futex
-    // traffic that the fit never amortizes. @ref run emplaces on first need and reuses.
+  }
+
+  /**
+   * @brief Construct a reusable k-means fitter that borrows a caller-owned thread pool.
+   *
+   * Use when the caller wants to keep a private @ref math::OwnedPool out of the process-wide
+   * shared registry (tests, multi-tenant scoping, embedded use). The pool must outlive every
+   * @ref run call on this instance.
+   */
+  KMeans(std::size_t k, std::size_t nJobs, math::OwnedPool &externalPool)
+      : m_k(k), m_nJobs(math::clampedJobCount(nJobs)), m_pool(&externalPool), m_centroids({0, 0}),
+        m_labels({0}) {
+    CLUSTERING_ALWAYS_ASSERT(k >= 1);
   }
 
   KMeans(const KMeans &) = delete;
@@ -95,10 +106,7 @@ public:
       return;
     }
 
-    if (!m_pool.has_value() && math::shouldSpawnPool(n * d * m_k, m_nJobs)) {
-      m_pool.emplace(m_nJobs);
-    }
-    const math::Pool pool{m_pool.has_value() ? &*m_pool : nullptr};
+    const math::Pool pool{m_pool};
     m_seeder.run(X, m_k, seed, pool, m_centroids);
     m_lloyd.run(X, m_centroids, m_k, maxIter, tol, pool, m_labels, m_inertia, m_nIter, m_converged);
   }
@@ -139,7 +147,7 @@ private:
 
   std::size_t m_k;
   std::size_t m_nJobs;
-  std::optional<math::OwnedPool> m_pool;
+  math::OwnedPool *m_pool = nullptr;
   NDArray<T, 2, Layout::Contig> m_centroids;
   NDArray<std::int32_t, 1> m_labels;
   double m_inertia = 0.0;
