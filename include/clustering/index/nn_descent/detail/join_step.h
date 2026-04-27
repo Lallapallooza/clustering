@@ -94,8 +94,8 @@ template <class T> struct JoinStep {
       }
     };
 
-    if (pool.shouldParallelize(n, 256, 2) && pool.pool != nullptr) {
-      pool.pool->submit_blocks(std::size_t{0}, n, buildForwardRange).wait();
+    if (pool.shouldParallelize(n, 256, 2)) {
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, buildForwardRange);
     } else {
       buildForwardRange(0, n);
     }
@@ -130,8 +130,9 @@ template <class T> struct JoinStep {
       }
     };
 
-    if (pool.shouldParallelize(n, 256, 2) && pool.pool != nullptr) {
-      pool.pool->submit_blocks(std::size_t{0}, n, countRange).wait();
+    if (pool.shouldParallelize(n, 256, 2)) {
+      pool.parallelForBlocks<citor::ScatterFoldHints>(std::size_t{0}, n, std::size_t{0},
+                                                      countRange);
     } else {
       countRange(0, n);
     }
@@ -191,8 +192,9 @@ template <class T> struct JoinStep {
       }
     };
 
-    if (pool.shouldParallelize(n, 256, 2) && pool.pool != nullptr) {
-      pool.pool->submit_blocks(std::size_t{0}, n, scatterRange).wait();
+    if (pool.shouldParallelize(n, 256, 2)) {
+      pool.parallelForBlocks<citor::ScatterFoldHints>(std::size_t{0}, n, std::size_t{0},
+                                                      scatterRange);
     } else {
       scatterRange(0, n);
     }
@@ -311,11 +313,10 @@ template <class T> struct JoinStep {
     };
 
     // Work gate: parallelism only when the per-worker work amortizes pool dispatch.
-    if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, n,
-                          [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); })
-          .wait();
+    if (pool.shouldParallelize(n, 64, 2)) {
+      pool.parallelForBlocks<citor::LocalJoinHints>(
+          std::size_t{0}, n, std::size_t{0},
+          [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); });
     } else {
       runRange(0, n);
     }

@@ -312,15 +312,13 @@ private:
         maxPairOps = std::max(maxPairOps, ops);
       }
       const std::size_t totalPairOps = maxPairOps * pairs.size();
-      if (pool.pool != nullptr && pool.shouldParallelizeWork(totalPairOps)) {
-        pool.pool
-            ->submit_blocks(std::size_t{0}, pairs.size(),
-                            [&](std::size_t lo, std::size_t hi) {
-                              for (std::size_t i = lo; i < hi; ++i) {
-                                computePair(i);
-                              }
-                            })
-            .wait();
+      if (pool.shouldParallelizeWork(totalPairOps)) {
+        pool.parallelForBlocks<citor::BulkQueryHints>(std::size_t{0}, pairs.size(), std::size_t{0},
+                                                      [&](std::size_t lo, std::size_t hi) {
+                                                        for (std::size_t i = lo; i < hi; ++i) {
+                                                          computePair(i);
+                                                        }
+                                                      });
       } else {
         for (std::size_t i = 0; i < pairs.size(); ++i) {
           computePair(i);

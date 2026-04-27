@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <BS_thread_pool.hpp>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -202,7 +201,7 @@ TEST(PairwiseSqEuclideanF32, ThreadedMatchesSerialBitExact) {
 
   pairwiseSqEuclidean(X, Y, serial, Pool{nullptr});
 
-  BS::light_thread_pool pool(4);
+  clustering::math::OwnedPool pool(4);
   pairwiseSqEuclidean(X, Y, threaded, Pool{&pool});
 
   // Threading fans out over rows of X; per-cell arithmetic order is untouched so results must be
@@ -376,7 +375,7 @@ TEST(RowNormsSqF32, ThreadedMatchesSerialBitExact) {
   }
 
   rowNormsSq(X, serial, Pool{nullptr});
-  BS::light_thread_pool pool(4);
+  clustering::math::OwnedPool pool(4);
   rowNormsSq(X, threaded, Pool{&pool});
 
   for (std::size_t i = 0; i < n; ++i) {
@@ -507,7 +506,7 @@ TEST(PairwiseSqEuclideanGemmF32, ThreadedMatchesSerialWithinTolerance) {
   fillConst(threaded, 0.0F);
 
   pairwiseSqEuclideanGemm(X, Y, serial, Pool{nullptr});
-  BS::light_thread_pool pool(4);
+  clustering::math::OwnedPool pool(4);
   pairwiseSqEuclideanGemm(X, Y, threaded, Pool{&pool});
 
   EXPECT_TRUE(allClose(serial, threaded, 1e-4F, 1e-4F));

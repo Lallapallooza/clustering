@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <BS_thread_pool.hpp>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -417,7 +416,7 @@ TEST(PairwiseArgminParallel, SerialAndThreadedAgree) {
   NDArray<float, 1> minSerial({n});
   pairwiseArgminSqEuclidean(X, C, cSqNorms, labelsSerial, minSerial, Pool{nullptr});
 
-  BS::light_thread_pool tp(4);
+  clustering::math::OwnedPool tp(4);
   NDArray<std::int32_t, 1> labelsPar({n});
   NDArray<float, 1> minPar({n});
   pairwiseArgminSqEuclidean(X, C, cSqNorms, labelsPar, minPar, Pool{&tp});

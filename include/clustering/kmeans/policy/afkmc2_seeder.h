@@ -408,37 +408,27 @@ private:
 
   /// Pool fan-out for the q-precompute distance scan. Each worker processes a contiguous slice
   /// of the input rows so the centroid load (single firstRow) remains broadcast-friendly per
-  /// worker and the only synchronisation is the single `wait_for_tasks` after submission.
+  /// worker and the only synchronisation is the single barrier after fan-out.
   void qPrecomputeParallel(const T *xData, const T *firstRow, std::size_t n, std::size_t d,
                            T *qData, math::Pool pool) noexcept {
-    const std::size_t workers = pool.workerCount();
-    const std::size_t base = n / workers;
-    const std::size_t rem = n % workers;
-    for (std::size_t w = 0; w < workers; ++w) {
-      const std::size_t startIdx = (w * base) + (w < rem ? w : rem);
-      const std::size_t cnt = base + (w < rem ? 1 : 0);
-      pool.pool->detach_task([xData, firstRow, qData, d, startIdx, cnt]() noexcept {
-        sqDistancesAosBlock<T>(firstRow, xData + (startIdx * d), cnt, d, qData + startIdx);
-      });
-    }
-    pool.pool->wait();
+    pool.parallelForExactBlocks(std::size_t{0}, n, pool.workerCount(),
+                                [&](std::size_t startIdx, std::size_t endIdx) noexcept {
+                                  const std::size_t cnt = endIdx - startIdx;
+                                  sqDistancesAosBlock<T>(firstRow, xData + (startIdx * d), cnt, d,
+                                                         qData + startIdx);
+                                });
   }
 
   /// Pool fan-out for the sumD2 reduction.
   T sumReduceParallel(const T *p, std::size_t n, math::Pool pool) noexcept {
     const std::size_t workers = pool.workerCount();
-    const std::size_t base = n / workers;
-    const std::size_t rem = n % workers;
     std::array<T, 64> partials{};
     CLUSTERING_ALWAYS_ASSERT(workers <= 64);
-    for (std::size_t w = 0; w < workers; ++w) {
-      const std::size_t startIdx = (w * base) + (w < rem ? w : rem);
-      const std::size_t cnt = base + (w < rem ? 1 : 0);
-      pool.pool->detach_task([p, &partials, w, startIdx, cnt]() noexcept {
-        partials[w] = sumReduceAvx2(p + startIdx, cnt);
-      });
-    }
-    pool.pool->wait();
+    pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+        std::size_t{0}, n, workers,
+        [&, p](std::size_t startIdx, std::size_t endIdx, std::size_t slot) noexcept {
+          partials[slot] = sumReduceAvx2(p + startIdx, endIdx - startIdx);
+        });
     T s = T{0};
     for (std::size_t w = 0; w < workers; ++w) {
       s += partials[w];

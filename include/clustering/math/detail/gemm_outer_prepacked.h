@@ -157,16 +157,14 @@ void gemmRunPrepacked(::clustering::detail::MatrixDescC<T> Ad, const T *prepacke
 
       const std::size_t mcBlockCount = (M + kMcVal - 1) / kMcVal;
       if (pool.shouldParallelize(mcBlockCount, 1, 2)) {
-        pool.pool
-            ->submit_blocks(std::size_t{0}, mcBlockCount,
-                            [&](std::size_t blockStart, std::size_t blockEnd) {
-                              T *apSlice = apArena + (::clustering::math::Pool::workerIndex() *
-                                                      kMcVal * kKcVal);
-                              for (std::size_t mcIdx = blockStart; mcIdx < blockEnd; ++mcIdx) {
-                                runOneMcBlock(mcIdx, apSlice);
-                              }
-                            })
-            .wait();
+        pool.parallelForBlocks(std::size_t{0}, mcBlockCount, std::size_t{0},
+                               [&](std::size_t blockStart, std::size_t blockEnd) {
+                                 T *apSlice = apArena + (::clustering::math::Pool::workerIndex() *
+                                                         kMcVal * kKcVal);
+                                 for (std::size_t mcIdx = blockStart; mcIdx < blockEnd; ++mcIdx) {
+                                   runOneMcBlock(mcIdx, apSlice);
+                                 }
+                               });
       } else {
         for (std::size_t mcIdx = 0; mcIdx < mcBlockCount; ++mcIdx) {
           runOneMcBlock(mcIdx, apArena);

@@ -167,16 +167,13 @@ inline void pairwiseArgminOuterAvx2F32(const NDArray<float, 2, Layout::Contig> &
   };
 
   const std::size_t totalOps = n * d * k;
-  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2) &&
-      pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, mTiles,
-                        [&](std::size_t lo, std::size_t hi) {
-                          for (std::size_t t = lo; t < hi; ++t) {
-                            runOneMTile(t);
-                          }
-                        })
-        .wait();
+  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, mTiles, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) {
+                             for (std::size_t t = lo; t < hi; ++t) {
+                               runOneMTile(t);
+                             }
+                           });
   } else {
     for (std::size_t t = 0; t < mTiles; ++t) {
       runOneMTile(t);
@@ -318,16 +315,13 @@ inline void pairwiseArgminOuterAvx2F32WithScratch(const NDArray<float, 2, Layout
   };
 
   const std::size_t totalOps = n * d * k;
-  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2) &&
-      pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, mTiles,
-                        [&](std::size_t lo, std::size_t hi) {
-                          for (std::size_t t = lo; t < hi; ++t) {
-                            runOneMTile(t);
-                          }
-                        })
-        .wait();
+  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, mTiles, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) {
+                             for (std::size_t t = lo; t < hi; ++t) {
+                               runOneMTile(t);
+                             }
+                           });
   } else {
     for (std::size_t t = 0; t < mTiles; ++t) {
       runOneMTile(t);
@@ -413,16 +407,13 @@ inline void pairwiseArgminDirectSmallDF32(const NDArray<float, 2, Layout::Contig
     std::memcpy(labelsData + iBase, argBuf.data(), mc * sizeof(std::int32_t));
   };
 
-  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2) &&
-      pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, mTiles,
-                        [&](std::size_t lo, std::size_t hi) {
-                          for (std::size_t t = lo; t < hi; ++t) {
-                            runOneTile(t);
-                          }
-                        })
-        .wait();
+  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, mTiles, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) {
+                             for (std::size_t t = lo; t < hi; ++t) {
+                               runOneTile(t);
+                             }
+                           });
   } else {
     for (std::size_t t = 0; t < mTiles; ++t) {
       runOneTile(t);

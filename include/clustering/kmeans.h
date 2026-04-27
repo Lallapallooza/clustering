@@ -1,6 +1,5 @@
 #pragma once
 
-#include <BS_thread_pool.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -140,7 +139,7 @@ private:
 
   std::size_t m_k;
   std::size_t m_nJobs;
-  std::optional<BS::light_thread_pool> m_pool;
+  std::optional<math::OwnedPool> m_pool;
   NDArray<T, 2, Layout::Contig> m_centroids;
   NDArray<std::int32_t, 1> m_labels;
   double m_inertia = 0.0;

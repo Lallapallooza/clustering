@@ -1,6 +1,5 @@
 #pragma once
 
-#include <BS_thread_pool.hpp>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -185,7 +184,7 @@ private:
   /// Lazy worker pool. Emplaced inside @ref run on the first call whose shape clears
   /// @ref math::shouldSpawnPool; reused across subsequent runs so repeat fits on the same
   /// @c DBSCAN instance skip the thread-spawn cost.
-  std::optional<BS::light_thread_pool> m_pool;
+  std::optional<math::OwnedPool> m_pool;
   /// Dense label buffer. Reallocated inside @ref run only when @c n differs from the previous
   /// call's size; the `[0, n)` range is overwritten each run with @ref UNCLASSIFIED, then
   /// filled with cluster ids (or @ref NOISY) by the expansion sweep.

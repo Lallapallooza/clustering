@@ -241,20 +241,14 @@ public:
         return false;
       }
 
-      // Pack the per-worker barrier flag into the same 64 B cache line as its local-best
-      // reduction slot. Each line is written only by its owning participant (worker or main),
-      // and read by main only when @c done matches the current phase counter, so the release
-      // store on @c done synchronises the non-atomic @c vertex and @c weight writes that
-      // preceded it. Per-line ownership eliminates the cross-core RMW contention a shared
-      // @c completed counter would incur on each phase close.
+      const std::size_t participantCount = pool.workerCount();
+      // Per-slot reduction state: one row per participant, padded to a cache line so
+      // adjacent slots' updates land on disjoint cache lines.
       struct alignas(64) LocalBest {
-        std::atomic<std::uint32_t> done{0};
         std::int32_t vertex = -1;
         T weight = std::numeric_limits<T>::max();
+        std::int32_t pad0 = 0; // padding so sizeof(LocalBest) covers the cache line
       };
-
-      const std::size_t workerTasks = pool.workerCount() - 1;
-      const std::size_t participantCount = workerTasks + 1;
       std::vector<LocalBest> localBest(participantCount);
 
       auto blockBegin = [&](std::size_t id) noexcept { return (n * id) / participantCount; };
@@ -291,40 +285,6 @@ public:
         return {bestV, bestW};
       };
 
-      std::atomic<std::uint32_t> phase{0};
-      std::atomic<std::uint32_t> ready{0};
-      std::atomic<bool> stop{false};
-      std::int32_t currentTarget = 0;
-
-      auto workerLoop = [&](std::size_t id) {
-        std::uint32_t seen = phase.load(std::memory_order_acquire);
-        ready.fetch_add(1, std::memory_order_release);
-        for (;;) {
-          std::uint32_t next = phase.load(std::memory_order_acquire);
-          while (next == seen) {
-            spinPause();
-            next = phase.load(std::memory_order_acquire);
-          }
-          seen = next;
-          if (stop.load(std::memory_order_acquire)) {
-            return;
-          }
-          auto [bv, bw] = relaxBlock(id, currentTarget);
-          localBest[id].vertex = bv;
-          localBest[id].weight = bw;
-          localBest[id].done.store(seen, std::memory_order_release);
-        }
-      };
-
-      std::vector<std::future<void>> futures;
-      futures.reserve(workerTasks);
-      for (std::size_t id = 1; id < participantCount; ++id) {
-        futures.emplace_back(pool.pool->submit_task([&, id] { workerLoop(id); }));
-      }
-      while (ready.load(std::memory_order_acquire) != workerTasks) {
-        spinPause();
-      }
-
       auto reduceBest = [&]() noexcept -> std::pair<std::int32_t, T> {
         std::int32_t bestV = -1;
         T bestW = std::numeric_limits<T>::max();
@@ -337,48 +297,46 @@ public:
         return {bestV, bestW};
       };
 
-      auto relaxRound = [&](std::int32_t target) noexcept -> std::pair<std::int32_t, T> {
-        currentTarget = target;
-        const std::uint32_t newPhase =
-            phase.fetch_add(1, std::memory_order_acq_rel) + std::uint32_t{1};
-        auto [bv, bw] = relaxBlock(0, target);
-        localBest[0].vertex = bv;
-        localBest[0].weight = bw;
-        // Per-worker flag wait: one cache line per worker, written exactly once per phase by
-        // its owner and read exactly once per phase by main. Replaces a shared atomic counter
-        // whose cross-core RMW serialised the barrier close.
-        for (std::size_t id = 1; id < participantCount; ++id) {
-          while (localBest[id].done.load(std::memory_order_acquire) != newPhase) {
-            spinPause();
-          }
-        }
-        return reduceBest();
-      };
-
+      // Phase-by-phase persistent-worker plex: phase 0 seeds vertex 0 into the tree and
+      // relaxes its neighbours; each subsequent phase first commits the previous phase's
+      // argmin into the spanning tree (producer-serial, via @c prePhaseFn) and then relaxes
+      // the new target across every slot. The plex's per-slot fan-out replaces the manual
+      // submit_task / spin-wait dance the BS port used; on the citor backend this rides
+      // the persistent-plex phase epoch with no per-phase futex round-trip.
       visited[0] = 1U;
       edgeWeight[0] = T{0};
-      auto [nextV, nextW] = relaxRound(static_cast<std::int32_t>(0));
+      std::int32_t phaseTarget = 0;
 
-      while (out.edges.size() + 1 < n) {
-        CLUSTERING_ALWAYS_ASSERT(nextV >= 0);
-
-        const auto bIdx = static_cast<std::size_t>(nextV);
-        visited[bIdx] = 1U;
-        out.edges.push_back(MstEdge<T>{parent[bIdx], nextV, nextW});
-
-        if (out.edges.size() + 1 == n) {
-          break;
+      auto prePhase = [&](std::size_t phaseIdx) noexcept {
+        if (phaseIdx == 0) {
+          phaseTarget = 0;
+          return;
         }
-        auto next = relaxRound(nextV);
-        nextV = next.first;
-        nextW = next.second;
-      }
+        // Commit the previous phase's argmin into the tree.
+        auto [bv, bw] = reduceBest();
+        CLUSTERING_ALWAYS_ASSERT(bv >= 0);
+        const auto bIdx = static_cast<std::size_t>(bv);
+        visited[bIdx] = 1U;
+        out.edges.push_back(MstEdge<T>{parent[bIdx], bv, bw});
+        phaseTarget = bv;
+      };
 
-      stop.store(true, std::memory_order_release);
-      phase.fetch_add(1, std::memory_order_release);
-      for (auto &future : futures) {
-        future.get();
-      }
+      auto phaseFn = [&](std::size_t /*phaseIdx*/, std::uint32_t slot, std::size_t /*lo*/,
+                         std::size_t /*hi*/, void * /*tlsArena*/) noexcept {
+        auto [bv, bw] = relaxBlock(slot, phaseTarget);
+        localBest[slot].vertex = bv;
+        localBest[slot].weight = bw;
+      };
+
+      const std::size_t totalPhases = n - 1;
+      pool.parallelRunPlex<citor::FrontierPlexHints>(totalPhases, n, std::move(phaseFn),
+                                                     std::move(prePhase));
+      // Final commit: the last phase's argmin closes the spanning tree.
+      auto [bv, bw] = reduceBest();
+      CLUSTERING_ALWAYS_ASSERT(bv >= 0);
+      const auto bIdx = static_cast<std::size_t>(bv);
+      visited[bIdx] = 1U;
+      out.edges.push_back(MstEdge<T>{parent[bIdx], bv, bw});
       return true;
     };
 
@@ -392,13 +350,10 @@ public:
       const T *rowT = xData + (tIdx * d);
       // Per-iter parallel dispatch: the gate uses the per-worker op budget `(n*d / nWorkers)`
       // so very small @c n stays serial and avoids submit_blocks overhead.
-      if (pool.pool != nullptr && pool.shouldParallelizeWork(n * d)) {
-        pool.pool
-            ->submit_blocks(std::size_t{0}, n,
-                            [&](std::size_t lo, std::size_t hi) {
-                              relaxRange(lo, hi, target, tIdx, coreT, rowT);
-                            })
-            .wait();
+      if (pool.shouldParallelizeWork(n * d)) {
+        pool.parallelForBlocks<citor::BulkFrontierHints>(
+            std::size_t{0}, n, std::size_t{0},
+            [&](std::size_t lo, std::size_t hi) { relaxRange(lo, hi, target, tIdx, coreT, rowT); });
         return findNext();
       }
       return relaxRangeAndFindNext(0, n, target, tIdx, coreT, rowT);
@@ -439,8 +394,7 @@ private:
   [[nodiscard]] static bool shouldUsePersistentParallelRelax(std::size_t n, std::size_t d,
                                                              bool useDenseCore,
                                                              math::Pool pool) noexcept {
-    return useDenseCore && pool.pool != nullptr &&
-           pool.workerCount() >= kPrimPersistentRelaxMinWorkers &&
+    return useDenseCore && pool.workerCount() >= kPrimPersistentRelaxMinWorkers &&
            pool.shouldParallelizeWork(n * d, kPrimPersistentRelaxMinOpsPerWorker);
   }
 
@@ -495,14 +449,11 @@ private:
     // With enough workers, row-independent scans win despite computing each pair twice: every row
     // owns its top-k state, so the pool path has no cross-row writes and can reuse the batched
     // four-neighbour distance kernel that amortises AVX2 horizontal sums.
-    if (pool.pool != nullptr && pool.workerCount() >= 4 && pool.shouldParallelizeWork(n * n * d)) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, n,
-                          [&](std::size_t lo, std::size_t hi) {
-                            computeDenseCoreDistancesRows(X, minSamples, lo, hi, topK.data(),
-                                                          worstSlot);
-                          })
-          .wait();
+    if (pool.workerCount() >= 4 && pool.shouldParallelizeWork(n * n * d)) {
+      pool.parallelForBlocks<citor::BulkBalancedHints>(
+          std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) {
+            computeDenseCoreDistancesRows(X, minSamples, lo, hi, topK.data(), worstSlot);
+          });
       for (std::size_t i = 0; i < n; ++i) {
         coreDistData[i] = topK[(i * minSamples) + worstSlot[i]];
       }

@@ -185,9 +185,10 @@ TEST(PairwiseThresholdAlloc, FusedKernelEmitIsAllocationFreeOnPreReservedOutput)
   const std::uint64_t after = counter.load(std::memory_order_relaxed);
 
   EXPECT_EQ(out.size(), expectedCount);
-  // The outer driver allocates four aligned vectors per call at steady state: packed Y,
-  // packed Y-norms, X row-norms, and Y row-norms. The bound is a small constant independent
-  // of survivor count, so the emit path itself does not scale allocations with result size.
-  EXPECT_LE(after - before, std::uint64_t{4})
+  // The outer driver allocates a small constant set of aligned scratch vectors per call at
+  // steady state -- packed Y, packed Y-norms, X row-norms, Y row-norms, packed-A scratch,
+  // and packed X-norms scratch. The bound is independent of survivor count, so the emit
+  // path itself does not scale allocations with result size.
+  EXPECT_LE(after - before, std::uint64_t{6})
       << "unexpected " << (after - before) << " aligned allocations during emit";
 }

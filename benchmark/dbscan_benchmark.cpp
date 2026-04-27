@@ -1,6 +1,5 @@
 #include <benchmark/benchmark.h>
 
-#include <BS_thread_pool.hpp>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -163,7 +162,7 @@ template <class Index> void BM_RangeQuery(benchmark::State &state) {
   auto data = makeBlobs(n, d, /*seed=*/42);
   Index idx(data);
 
-  std::optional<BS::light_thread_pool> workerPool;
+  std::optional<clustering::math::OwnedPool> workerPool;
   if (nJobs > 1) {
     workerPool.emplace(nJobs);
   }

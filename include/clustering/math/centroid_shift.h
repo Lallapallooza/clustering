@@ -47,11 +47,9 @@ void centroidShift(const NDArray<T, 2, Layout::Contig> &cOld,
     }
   };
 
-  if (pool.shouldParallelize(k, 4, 2) && pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, k,
-                        [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
-        .wait();
+  if (pool.shouldParallelize(k, 4, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, k, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
   } else {
     runRowRange(0, k);
   }

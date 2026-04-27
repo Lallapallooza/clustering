@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <BS_thread_pool.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -238,7 +237,7 @@ TEST(BoruvkaMstParallel, SingleAndMultiWorkerTotalsAgree) {
   MstOutput<float> serialOut;
   serial.run(X, /*minSamples=*/5, Pool{}, serialOut);
 
-  BS::light_thread_pool pool(4);
+  clustering::math::OwnedPool pool(4);
   BoruvkaMstBackend<float> parallel;
   MstOutput<float> parallelOut;
   parallel.run(X, /*minSamples=*/5, Pool{.pool = &pool}, parallelOut);
@@ -334,7 +333,7 @@ TEST(BoruvkaTsanStress, LargeInputCompletesUnderSanitizer) {
   const std::size_t d = 8;
   const auto X = makeBlobGaussian(/*blobs=*/10, /*perBlob=*/n / 10, d, 0xBB5A55ULL);
 
-  BS::light_thread_pool pool(16);
+  clustering::math::OwnedPool pool(16);
   BoruvkaMstBackend<float> backend;
   MstOutput<float> out;
   backend.run(X, /*minSamples=*/5, Pool{.pool = &pool}, out);

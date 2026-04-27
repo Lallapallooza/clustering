@@ -159,9 +159,13 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
     // Pre-pack every A-tile in the chunk and its row-norms once, then swap the (M-tile, panel)
     // loop nest so panels walk the inner axis while every M-tile sweeps the same panel group.
     // A panel group ~= 48 KiB stays L1-resident across the M-tile inner sweep, so the B bytes
-    // we re-read go to L1 instead of L3 / cross-CCD fabric on the 9950X3D.
-    alignas(32) std::array<float, kThresholdChunkRows * kThresholdMaxD> apPacked;
-    alignas(32) std::array<float, kThresholdChunkRows> xNormsPacked;
+    // we re-read go to L1 instead of L3 / cross-CCD fabric. The packed scratch is heap-backed
+    // so the chunk body fits inside small worker stacks (citor's worker pthreads run with a
+    // 256 KiB stack, well under @c kThresholdChunkRows * @c kThresholdMaxD * `sizeof(float)`).
+    std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> apPacked(
+        kThresholdChunkRows * kThresholdMaxD);
+    std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> xNormsPacked(
+        kThresholdChunkRows);
     for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
       const std::size_t iBase = iChunkBase + (tileIdx * kMr);
       const std::size_t mc =
@@ -197,15 +201,13 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
     }
   };
 
-  if (pool.shouldParallelize(n * m, 64, 2) && pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, chunkCount,
-                        [&](std::size_t lo, std::size_t hi) {
-                          for (std::size_t c = lo; c < hi; ++c) {
-                            runOneChunk(c);
-                          }
-                        })
-        .wait();
+  if (pool.shouldParallelize(n * m, 64, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, chunkCount, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) {
+                             for (std::size_t c = lo; c < hi; ++c) {
+                               runOneChunk(c);
+                             }
+                           });
   } else {
     for (std::size_t c = 0; c < chunkCount; ++c) {
       runOneChunk(c);
@@ -280,8 +282,11 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
 
     const auto xDesc = ::clustering::detail::describeMatrix(X);
 
-    alignas(32) std::array<float, kThresholdChunkRows * kThresholdMaxD> apPacked;
-    alignas(32) std::array<float, kThresholdChunkRows> xNormsPacked;
+    // Heap-backed scratch so the chunk body fits inside small worker stacks.
+    std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> apPacked(
+        kThresholdChunkRows * kThresholdMaxD);
+    std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> xNormsPacked(
+        kThresholdChunkRows);
     for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
       const std::size_t iBase = iChunkBase + (tileIdx * kMr);
       const std::size_t mc =
@@ -360,9 +365,8 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
   // would hand worker 0 an ~nWorkers-fold larger slice than the last worker. Submit one task per
   // chunk so the pool's queue naturally work-steals the triangle -- worker imbalance collapses
   // to the chunk-granularity floor.
-  if (pool.shouldParallelize(n * n / 2, 64, 2) && pool.pool != nullptr) {
-    pool.pool->submit_sequence(std::size_t{0}, chunkCount, [&](std::size_t c) { runOneChunk(c); })
-        .wait();
+  if (pool.shouldParallelize(n * n / 2, 64, 2)) {
+    pool.parallelForChunks(chunkCount, [&](std::size_t c) { runOneChunk(c); });
   } else {
     for (std::size_t c = 0; c < chunkCount; ++c) {
       runOneChunk(c);

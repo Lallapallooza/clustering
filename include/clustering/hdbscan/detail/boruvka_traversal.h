@@ -335,7 +335,7 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
   std::vector<std::int32_t> nodeSingleComp(tree.nodeCount(), std::int32_t{-1});
   internal::computeNodeSingleComp<T>(root, perm, componentOf, nodeSingleComp);
 
-  const std::size_t nWorkers = (pool.pool != nullptr) ? pool.workerCount() : std::size_t{1};
+  const std::size_t nWorkers = pool.workerCount();
 
   // Per-worker best arrays. Each worker writes to its own slot per component; the merge at the
   // end composes them into @p bestOut. Memory scales linearly in @c nWorkers * n; acceptable at
@@ -438,19 +438,11 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
   // handful of AABB gaps. The parallelism gate uses @c 64 as the per-slot minimum chunk so
   // very small inputs stay serial.
   (void)allSingletonComponents;
-  const bool useParallel =
-      (pool.pool != nullptr) && (nWorkers > std::size_t{1}) && (n >= (nWorkers * std::size_t{64}));
+  const bool useParallel = (nWorkers > std::size_t{1}) && (n >= (nWorkers * std::size_t{64}));
   if (useParallel) {
-    pool.pool
-        ->submit_blocks(
-            std::size_t{0}, n,
-            [&](std::size_t lo, std::size_t hi) {
-              const std::size_t widx = math::Pool::workerIndex();
-              const std::size_t slot = widx < nWorkers ? widx : nWorkers - 1;
-              runChunk(lo, hi, slot);
-            },
-            nWorkers)
-        .wait();
+    pool.parallelForExactBlocksWithSlot<citor::BulkBalancedHints>(
+        std::size_t{0}, n, nWorkers,
+        [&](std::size_t lo, std::size_t hi, std::size_t slot) { runChunk(lo, hi, slot); });
   } else {
     runChunk(0, n, /*workerSlot=*/0);
   }

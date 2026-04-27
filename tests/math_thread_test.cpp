@@ -1,11 +1,11 @@
 #include <gtest/gtest.h>
 
-#include <BS_thread_pool.hpp>
 #include <atomic>
 #include <cstddef>
 
 #include "clustering/math/thread.h"
 
+using clustering::math::OwnedPool;
 using clustering::math::Pool;
 
 namespace {
@@ -16,37 +16,20 @@ constexpr std::size_t kSubmitLoopRange = 4096;
 } // namespace
 
 TEST(MathThreadPool, WorkerIndexInPoolTaskIsAlwaysInRange) {
-  // BS::light_thread_pool's work-stealing scheduler does not guarantee every worker
-  // receives at least one chunk -- a fast worker can drain the queue before a slower
-  // peer wakes up. The durable invariant is that whichever worker runs a task body
-  // reports an id strictly less than the configured worker count; per-invocation
-  // equality with BS::this_thread::get_index() is pinned by the next test.
-  BS::light_thread_pool pool(kFixtureWorkers);
+  // The pool's work-stealing scheduler does not guarantee every worker receives at least
+  // one chunk -- a fast worker can drain the queue before a slower peer wakes up. The
+  // durable invariant is that whichever worker runs a task body reports an id strictly
+  // less than the configured worker count.
+  OwnedPool pool(kFixtureWorkers);
+  Pool wrapper{&pool};
 
-  pool.submit_loop(std::size_t{0}, kSubmitLoopRange,
-                   [](std::size_t /*i*/) {
-                     const std::size_t id = Pool::workerIndex();
-                     ASSERT_LT(id, kFixtureWorkers);
-                   })
-      .wait();
-}
-
-TEST(MathThreadPool, WorkerIndexMatchesBSGetIndex) {
-  BS::light_thread_pool pool(kFixtureWorkers);
-  std::atomic<bool> mismatch{false};
-
-  pool.submit_loop(std::size_t{0}, kSubmitLoopRange,
-                   [&mismatch](std::size_t /*i*/) {
-                     const std::size_t wrapped = Pool::workerIndex();
-                     const std::size_t native =
-                         BS::this_thread::get_index().value_or(std::size_t{99999});
-                     if (wrapped != native) {
-                       mismatch.store(true, std::memory_order_relaxed);
-                     }
-                   })
-      .wait();
-
-  EXPECT_FALSE(mismatch.load(std::memory_order_relaxed));
+  wrapper.parallelForBlocks(std::size_t{0}, kSubmitLoopRange, std::size_t{0},
+                            [](std::size_t lo, std::size_t hi) {
+                              for (std::size_t i = lo; i < hi; ++i) {
+                                const std::size_t id = Pool::workerIndex();
+                                ASSERT_LT(id, kFixtureWorkers);
+                              }
+                            });
 }
 
 TEST(MathThreadPool, SerialPoolReportsCountOneAndIndexZero) {
@@ -56,13 +39,13 @@ TEST(MathThreadPool, SerialPoolReportsCountOneAndIndexZero) {
 }
 
 TEST(MathThreadPool, ShouldParallelizeBelowThresholdReturnsFalse) {
-  BS::light_thread_pool pool(8);
+  OwnedPool pool(8);
   const Pool wrapper{&pool};
   EXPECT_FALSE(wrapper.shouldParallelize(100, 96, 2));
 }
 
 TEST(MathThreadPool, ShouldParallelizeAboveThresholdReturnsTrue) {
-  BS::light_thread_pool pool(8);
+  OwnedPool pool(8);
   const Pool wrapper{&pool};
   EXPECT_TRUE(wrapper.shouldParallelize(10000, 96, 2));
 }
@@ -73,7 +56,7 @@ TEST(MathThreadPool, ShouldParallelizeOnSerialPoolAlwaysFalse) {
 }
 
 TEST(MathThreadPool, ShouldParallelizeWithZeroChunkReturnsFalse) {
-  BS::light_thread_pool pool(8);
+  OwnedPool pool(8);
   const Pool wrapper{&pool};
   EXPECT_FALSE(wrapper.shouldParallelize(10000, 0, 2));
 }

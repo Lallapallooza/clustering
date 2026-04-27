@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <BS_thread_pool.hpp>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -83,7 +82,7 @@ TEST(GemmThreadingF32, ParallelMatchesSerialAtLargeM) {
 
   gemm(A, B, Cserial, Pool{nullptr}, 1.0F, 0.0F);
 
-  BS::light_thread_pool pool(4);
+  clustering::math::OwnedPool pool(4);
   gemm(A, B, Cparallel, Pool{&pool}, 1.0F, 0.0F);
 
   EXPECT_TRUE(arrayEqual(Cserial, Cparallel));
@@ -100,7 +99,7 @@ TEST(GemmThreadingF32, DeterministicAcrossRuns) {
   fillRandom(A, 10U);
   fillRandom(B, 11U);
 
-  BS::light_thread_pool pool(4);
+  clustering::math::OwnedPool pool(4);
 
   NDArray<float, 2> first({M, N});
   fillConst(first, 0.0F);
@@ -136,7 +135,7 @@ TEST(GemmThreadingF32, ConcurrentExecuteFromTwoApplicationThreads) {
   fillConst(C1, 0.0F);
   fillConst(C2, 0.0F);
 
-  BS::light_thread_pool pool(4);
+  clustering::math::OwnedPool pool(4);
 
   std::thread t1([&]() { gemm(A1, B1, C1, Pool{&pool}, 1.0F, 0.0F); });
   std::thread t2([&]() { gemm(A2, B2, C2, Pool{&pool}, 1.0F, 0.0F); });
@@ -171,7 +170,7 @@ TEST(GemmThreadingF32, BelowThresholdRunsSerial) {
   fillConst(Cgot, 0.0F);
   fillConst(Cexpect, 0.0F);
 
-  BS::light_thread_pool pool(8);
+  clustering::math::OwnedPool pool(8);
   gemm(A, B, Cgot, Pool{&pool}, 1.0F, 0.0F);
   naiveGemm<float>(A, B, Cexpect, 1.0F, 0.0F);
 

@@ -164,19 +164,14 @@ void gemmRunReference(::clustering::detail::MatrixDescC<T> Ad,
 
       const std::size_t mcBlockCount = (M + kMcVal - 1) / kMcVal;
       if (pool.shouldParallelize(mcBlockCount, 1, 2)) {
-        // shouldParallelize returning true implies pool.pool != nullptr; the analyzer
-        // cannot see through the inlined correlation in Pool::shouldParallelize.
-        // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-        pool.pool
-            ->submit_blocks(std::size_t{0}, mcBlockCount,
-                            [&](std::size_t blockStart, std::size_t blockEnd) {
-                              T *apSlice = apArena + (::clustering::math::Pool::workerIndex() *
-                                                      kMcVal * kKcVal);
-                              for (std::size_t mcIdx = blockStart; mcIdx < blockEnd; ++mcIdx) {
-                                runOneMcBlock(mcIdx, apSlice);
-                              }
-                            })
-            .wait();
+        pool.parallelForBlocks(std::size_t{0}, mcBlockCount, std::size_t{0},
+                               [&](std::size_t blockStart, std::size_t blockEnd) {
+                                 T *apSlice = apArena + (::clustering::math::Pool::workerIndex() *
+                                                         kMcVal * kKcVal);
+                                 for (std::size_t mcIdx = blockStart; mcIdx < blockEnd; ++mcIdx) {
+                                   runOneMcBlock(mcIdx, apSlice);
+                                 }
+                               });
       } else {
         // Serial path -- single worker slice; workerIndex() == 0 outside any pool task.
         for (std::size_t mcIdx = 0; mcIdx < mcBlockCount; ++mcIdx) {

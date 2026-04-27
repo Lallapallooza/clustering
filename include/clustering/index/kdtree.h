@@ -203,11 +203,10 @@ public:
       }
     };
 
-    if (pool.shouldParallelize(n, 4, 2) && pool.pool != nullptr) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, n,
-                          [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); })
-          .wait();
+    if (pool.shouldParallelize(n, 4, 2)) {
+      pool.parallelForBlocks<citor::BulkQueryHints>(
+          std::size_t{0}, n, std::size_t{0},
+          [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); });
     } else {
       runRange(0, n);
     }
@@ -266,11 +265,10 @@ public:
       }
     };
 
-    if (pool.shouldParallelize(n, 4, 2) && pool.pool != nullptr) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, n,
-                          [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); })
-          .wait();
+    if (pool.shouldParallelize(n, 4, 2)) {
+      pool.parallelForBlocks<citor::BulkQueryHints>(
+          std::size_t{0}, n, std::size_t{0},
+          [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); });
     } else {
       runRange(0, n);
     }

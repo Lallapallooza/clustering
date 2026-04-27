@@ -247,11 +247,9 @@ void rowNormsSq(const NDArray<T, 2, LX> &X, NDArray<T, 1> &norms, Pool pool) {
     }
   };
 
-  if (pool.shouldParallelize(n, 4, 2) && pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, n,
-                        [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
-        .wait();
+  if (pool.shouldParallelize(n, 4, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
   } else {
     runRowRange(0, n);
   }
@@ -311,11 +309,9 @@ void pairwiseSqEuclideanGemm(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY>
   };
 
   const std::size_t totalCells = n * m;
-  if (pool.shouldParallelize(totalCells, 64, 2) && pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, n,
-                        [&](std::size_t lo, std::size_t hi) { runBroadcastRange(lo, hi); })
-        .wait();
+  if (pool.shouldParallelize(totalCells, 64, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { runBroadcastRange(lo, hi); });
   } else {
     runBroadcastRange(0, n);
   }
@@ -362,11 +358,9 @@ void pairwiseSqEuclideanSimd(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY>
     }
   };
 
-  if (pool.shouldParallelize(n, 4, 2) && pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, n,
-                        [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
-        .wait();
+  if (pool.shouldParallelize(n, 4, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
   } else {
     runRowRange(0, n);
   }
@@ -537,11 +531,9 @@ void pairwiseSqEuclideanThresholdedMaterialized(const NDArray<T, 2, LX> &X,
   // Only fan out across rows: column emit within a row is order-sensitive and consumers rely
   // on the per-row contract. Parallelism at the seed (row) level is safe because each row's
   // emits land in a distinct key space, but the caller owns thread-safety of @p emit.
-  if (pool.shouldParallelize(n * m, 64, 2) && pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, n,
-                        [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
-        .wait();
+  if (pool.shouldParallelize(n * m, 64, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
   } else {
     runRowRange(0, n);
   }
@@ -660,11 +652,9 @@ void pairwiseSqEuclideanThresholdedSymmetric(const NDArray<T, 2, LX> &X, T radiu
     }
   };
 
-  if (pool.shouldParallelize(n * n / 2, 64, 2) && pool.pool != nullptr) {
-    pool.pool
-        ->submit_blocks(std::size_t{0}, n,
-                        [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
-        .wait();
+  if (pool.shouldParallelize(n * n / 2, 64, 2)) {
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
   } else {
     runRowRange(0, n);
   }

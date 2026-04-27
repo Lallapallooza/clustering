@@ -113,11 +113,9 @@ void pairwiseArgminMaterializedWithScratch(const NDArray<T, 2, LX> &X, const NDA
       }
     };
 
-    if (pool.shouldParallelize(chunkRows, 4, 2) && pool.pool != nullptr) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, chunkRows,
-                          [&](std::size_t lo, std::size_t hi) { scanRange(lo, hi); })
-          .wait();
+    if (pool.shouldParallelize(chunkRows, 4, 2)) {
+      pool.parallelForBlocks(std::size_t{0}, chunkRows, std::size_t{0},
+                             [&](std::size_t lo, std::size_t hi) { scanRange(lo, hi); });
     } else {
       scanRange(0, chunkRows);
     }

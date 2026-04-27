@@ -35,38 +35,39 @@ namespace detail {
 /**
  * @brief Work-unit partition for the label-grouped fold over @c n points into @c numBlocks bins.
  *
- * The partition maps `[first_index, first_index + n)` onto at most @c desired blocks with
- * near-equal size. Ascending-block-order reduction is the deterministic fold the label-
- * accumulation step relies on, which pins bit-identity across nJobs settings at @c n_jobs = 1.
+ * The partition maps `[first_index, first_index + span)` onto at most @c desired blocks; slot
+ * @c s covers `[first_index + span*s/num_blocks, first_index + span*(s+1)/num_blocks)`. The
+ * citor-style formula is identical to the one used by @c math::Pool::parallelForExactBlocks
+ * on both backends so a starting @p lo round-trips to the originating slot index. Ascending-
+ * block-order reduction is the deterministic fold the label-accumulation step relies on, which
+ * pins bit-identity across nJobs settings at @c n_jobs = 1.
  */
 struct BlockPartition {
   std::size_t first_index = 0;
-  std::size_t block_size = 0;
-  std::size_t remainder = 0;
+  std::size_t span = 0;
   std::size_t num_blocks = 0;
 
   BlockPartition(std::size_t first, std::size_t n, std::size_t desired) noexcept
-      : first_index(first) {
+      : first_index(first), span(n) {
     if (n == 0 || desired == 0) {
       num_blocks = 0;
+      span = 0;
       return;
     }
     num_blocks = std::min(desired, n);
-    block_size = n / num_blocks;
-    remainder = n % num_blocks;
-    if (block_size == 0) {
-      block_size = 1;
-      num_blocks = n;
-    }
   }
 
   [[nodiscard]] std::size_t blockIndexOf(std::size_t lo) const noexcept {
-    const std::size_t rel = lo - first_index;
-    const std::size_t big = remainder * (block_size + 1);
-    if (rel < big) {
-      return rel / (block_size + 1);
+    if (num_blocks == 0 || span == 0) {
+      return 0;
     }
-    return remainder + ((rel - big) / block_size);
+    // Invert the citor-style partition `[first + span*s/P, first + span*(s+1)/P)` so the
+    // smallest @c s satisfying `first + span*(s+1)/P > lo` is recovered. With integer arithmetic
+    // that is `s = ((lo - first) * P) / span` -- the largest @c s whose left boundary does not
+    // exceed @p lo.
+    const std::size_t rel = lo - first_index;
+    const std::size_t s = (rel * num_blocks) / span;
+    return s >= num_blocks ? num_blocks - 1 : s;
   }
 };
 
@@ -620,15 +621,13 @@ private:
       }
     };
 
-    if (pool.shouldParallelize(numChunks, 1, 2) && pool.pool != nullptr) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, numChunks,
-                          [&](std::size_t lo, std::size_t hi) {
-                            for (std::size_t c = lo; c < hi; ++c) {
-                              runOneChunk(c);
-                            }
-                          })
-          .wait();
+    if (pool.shouldParallelize(numChunks, 1, 2)) {
+      pool.parallelForBlocks(std::size_t{0}, numChunks, std::size_t{0},
+                             [&](std::size_t lo, std::size_t hi) {
+                               for (std::size_t c = lo; c < hi; ++c) {
+                                 runOneChunk(c);
+                               }
+                             });
     } else {
       for (std::size_t c = 0; c < numChunks; ++c) {
         runOneChunk(c);
@@ -654,8 +653,8 @@ private:
       return;
     }
 
-    const bool willParallelize = pool.shouldParallelizeWork(n * d) &&
-                                 pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr;
+    const bool willParallelize =
+        pool.shouldParallelizeWork(n * d) && pool.shouldParallelize(n, 64, 2);
     const std::size_t desiredBlocks = willParallelize ? pool.workerCount() : std::size_t{1};
     const detail::BlockPartition part(0, n, desiredBlocks);
     const std::size_t numBlocks = part.num_blocks == 0 ? std::size_t{1} : part.num_blocks;
@@ -691,11 +690,9 @@ private:
     };
 
     if (willParallelize) {
-      pool.pool
-          ->submit_blocks(
-              std::size_t{0}, n, [&](std::size_t lo, std::size_t hi) { scatterRange(lo, hi); },
-              numBlocks)
-          .wait();
+      pool.parallelForExactBlocks<citor::ScatterFoldHints>(
+          std::size_t{0}, n, numBlocks,
+          [&](std::size_t lo, std::size_t hi) { scatterRange(lo, hi); });
     } else {
       scatterRange(0, n);
     }
@@ -739,8 +736,8 @@ private:
       return;
     }
 
-    const bool willParallelize = pool.shouldParallelizeWork(n * d) &&
-                                 pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr;
+    const bool willParallelize =
+        pool.shouldParallelizeWork(n * d) && pool.shouldParallelize(n, 64, 2);
     const std::size_t desiredBlocks = willParallelize ? pool.workerCount() : std::size_t{1};
     const detail::BlockPartition part(0, n, desiredBlocks);
     const std::size_t numBlocks = part.num_blocks == 0 ? std::size_t{1} : part.num_blocks;
@@ -778,11 +775,9 @@ private:
     };
 
     if (willParallelize) {
-      pool.pool
-          ->submit_blocks(
-              std::size_t{0}, n, [&](std::size_t lo, std::size_t hi) { scatterRange(lo, hi); },
-              numBlocks)
-          .wait();
+      pool.parallelForExactBlocks<citor::ScatterFoldKahanHints>(
+          std::size_t{0}, n, numBlocks,
+          [&](std::size_t lo, std::size_t hi) { scatterRange(lo, hi); });
     } else {
       scatterRange(0, n);
     }
@@ -831,11 +826,9 @@ private:
       }
     };
 
-    if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, n,
-                          [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); })
-          .wait();
+    if (pool.shouldParallelize(n, 64, 2)) {
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                             [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
     } else {
       runRowRange(0, n);
     }
@@ -870,11 +863,9 @@ private:
       }
     };
 
-    if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, n,
-                          [&](std::size_t lo, std::size_t hi) { seedRange(lo, hi); })
-          .wait();
+    if (pool.shouldParallelize(n, 64, 2)) {
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                             [&](std::size_t lo, std::size_t hi) { seedRange(lo, hi); });
     } else {
       seedRange(0, n);
     }
@@ -1031,11 +1022,9 @@ private:
       }
     };
 
-    if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, n,
-                          [&](std::size_t lo, std::size_t hi) { processRange(lo, hi); })
-          .wait();
+    if (pool.shouldParallelize(n, 64, 2)) {
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                             [&](std::size_t lo, std::size_t hi) { processRange(lo, hi); });
     } else {
       processRange(0, n);
     }
@@ -1159,11 +1148,9 @@ private:
       }
     };
 
-    if (pool.shouldParallelize(n, 64, 2) && pool.pool != nullptr) {
-      pool.pool
-          ->submit_blocks(std::size_t{0}, n,
-                          [&](std::size_t lo, std::size_t hi) { processRange(lo, hi); })
-          .wait();
+    if (pool.shouldParallelize(n, 64, 2)) {
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                             [&](std::size_t lo, std::size_t hi) { processRange(lo, hi); });
     } else {
       processRange(0, n);
     }

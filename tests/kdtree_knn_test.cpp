@@ -247,7 +247,7 @@ TEST(KdtreeKnn, ParallelAgreesWithSerial) {
 
   auto [idxSerial, distSerial] = tree.knnQuery(k, Pool{});
 
-  BS::light_thread_pool poolHandle(4);
+  clustering::math::OwnedPool poolHandle(4);
   auto [idxPar, distPar] = tree.knnQuery(k, Pool{&poolHandle});
 
   for (std::size_t i = 0; i < n; ++i) {

@@ -1,6 +1,5 @@
 #include <benchmark/benchmark.h>
 
-#include <BS_thread_pool.hpp>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -46,7 +45,7 @@ void BM_NnDescentBuild(benchmark::State &state) {
   const auto nJobs = static_cast<std::size_t>(state.range(3));
   const auto X = vmfLikeUnitSphere(n, d);
 
-  BS::light_thread_pool pool(nJobs > 0 ? nJobs : 1);
+  clustering::math::OwnedPool pool(nJobs > 0 ? nJobs : 1);
   const Pool poolHandle{nJobs > 1 ? &pool : nullptr};
 
   std::size_t lastIters = 0;

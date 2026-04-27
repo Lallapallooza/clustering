@@ -279,7 +279,7 @@ TEST(NnDescentDeath, KGeNAborts) {
 TEST(NnDescent, StressUnderPoolNJobs16) {
   auto X = makeGaussian(2000, 32, 0xAAAA0004ULL);
   NnDescentIndex<float> idx(15);
-  BS::light_thread_pool poolImpl(16);
+  clustering::math::OwnedPool poolImpl(16);
   const Pool pool{&poolImpl};
   idx.build(X, pool);
   EXPECT_TRUE(idx.isConnected());

@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <BS_thread_pool.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -90,7 +89,7 @@ TEST(GemmPlanF32, BpAlignedTo32Bytes) {
 TEST(GemmPlanF32, ScratchSizeIsWorkerCountTimesMcTimesKc) {
   NDArray<float, 2> B({32, 16});
   fillRandom(B, 3U);
-  BS::light_thread_pool pool(8);
+  clustering::math::OwnedPool pool(8);
   const GemmPlan<float> plan(B, Pool{&pool});
   EXPECT_EQ(plan.debugScratchSize(), 8u * kMc<float> * kKc<float>);
 }
@@ -336,7 +335,7 @@ TEST(GemmPlanF32, PoolPlanExecuteMatchesSerial) {
   fillRandom(A, 300U);
   fillRandom(B, 301U);
 
-  BS::light_thread_pool pool(8);
+  clustering::math::OwnedPool pool(8);
   const GemmPlan<float> poolPlan(B, Pool{&pool});
   const GemmPlan<float> serialPlan(B, Pool{nullptr});
 

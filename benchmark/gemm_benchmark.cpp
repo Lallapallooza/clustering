@@ -4,7 +4,6 @@
 #include <sched.h>
 #endif
 
-#include <BS_thread_pool.hpp>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -73,7 +72,7 @@ void runOurGemm(benchmark::State &state, std::size_t M, std::size_t N, std::size
   fillRandom(B, 2U);
   fillZero(C);
 
-  BS::light_thread_pool pool(kWorkerCount);
+  clustering::math::OwnedPool pool(kWorkerCount);
 
   for (auto _ : state) {
     gemm(A, B, C, Pool{&pool}, 1.0F, 0.0F);

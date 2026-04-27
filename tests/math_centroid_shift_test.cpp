@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 
-#include <BS_thread_pool.hpp>
 #include <cmath>
 #include <cstddef>
 #include <random>
@@ -83,7 +82,7 @@ TEST(CentroidShift, SerialAndThreadedAgree) {
   NDArray<float, 1> serial({k});
   centroidShift(cOld, cNew, serial, Pool{nullptr});
 
-  BS::light_thread_pool tp(4);
+  clustering::math::OwnedPool tp(4);
   NDArray<float, 1> threaded({k});
   centroidShift(cOld, cNew, threaded, Pool{&tp});
 

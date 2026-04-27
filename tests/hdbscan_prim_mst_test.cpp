@@ -309,7 +309,7 @@ TEST(PrimMstDenseCore, ParallelCoreDistancesMatchSerialAtDim32) {
   MstOutput<float> serialOut;
   serialBackend.run(X, minSamples, Pool{}, serialOut);
 
-  BS::light_thread_pool workers(4);
+  clustering::math::OwnedPool workers(4);
   PrimMstBackend<float> parallelBackend;
   MstOutput<float> parallelOut;
   parallelBackend.run(X, minSamples, Pool{&workers}, parallelOut);

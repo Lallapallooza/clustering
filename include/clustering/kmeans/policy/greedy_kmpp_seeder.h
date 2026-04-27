@@ -387,8 +387,8 @@ public:
           minSq[i] = detail::sqEuclideanRowPtr(xData + (i * d), firstRow, d);
         }
       };
-      if (pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr) {
-        pool.pool->submit_blocks(std::size_t{0}, n, initRange, pool.workerCount()).wait();
+      if (pool.shouldParallelize(n, 1024, 2)) {
+        pool.parallelForBlocks(std::size_t{0}, n, pool.workerCount(), initRange);
       } else {
         initRange(0, n);
       }
@@ -425,8 +425,8 @@ public:
             }
           }
         };
-        if (pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr) {
-          pool.pool->submit_blocks(std::size_t{0}, n, degenRange, pool.workerCount()).wait();
+        if (pool.shouldParallelize(n, 1024, 2)) {
+          pool.parallelForBlocks(std::size_t{0}, n, pool.workerCount(), degenRange);
         } else {
           degenRange(0, n);
         }
@@ -480,7 +480,7 @@ public:
           // Per-worker score accumulators are reused from @ref m_localScores; the candDistSq
           // writes are row-local so partitioning by `i` is aliasing-free. Falls back to a
           // single worker-zero path when the pool is null or the workload is too small.
-          const bool willParallelizeT = pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr;
+          const bool willParallelizeT = pool.shouldParallelize(n, 1024, 2);
           const std::size_t workersT = willParallelizeT ? pool.workerCount() : std::size_t{1};
           T *localScoresT = m_localScores.data();
           for (std::size_t e = 0; e < workersT * nLocalTrials; ++e) {
@@ -509,15 +509,11 @@ public:
               }
             };
             if (willParallelizeT) {
-              pool.pool
-                  ->submit_blocks(
-                      std::size_t{0}, n,
-                      [&](std::size_t lo, std::size_t hi) {
-                        const std::size_t w = math::Pool::workerIndex();
-                        rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
-                      },
-                      workersT)
-                  .wait();
+              pool.parallelForBlocks(std::size_t{0}, n, workersT,
+                                     [&](std::size_t lo, std::size_t hi) {
+                                       const std::size_t w = math::Pool::workerIndex();
+                                       rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
+                                     });
             } else {
               rangeFn(0, n, localScoresT);
             }
@@ -539,15 +535,11 @@ public:
               }
             };
             if (willParallelizeT) {
-              pool.pool
-                  ->submit_blocks(
-                      std::size_t{0}, n,
-                      [&](std::size_t lo, std::size_t hi) {
-                        const std::size_t w = math::Pool::workerIndex();
-                        rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
-                      },
-                      workersT)
-                  .wait();
+              pool.parallelForBlocks(std::size_t{0}, n, workersT,
+                                     [&](std::size_t lo, std::size_t hi) {
+                                       const std::size_t w = math::Pool::workerIndex();
+                                       rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
+                                     });
             } else {
               rangeFn(0, n, localScoresT);
             }
@@ -569,15 +561,11 @@ public:
               }
             };
             if (willParallelizeT) {
-              pool.pool
-                  ->submit_blocks(
-                      std::size_t{0}, n,
-                      [&](std::size_t lo, std::size_t hi) {
-                        const std::size_t w = math::Pool::workerIndex();
-                        rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
-                      },
-                      workersT)
-                  .wait();
+              pool.parallelForBlocks(std::size_t{0}, n, workersT,
+                                     [&](std::size_t lo, std::size_t hi) {
+                                       const std::size_t w = math::Pool::workerIndex();
+                                       rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
+                                     });
             } else {
               rangeFn(0, n, localScoresT);
             }
@@ -638,7 +626,7 @@ public:
           // difference between bandwidth-bound and bandwidth-bound times L. Parallelized over
           // X rows via per-worker score slabs reduced at the end; candDistSqData writes are
           // row-local so no aliasing across workers.
-          const bool willParallelize = pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr;
+          const bool willParallelize = pool.shouldParallelize(n, 1024, 2);
           bool scoredViaSoa = false;
 #ifdef CLUSTERING_USE_AVX2
           if constexpr (std::is_same_v<T, float>) {
@@ -697,15 +685,11 @@ public:
                 for (std::size_t e = 0; e < workers * nLocalTrials; ++e) {
                   localScores[e] = T{0};
                 }
-                pool.pool
-                    ->submit_blocks(
-                        std::size_t{0}, n,
-                        [&](std::size_t lo, std::size_t hi) {
-                          const std::size_t w = math::Pool::workerIndex();
-                          soaRange(lo, hi, localScores + (w * nLocalTrials));
-                        },
-                        workers)
-                    .wait();
+                pool.parallelForBlocks(std::size_t{0}, n, workers,
+                                       [&](std::size_t lo, std::size_t hi) {
+                                         const std::size_t w = math::Pool::workerIndex();
+                                         soaRange(lo, hi, localScores + (w * nLocalTrials));
+                                       });
                 for (std::size_t w = 0; w < workers; ++w) {
                   const T *row = localScores + (w * nLocalTrials);
                   for (std::size_t t = 0; t < nLocalTrials; ++t) {
@@ -741,15 +725,11 @@ public:
               for (std::size_t e = 0; e < workers * nLocalTrials; ++e) {
                 localScores[e] = T{0};
               }
-              pool.pool
-                  ->submit_blocks(
-                      std::size_t{0}, n,
-                      [&](std::size_t lo, std::size_t hi) {
-                        const std::size_t w = math::Pool::workerIndex();
-                        scanRange(lo, hi, localScores + (w * nLocalTrials));
-                      },
-                      workers)
-                  .wait();
+              pool.parallelForBlocks(std::size_t{0}, n, workers,
+                                     [&](std::size_t lo, std::size_t hi) {
+                                       const std::size_t w = math::Pool::workerIndex();
+                                       scanRange(lo, hi, localScores + (w * nLocalTrials));
+                                     });
               for (std::size_t w = 0; w < workers; ++w) {
                 const T *row = localScores + (w * nLocalTrials);
                 for (std::size_t t = 0; t < nLocalTrials; ++t) {
@@ -785,8 +765,8 @@ public:
           }
         }
       };
-      if (pool.shouldParallelize(n, 1024, 2) && pool.pool != nullptr) {
-        pool.pool->submit_blocks(std::size_t{0}, n, winnerRange, pool.workerCount()).wait();
+      if (pool.shouldParallelize(n, 1024, 2)) {
+        pool.parallelForBlocks(std::size_t{0}, n, pool.workerCount(), winnerRange);
       } else {
         winnerRange(0, n);
       }
