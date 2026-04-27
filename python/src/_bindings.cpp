@@ -7,9 +7,12 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "clustering/dbscan.h"
@@ -49,13 +52,36 @@ struct KMeansResult {
   bool converged;
 };
 
+// Process-wide registry of solver instances keyed by (k, jobs). Mirrors clustering::math::
+// sharedPool's pattern: KMeans owns its policy scratch (centroids, packed-B panels, GEMM
+// plans, cached norms, n*k bound matrices) which would otherwise be allocated and freed on
+// every binding call. Reusing one solver per (k, jobs) shape across pybench calls amortizes
+// those allocations to first-use only, the same amortization scratch already enjoys via the
+// in-process scratch-on-shape-change check; this just extends the same lifetime to the
+// solver itself. Locked under the GIL by the only entry point that reads/writes the slot.
+template <class Seeder> auto &kmeansSolverFor(std::size_t k, std::size_t jobs) {
+  using Solver = KMeans<float, LloydFusedGemm<float>, Seeder>;
+  using Key = std::pair<std::size_t, std::size_t>;
+  struct KeyHash {
+    std::size_t operator()(const Key &p) const noexcept {
+      return p.first * 0x9E3779B97F4A7C15ULL + p.second;
+    }
+  };
+  static std::unordered_map<Key, std::unique_ptr<Solver>, KeyHash> registry;
+  auto &slot = registry[{k, jobs}];
+  if (!slot) {
+    slot = std::make_unique<Solver>(k, jobs);
+  }
+  return *slot;
+}
+
 template <class Seeder>
 KMeansResult runKMeans(const NDArray<float, 2> &X, std::size_t k, std::size_t maxIter, float tol,
                        std::uint64_t seedFirst, std::size_t jobs, std::size_t nInit) {
   const std::size_t n = X.dim(0);
   const std::size_t d = X.dim(1);
 
-  KMeans<float, LloydFusedGemm<float>, Seeder> algo(k, jobs);
+  auto &algo = kmeansSolverFor<Seeder>(k, jobs);
   algo.run(X, maxIter, tol, seedFirst, nInit);
 
   KMeansResult out{.labels = NDArray<std::int32_t, 1>({n}),
