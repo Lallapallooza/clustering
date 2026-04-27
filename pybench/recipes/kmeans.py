@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 import numpy as np
-from _clustering import kmeans_best_of as cpp_kmeans_best_of
+from _clustering import kmeans as cpp_kmeans
 from sklearn.cluster import KMeans
 
 from pybench.alignment import as_aligned
@@ -14,15 +14,16 @@ _N_INIT = 5
 
 def _ours(data: np.ndarray, *, n_clusters: int, n_jobs: int = 1) -> np.ndarray:
     # One-shot align so the C++ binding takes its zero-copy borrow path rather than
-    # the memcpy fallback. The n_init loop now lives inside the binding so a single
-    # KMeans<float> instance, thread pool, and policy scratch amortize across restarts.
+    # the memcpy fallback. The n_init loop lives inside the C++ KMeans::run call so a
+    # single KMeans<float> instance, thread pool, and policy scratch amortize across
+    # restarts in one descent into native code.
     data = as_aligned(data)
-    labels, _, _, _, _ = cpp_kmeans_best_of(
+    labels, _, _, _, _ = cpp_kmeans(
         data,
         k=n_clusters,
         max_iter=300,
         tol=1e-4,
-        seed_first=0,
+        seed=0,
         n_jobs=n_jobs,
         n_init=_N_INIT,
     )

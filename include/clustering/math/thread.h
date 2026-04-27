@@ -511,7 +511,7 @@ inline OwnedPool &sharedPool(std::size_t nJobs) {
   // are O(1) and gated by Python's GIL or other caller-side serialization in practice.
   static std::unordered_map<std::size_t, std::unique_ptr<OwnedPool>> registry;
   static std::mutex registryMutex;
-  std::lock_guard<std::mutex> guard{registryMutex};
+  const std::scoped_lock guard{registryMutex};
   auto &slot = registry[effective];
   if (!slot) {
     slot = std::make_unique<OwnedPool>(effective);

@@ -75,27 +75,37 @@ public:
   ~KMeans() = default;
 
   /**
-   * @brief Fit to @p X.
+   * @brief Fit to @p X with optional best-of-restarts.
    *
-   * @param X       Contiguous n x d dataset. The caller retains ownership; @p X must outlive
-   *                this @c run call and every subsequent call that intends to reuse scratch.
-   * @param maxIter Iteration cap on the inner Lloyd loop.
-   * @param tol     Convergence tolerance relative to the mean column variance of @p X
-   *                (sklearn convention). The effective sum-of-shift-squared threshold is
-   *                @c tol * mean(var(X, axis=0)); iteration stops when the Kahan-summed per-
-   *                centroid shift-squared falls at or below that threshold.
-   * @param seed    PRNG seed. Identical `(seed, nJobs, X, maxIter, tol)` produces bit-identical
-   *                labels, centroids, and inertia at @c nJobs=1.
+   * Runs @p nInit independent restarts against the same data, each seeded as
+   * `seedFirst, seedFirst+1, ..., seedFirst+nInit-1`, and keeps the lowest-inertia outcome.
+   * `nInit == 1` is the single-restart path; `nInit > 1` matches the sklearn `n_init`
+   * convention and amortizes seeder, Lloyd-side scratch, and X-stats compute across all
+   * restarts inside one C++ call (the policy scratch persists across restarts on the same
+   * @c KMeans instance).
+   *
+   * @param X         Contiguous n x d dataset. The caller retains ownership; @p X must
+   *                  outlive this call.
+   * @param maxIter   Iteration cap on each inner Lloyd loop.
+   * @param tol       Convergence tolerance relative to the mean column variance of @p X
+   *                  (sklearn convention).
+   * @param seedFirst PRNG seed for the first restart. Identical `(seedFirst, nInit, nJobs, X,
+   *                  maxIter, tol)` produces bit-identical labels, centroids, and inertia at
+   *                  @c nJobs=1.
+   * @param nInit     Number of independent restarts (>= 1). The accessor methods report the
+   *                  best (lowest-inertia) restart's labels, centroids, inertia, n_iter, and
+   *                  converged flag.
    *
    * @warning @p X must remain alive and unchanged for the full duration of this call.
    */
   void run(const NDArray<T, 2> &X, std::size_t maxIter = 300, T tol = T{1e-4},
-           std::uint64_t seed = 0) {
+           std::uint64_t seedFirst = 0, std::size_t nInit = 1) {
     const std::size_t n = X.dim(0);
     const std::size_t d = X.dim(1);
 
     CLUSTERING_ALWAYS_ASSERT(m_k >= 1);
     CLUSTERING_ALWAYS_ASSERT(n >= m_k);
+    CLUSTERING_ALWAYS_ASSERT(nInit >= 1);
 
     ensureOutputShape(n, d);
 
@@ -107,8 +117,40 @@ public:
     }
 
     const math::Pool pool{m_pool};
-    m_seeder.run(X, m_k, seed, pool, m_centroids);
-    m_lloyd.run(X, m_centroids, m_k, maxIter, tol, pool, m_labels, m_inertia, m_nIter, m_converged);
+
+    if (nInit == 1) {
+      m_seeder.run(X, m_k, seedFirst, pool, m_centroids);
+      m_lloyd.run(X, m_centroids, m_k, maxIter, tol, pool, m_labels, m_inertia, m_nIter,
+                  m_converged);
+      return;
+    }
+
+    ensureBestOfScratch(n, d);
+    bool anyImprovement = false;
+
+    for (std::size_t i = 0; i < nInit; ++i) {
+      const std::uint64_t seed = seedFirst + static_cast<std::uint64_t>(i);
+      m_seeder.run(X, m_k, seed, pool, m_centroids);
+      m_lloyd.run(X, m_centroids, m_k, maxIter, tol, pool, m_labels, m_inertia, m_nIter,
+                  m_converged);
+      if (!anyImprovement || m_inertia < m_bestInertia) {
+        anyImprovement = true;
+        m_bestInertia = m_inertia;
+        m_bestNIter = m_nIter;
+        m_bestConverged = m_converged;
+        std::memcpy(m_bestCentroids.data(), m_centroids.data(), m_k * d * sizeof(T));
+        std::memcpy(m_bestLabels.data(), m_labels.data(), n * sizeof(std::int32_t));
+      }
+    }
+
+    // Promote the best-of-restarts result onto the public accessors. Swapping the storage
+    // (rather than copying) keeps the work-side buffers the same shape so the next call
+    // skips reallocation.
+    std::swap(m_centroids, m_bestCentroids);
+    std::swap(m_labels, m_bestLabels);
+    m_inertia = m_bestInertia;
+    m_nIter = m_bestNIter;
+    m_converged = m_bestConverged;
   }
 
   /// Length-n assignment; each entry is in `[0, k)`.
@@ -128,9 +170,14 @@ public:
   void reset() {
     m_centroids = NDArray<T, 2, Layout::Contig>({0, 0});
     m_labels = NDArray<std::int32_t, 1>({0});
+    m_bestCentroids = NDArray<T, 2, Layout::Contig>({0, 0});
+    m_bestLabels = NDArray<std::int32_t, 1>({0});
     m_inertia = 0.0;
     m_nIter = 0;
     m_converged = false;
+    m_bestInertia = 0.0;
+    m_bestNIter = 0;
+    m_bestConverged = false;
     m_lloyd = Algo{};
     m_seeder = Seeder{};
   }
@@ -145,6 +192,15 @@ private:
     }
   }
 
+  void ensureBestOfScratch(std::size_t n, std::size_t d) {
+    if (m_bestCentroids.dim(0) != m_k || m_bestCentroids.dim(1) != d) {
+      m_bestCentroids = NDArray<T, 2, Layout::Contig>({m_k, d});
+    }
+    if (m_bestLabels.dim(0) != n) {
+      m_bestLabels = NDArray<std::int32_t, 1>({n});
+    }
+  }
+
   std::size_t m_k;
   std::size_t m_nJobs;
   math::OwnedPool *m_pool = nullptr;
@@ -153,6 +209,14 @@ private:
   double m_inertia = 0.0;
   std::size_t m_nIter = 0;
   bool m_converged = false;
+
+  // Scratch holding the best-of-restarts result while iterating (@c nInit > 1). On exit
+  // these are swapped with the public buffers so accessors return the lowest-inertia run.
+  NDArray<T, 2, Layout::Contig> m_bestCentroids{NDArray<T, 2, Layout::Contig>({0, 0})};
+  NDArray<std::int32_t, 1> m_bestLabels{NDArray<std::int32_t, 1>({0})};
+  double m_bestInertia = 0.0;
+  std::size_t m_bestNIter = 0;
+  bool m_bestConverged = false;
 
   Algo m_lloyd{};
   Seeder m_seeder{};
