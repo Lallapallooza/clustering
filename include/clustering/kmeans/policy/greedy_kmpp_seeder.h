@@ -447,26 +447,39 @@ public:
     // then the second pass adds the cross-chunk exclusive prefix to make the array global.
     // Forwarded to @c citor::parallelScan via @c math::Pool::parallelScan; at n=250k d=2 the
     // previous pure-serial build was a latency-bound hot path (a dependent
-    // fadd over 250k rows).
+    // fadd over 250k rows). At small @p n the per-pass dispatch dominates the chain length;
+    // gate on `n / workers` >= ~1k rows so the parallel path only activates when each
+    // worker's slice amortizes the producer-side reduce + barrier cost.
+    const bool willParallelizeCum = pool.shouldParallelize(n, 1024, 2);
     for (std::size_t c = 1; c < k; ++c) {
-      // Canonical Blelloch body: pass 1 invokes with `initial = identity` and the body's
-      // writes lay down a block-local prefix scan + a 0-offset (so cumDistSq holds the
-      // block-local scan when pass 1 returns). Pass 2 invokes with `initial = exclusive
-      // prefix from earlier chunks` and the same body re-walks the chunk, this time writing
-      // the global scan. Both passes return the chunk total; the second pass's return is
-      // discarded by citor.
-      const T total = pool.template parallelScan<citor::BulkBalancedHints>(
-          n, T{0},
-          [&](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi, T initial,
-              T * /*out*/) noexcept -> T {
-            T s = T{0};
-            for (std::size_t i = lo; i < hi; ++i) {
-              s += minSq[i];
-              cumDistSq[i] = s + initial;
-            }
-            return s;
-          },
-          [](T a, T b) noexcept { return a + b; });
+      T total;
+      if (willParallelizeCum) {
+        // Canonical Blelloch body: pass 1 invokes with `initial = identity` and the body's
+        // writes lay down a block-local prefix scan + a 0-offset (so cumDistSq holds the
+        // block-local scan when pass 1 returns). Pass 2 invokes with `initial = exclusive
+        // prefix from earlier chunks` and the same body re-walks the chunk, this time
+        // writing the global scan. Both passes return the chunk total; the second pass's
+        // return is discarded by citor.
+        total = pool.template parallelScan<citor::BulkBalancedHints>(
+            n, T{0},
+            [&](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi, T initial,
+                T * /*out*/) noexcept -> T {
+              T s = T{0};
+              for (std::size_t i = lo; i < hi; ++i) {
+                s += minSq[i];
+                cumDistSq[i] = s + initial;
+              }
+              return s;
+            },
+            [](T a, T b) noexcept { return a + b; });
+      } else {
+        T runningSum = T{0};
+        for (std::size_t i = 0; i < n; ++i) {
+          runningSum += minSq[i];
+          cumDistSq[i] = runningSum;
+        }
+        total = runningSum;
+      }
 
       // Degenerate guard: when every chosen centroid coincides with every remaining point the
       // total collapses to ~0; pick the next centroid uniformly so the routine cannot stall.
