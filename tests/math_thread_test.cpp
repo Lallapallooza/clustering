@@ -60,3 +60,21 @@ TEST(MathThreadPool, ShouldParallelizeWithZeroChunkReturnsFalse) {
   const Pool wrapper{&pool};
   EXPECT_FALSE(wrapper.shouldParallelize(10000, 0, 2));
 }
+
+TEST(MathThreadPool, ParallelReduceMatchesSerialSum) {
+  OwnedPool pool(kFixtureWorkers);
+  Pool wrapper{&pool};
+
+  const std::size_t got = wrapper.parallelReduce<citor::FixedBlockReduceHints>(
+      std::size_t{0}, std::size_t{10000}, std::size_t{0},
+      [](std::size_t lo, std::size_t hi) {
+        std::size_t sum = 0;
+        for (std::size_t i = lo; i < hi; ++i) {
+          sum += i;
+        }
+        return sum;
+      },
+      [](std::size_t lhs, std::size_t rhs) { return lhs + rhs; });
+
+  EXPECT_EQ(got, (9999U * 10000U) / 2U);
+}

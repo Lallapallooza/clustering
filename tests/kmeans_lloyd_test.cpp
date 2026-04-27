@@ -176,6 +176,21 @@ TEST(KMeansEndToEnd, ElkanPathRecoversBlobs) {
   EXPECT_GT(purity(km.labels(), b.truth, k), 0.95);
 }
 
+TEST(KMeansLloydPartition, CitorStyleBlockStartsRoundTripToSlots) {
+  constexpr std::size_t n = 5000;
+  constexpr std::size_t desired = 16;
+  const clustering::kmeans::detail::BlockPartition part(0, n, desired);
+
+  ASSERT_EQ(part.num_blocks, desired);
+  for (std::size_t slot = 0; slot < part.num_blocks; ++slot) {
+    const std::size_t lo = (n * slot) / part.num_blocks;
+    const std::size_t hi = (n * (slot + 1)) / part.num_blocks;
+    ASSERT_LT(lo, hi);
+    EXPECT_EQ(part.blockIndexOf(lo), slot);
+    EXPECT_EQ(part.blockIndexOf(hi - 1), slot);
+  }
+}
+
 TEST(KMeansEndToEnd, RecoversTruthLabelsOnBlobs) {
   constexpr std::size_t n = 600;
   constexpr std::size_t d = 8;

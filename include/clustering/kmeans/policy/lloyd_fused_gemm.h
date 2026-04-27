@@ -33,6 +33,33 @@ namespace clustering::kmeans {
 namespace detail {
 
 /**
+ * @brief Choose a block count that keeps per-block work above @p minUnitsPerBlock.
+ *
+ * Returns `min(maxBlocks, max(1, ceil(totalUnits / minUnitsPerBlock)))`. Used at the kmeans
+ * policy fan-out sites so a 16-thread pool spends all 16 lanes only when there is enough work
+ * to amortize the per-fork dispatch tax; at small @p n the same pool falls back to a smaller
+ * block count (still parallel, just narrower) and outruns the 16-way oversubscribed shape.
+ */
+[[nodiscard]] inline std::size_t effectiveBlockCount(std::size_t totalUnits,
+                                                     std::size_t minUnitsPerBlock,
+                                                     std::size_t maxBlocks) noexcept {
+  if (maxBlocks <= 1 || totalUnits == 0) {
+    return std::size_t{1};
+  }
+  if (minUnitsPerBlock == 0) {
+    return maxBlocks;
+  }
+  std::size_t b = (totalUnits + minUnitsPerBlock - 1) / minUnitsPerBlock;
+  if (b < 1) {
+    b = 1;
+  }
+  if (b > maxBlocks) {
+    b = maxBlocks;
+  }
+  return b;
+}
+
+/**
  * @brief Work-unit partition for the label-grouped fold over @c n points into @c numBlocks bins.
  *
  * The partition maps `[first_index, first_index + span)` onto at most @c desired blocks; slot
@@ -61,12 +88,10 @@ struct BlockPartition {
     if (num_blocks == 0 || span == 0) {
       return 0;
     }
-    // Invert the citor-style partition `[first + span*s/P, first + span*(s+1)/P)` so the
-    // smallest @c s satisfying `first + span*(s+1)/P > lo` is recovered. With integer arithmetic
-    // that is `s = ((lo - first) * P) / span` -- the largest @c s whose left boundary does not
-    // exceed @p lo.
+    // Invert the citor-style partition `[first + span*s/P, first + span*(s+1)/P)` using
+    // `ceil((rel + 1) * P / span) - 1`, so left boundaries map to their own slot.
     const std::size_t rel = lo - first_index;
-    const std::size_t s = (rel * num_blocks) / span;
+    const std::size_t s = (((rel + 1) * num_blocks) - 1) / span;
     return s >= num_blocks ? num_blocks - 1 : s;
   }
 };
@@ -105,9 +130,9 @@ public:
       : m_centroidsOld({0, 0}), m_cSqNorms({0}), m_sums({0, 0}), m_counts({0}), m_minDistSq({0}),
         m_shiftSq({0}), m_partialSums({0}), m_partialComps({0}), m_partialCounts({0}),
         m_foldComp({0}), m_packedB({0}), m_packedCSqNorms({0}), m_distsChunk({0, 0}),
-        m_gemmApArena({0}), m_xNormsSq({0}), m_varSum({0}), m_varSumSq({0}), m_u({0}), m_l({0}),
-        m_shiftEuclidean({0}), m_halfDistToNearestOther({0}), m_elkanBounds({0, 0}),
-        m_centerDist({0, 0}) {}
+        m_gemmApArena({0}), m_xNormsSq({0}), m_varSum({0}), m_varSumSq({0}), m_varPartialSum({0}),
+        m_varPartialSumSq({0}), m_u({0}), m_l({0}), m_shiftEuclidean({0}),
+        m_halfDistToNearestOther({0}), m_elkanBounds({0, 0}), m_centerDist({0, 0}) {}
 
 #ifdef CLUSTERING_KMEANS_KAHAN_N_THRESHOLD
   /**
@@ -170,18 +195,12 @@ public:
     // Sklearn-compatible tol semantics: the threshold on sum(||deltac_j||^2) is @c tol * mean_var
     // where @c mean_var is the mean of per-column variances of @p X. This is scale-invariant,
     // which is the property callers expect when they pass the same numeric @c tol across
-    // datasets of different magnitudes. The raw-L2-shift convention our earlier prose described
-    // made @c tol=1e-4 hundreds-of-thousands of times tighter than sklearn at the same numeric
-    // value, which inflated the Lloyd iteration count by 3-4x on typical blob data.
-    const T shiftSqThreshold = tol * meanColumnVariance(X);
+    // datasets of different magnitudes. Fused with @c refreshXNorms to share one fan-out at
+    // the head of every `run()` call -- both are one-shot O(n*d) passes over @p X and pay
+    // identical fork-join overhead in the dispatch profile at the d=2 cell.
+    const T meanVar = computeXStatistics(X, pool);
+    const T shiftSqThreshold = tol * meanVar;
     const bool useKahan = n >= kahanNThreshold;
-
-    // X is input-only; its squared-row-norms are reused across every Lloyd iteration's
-    // argmin post-pass. Compute once per run() so the iteration budget doesn't eat an
-    // O(n*d) pass for every assignment.
-    for (std::size_t i = 0; i < n; ++i) {
-      m_xNormsSq(i) = math::detail::sqNormRow<T, Layout::Contig>(X, i);
-    }
 
     refreshCentroidSqNorms(centroids);
 
@@ -202,39 +221,22 @@ public:
                                (k <= kElkanMaxK) && (n * k <= kElkanNKLimit) && (k >= 2);
 
     while (iter < maxIter) {
+      std::memcpy(m_centroidsOld.data(), centroids.data(),
+                  centroids.dim(0) * centroids.dim(1) * sizeof(T));
+
       if (hamerlyEligible && iter > 0) {
-        runHamerlyAssignment(X, centroids, outLabels, pool);
+        runHamerlyAssignmentAndScatter(X, centroids, outLabels, k, useKahan, pool);
       } else if (elkanEligible && iter > 0) {
-        runElkanAssignment(X, centroids, outLabels, pool);
+        runElkanAssignmentAndScatter(X, centroids, outLabels, k, useKahan, pool);
       } else {
-        // First iteration (or no-prune shape) goes through the dispatcher. The chunked path
-        // seeds Hamerly's @c m_u and @c m_l inline from the argmin post-pass, and Elkan's
-        // @c m_elkanBounds matrix is filled from the same per-sample scan. The fused path only
-        // returns the winning distance, so seed Hamerly's conservative lower bound separately.
-        runAssignment(X, centroids, outLabels, pool);
+        runAssignmentAndScatter(X, centroids, outLabels, k, useKahan, pool);
         if (hamerlyEligible && iter == 0 && assignmentUsesFusedArgmin(X, centroids)) {
           seedHamerlyBoundsFromLabels(X, centroids, outLabels, pool);
         }
       }
 
-      std::memcpy(m_centroidsOld.data(), centroids.data(),
-                  centroids.dim(0) * centroids.dim(1) * sizeof(T));
-
-      if (useKahan) {
-        scatterAndFoldKahan(X, outLabels, k, pool);
-      } else {
-        scatterAndFoldPlain(X, outLabels, k, pool);
-      }
-
-      // Empty-cluster reseed: furthest-point pass bounded by the counts scan. m_minDistSq still
-      // holds the decomposed-formula residual from the assignment above; the noise tail is
-      // bounded by per-point `||c||^2 + ||x||^2` cancellation, smaller than the inter-blob
-      // distance the donor is selected against, so the argmax selection is preserved in
-      // practice on benchmark data. The donor's minDistSq is zeroed so successive empties
-      // cannot reseed to the same point.
       (void)::clustering::kmeans::detail::reseedEmptyClusters<T>(X, centroids, m_sums, m_counts,
                                                                  m_minDistSq);
-
       finalizeMeans(centroids);
       refreshCentroidSqNorms(centroids);
 
@@ -265,19 +267,7 @@ public:
       recomputeMinDistSqDirect(X, centroids, outLabels, pool);
     }
 
-    // Inertia: Kahan-summed in f64 to pin the 1% gate at large (n, k) envelopes where the
-    // naive single-pass f32 add would drift.
-    double sum = 0.0;
-    double comp = 0.0;
-    for (std::size_t i = 0; i < n; ++i) {
-      const auto addend = static_cast<double>(m_minDistSq(i));
-      const double y = addend - comp;
-      const double t = sum + y;
-      comp = (t - sum) - y;
-      sum = t;
-    }
-
-    outInertia = sum;
+    outInertia = inertiaKahan(n, pool);
     outNIter = iter;
     outConverged = converged;
   }
@@ -291,7 +281,7 @@ private:
    * relative to even a single Lloyd iteration. Returns @c 0 when @p X is empty so callers fall
    * back to a @c tol of @c 0 and iterate to @c maxIter.
    */
-  [[nodiscard]] T meanColumnVariance(const NDArray<T, 2, Layout::Contig> &X) {
+  [[nodiscard]] T meanColumnVariance(const NDArray<T, 2, Layout::Contig> &X, math::Pool pool) {
     const std::size_t n = X.dim(0);
     const std::size_t d = X.dim(1);
     if (n == 0 || d == 0) {
@@ -309,14 +299,52 @@ private:
     }
     T *colSum = m_varSum.data();
     T *colSumSq = m_varSumSq.data();
-    for (std::size_t t = 0; t < d; ++t) {
-      colSum[t] = T{0};
-      colSumSq[t] = T{0};
+
+    const std::size_t workers = pool.workerCount();
+    const bool willParallelize = workers > 1;
+    if (willParallelize) {
+      const std::size_t partialSize = workers * d;
+      if (m_varPartialSum.dim(0) != partialSize) {
+        m_varPartialSum = NDArray<T, 1>({partialSize});
+        m_varPartialSumSq = NDArray<T, 1>({partialSize});
+      }
+      T *partialSum = m_varPartialSum.data();
+      T *partialSumSq = m_varPartialSumSq.data();
+      for (std::size_t e = 0; e < partialSize; ++e) {
+        partialSum[e] = T{0};
+        partialSumSq[e] = T{0};
+      }
+      pool.parallelForExactBlocksWithSlot<citor::BulkBalancedHints>(
+          std::size_t{0}, n, workers,
+          [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
+            T *localSum = partialSum + (slot * d);
+            T *localSumSq = partialSumSq + (slot * d);
+            for (std::size_t i = lo; i < hi; ++i) {
+              const T *row = xData + (i * d);
+              math::detail::columnwiseAccumSumSq<T>(row, d, localSum, localSumSq);
+            }
+          });
+      for (std::size_t t = 0; t < d; ++t) {
+        T s = T{0};
+        T ss = T{0};
+        for (std::size_t w = 0; w < workers; ++w) {
+          s += partialSum[(w * d) + t];
+          ss += partialSumSq[(w * d) + t];
+        }
+        colSum[t] = s;
+        colSumSq[t] = ss;
+      }
+    } else {
+      for (std::size_t t = 0; t < d; ++t) {
+        colSum[t] = T{0};
+        colSumSq[t] = T{0};
+      }
+      for (std::size_t i = 0; i < n; ++i) {
+        const T *row = xData + (i * d);
+        math::detail::columnwiseAccumSumSq<T>(row, d, colSum, colSumSq);
+      }
     }
-    for (std::size_t i = 0; i < n; ++i) {
-      const T *row = xData + (i * d);
-      math::detail::columnwiseAccumSumSq<T>(row, d, colSum, colSumSq);
-    }
+
     const auto nInv = static_cast<T>(1) / static_cast<T>(n);
     T acc = T{0};
     for (std::size_t t = 0; t < d; ++t) {
@@ -324,6 +352,664 @@ private:
       acc += (colSumSq[t] * nInv) - (mean * mean);
     }
     return acc / static_cast<T>(d);
+  }
+
+  /**
+   * @brief Compute per-X column variance and per-row squared norms in a single fan-out.
+   *
+   * Both quantities are one-shot O(n*d) passes over @p X. Computing them in the same parallel
+   * section halves the dispatch overhead at the run() head and keeps caches warm. Returns the
+   * mean column variance (used to scale @c tol per sklearn convention); writes per-row norms
+   * into @c m_xNormsSq.
+   */
+  [[nodiscard]] T computeXStatistics(const NDArray<T, 2, Layout::Contig> &X, math::Pool pool) {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    if (n == 0 || d == 0) {
+      return T{0};
+    }
+    const T *xData = X.data();
+
+    if (m_varSum.dim(0) != d) {
+      m_varSum = NDArray<T, 1>({d});
+      m_varSumSq = NDArray<T, 1>({d});
+    }
+    T *colSum = m_varSum.data();
+    T *colSumSq = m_varSumSq.data();
+
+    const std::size_t workers = pool.workerCount();
+    const bool willParallelize = workers > 1;
+    if (willParallelize) {
+      const std::size_t partialSize = workers * d;
+      if (m_varPartialSum.dim(0) != partialSize) {
+        m_varPartialSum = NDArray<T, 1>({partialSize});
+        m_varPartialSumSq = NDArray<T, 1>({partialSize});
+      }
+      T *partialSum = m_varPartialSum.data();
+      T *partialSumSq = m_varPartialSumSq.data();
+      for (std::size_t e = 0; e < partialSize; ++e) {
+        partialSum[e] = T{0};
+        partialSumSq[e] = T{0};
+      }
+      pool.parallelForExactBlocksWithSlot<citor::BulkBalancedHints>(
+          std::size_t{0}, n, workers,
+          [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
+            T *localSum = partialSum + (slot * d);
+            T *localSumSq = partialSumSq + (slot * d);
+            for (std::size_t i = lo; i < hi; ++i) {
+              const T *row = xData + (i * d);
+              math::detail::columnwiseAccumSumSq<T>(row, d, localSum, localSumSq);
+              m_xNormsSq(i) = math::detail::sqNormRow<T, Layout::Contig>(X, i);
+            }
+          });
+      for (std::size_t t = 0; t < d; ++t) {
+        T s = T{0};
+        T ss = T{0};
+        for (std::size_t w = 0; w < workers; ++w) {
+          s += partialSum[(w * d) + t];
+          ss += partialSumSq[(w * d) + t];
+        }
+        colSum[t] = s;
+        colSumSq[t] = ss;
+      }
+    } else {
+      for (std::size_t t = 0; t < d; ++t) {
+        colSum[t] = T{0};
+        colSumSq[t] = T{0};
+      }
+      for (std::size_t i = 0; i < n; ++i) {
+        const T *row = xData + (i * d);
+        math::detail::columnwiseAccumSumSq<T>(row, d, colSum, colSumSq);
+        m_xNormsSq(i) = math::detail::sqNormRow<T, Layout::Contig>(X, i);
+      }
+    }
+
+    const auto nInv = static_cast<T>(1) / static_cast<T>(n);
+    T acc = T{0};
+    for (std::size_t t = 0; t < d; ++t) {
+      const T mean = colSum[t] * nInv;
+      acc += (colSumSq[t] * nInv) - (mean * mean);
+    }
+    return acc / static_cast<T>(d);
+  }
+
+  void refreshXNorms(const NDArray<T, 2, Layout::Contig> &X, math::Pool pool) noexcept {
+    const std::size_t n = X.dim(0);
+    auto runRange = [&](std::size_t lo, std::size_t hi) noexcept {
+      for (std::size_t i = lo; i < hi; ++i) {
+        m_xNormsSq(i) = math::detail::sqNormRow<T, Layout::Contig>(X, i);
+      }
+    };
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); });
+  }
+
+  [[nodiscard]] double inertiaKahan(std::size_t n, math::Pool pool) {
+    const T *minDist = m_minDistSq.data();
+    auto sumRange = [minDist](std::size_t lo, std::size_t hi) noexcept {
+      double sum = 0.0;
+      double comp = 0.0;
+      for (std::size_t i = lo; i < hi; ++i) {
+        const auto addend = static_cast<double>(minDist[i]);
+        const double y = addend - comp;
+        const double t = sum + y;
+        comp = (t - sum) - y;
+        sum = t;
+      }
+      return sum;
+    };
+    return pool.parallelReduce<citor::KahanReduceHints>(
+        std::size_t{0}, n, 0.0, sumRange,
+        [](double lhs, double rhs) noexcept { return lhs + rhs; });
+  }
+
+  /**
+   * @brief Run the Lloyd inner loop using citor's persistent-worker plex protocol.
+   *
+   * Each Lloyd iteration becomes one phase; workers stay engaged across the whole loop.
+   * The producer-side pre-phase callback runs the serial bookkeeping (fold partial slabs,
+   * empty-cluster reseed, finalize means, refresh centroid-sq-norms, compute shift, check
+   * convergence, optional Hamerly/Elkan setup, prep next phase).
+   *
+   * Replaces the per-iter parallelForBlocks fan-out with a single
+   * runPlex barrier per iter, recovering the dispatch overhead that dominated
+   * at low-d shapes.
+   */
+  void runLloydPlex(const NDArray<T, 2, Layout::Contig> &X,
+                    NDArray<T, 2, Layout::Contig> &centroids, NDArray<std::int32_t, 1> &outLabels,
+                    std::size_t k, std::size_t maxIter, bool useKahan, bool hamerlyEligible,
+                    bool elkanEligible, T shiftSqThreshold, math::Pool pool, std::size_t &outIter,
+                    bool &outConverged) {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const std::size_t workers = pool.workerCount();
+
+    if (n == 0 || k == 0 || d == 0 || maxIter == 0) {
+      outIter = 0;
+      outConverged = true;
+      return;
+    }
+
+#ifdef CLUSTERING_USE_AVX2
+    const bool aligned32 = X.template isAligned<32>() && centroids.template isAligned<32>();
+#else
+    const bool aligned32 = false;
+#endif
+    const bool useDirect = aligned32 && d <= detail::kDirectArgminMaxD;
+    const bool useFused = aligned32 && !useDirect && d <= math::defaults::pairwiseArgminMaxD;
+    const bool useChunked = !useDirect && !useFused;
+
+    auto packForPhase = [&]() noexcept {
+#ifdef CLUSTERING_USE_AVX2
+      if constexpr (std::is_same_v<T, float>) {
+        if (useFused) {
+          math::detail::packCentroidsForFusedArgminF32(centroids, k, d, m_packedB.data());
+          math::detail::packCSqNorms<float>(m_cSqNorms.data(), k, m_packedCSqNorms.data());
+          return;
+        }
+      }
+#endif
+      if (useChunked) {
+        packCentroidsTiled(centroids);
+      }
+    };
+
+    auto computeBoundsSetup = [&](std::size_t phaseIdx) noexcept {
+      // Iter > 0 only: set up Hamerly/Elkan per-iter scaffolding from the just-computed shift.
+      if (phaseIdx == 0) {
+        return;
+      }
+      if (hamerlyEligible) {
+        T sMax = T{0};
+        T s2Max = T{0};
+        std::size_t argMax = 0;
+        T *shiftData = m_shiftEuclidean.data();
+        for (std::size_t c = 0; c < k; ++c) {
+          const T s = std::sqrt(m_shiftSq(c));
+          shiftData[c] = s;
+          if (s > sMax) {
+            s2Max = sMax;
+            sMax = s;
+            argMax = c;
+          } else if (s > s2Max) {
+            s2Max = s;
+          }
+        }
+        m_hamerlySMax = sMax;
+        m_hamerlyS2Max = s2Max;
+        m_hamerlyArgMax = argMax;
+
+        T *halfDistData = m_halfDistToNearestOther.data();
+        const T *cData = centroids.data();
+        for (std::size_t c = 0; c < k; ++c) {
+          T nearestSq = std::numeric_limits<T>::infinity();
+          const T *caRow = cData + (c * d);
+          for (std::size_t cp = 0; cp < k; ++cp) {
+            if (cp == c) {
+              continue;
+            }
+            const T dsq = math::detail::sqEuclideanRowPtr<T>(caRow, cData + (cp * d), d);
+            if (dsq < nearestSq) {
+              nearestSq = dsq;
+            }
+          }
+          halfDistData[c] = T{0.5} * std::sqrt(nearestSq);
+        }
+      } else if (elkanEligible) {
+        T *shiftData = m_shiftEuclidean.data();
+        for (std::size_t c = 0; c < k; ++c) {
+          shiftData[c] = std::sqrt(m_shiftSq(c));
+        }
+        T *centerDistData = m_centerDist.data();
+        T *halfDistData = m_halfDistToNearestOther.data();
+        const T *cData = centroids.data();
+        for (std::size_t c = 0; c < k; ++c) {
+          centerDistData[(c * k) + c] = T{0};
+          T nearest = std::numeric_limits<T>::infinity();
+          for (std::size_t cp = 0; cp < k; ++cp) {
+            if (cp == c) {
+              continue;
+            }
+            T dist;
+            if (cp > c) {
+              const T dsq =
+                  math::detail::sqEuclideanRowPtr<T>(cData + (c * d), cData + (cp * d), d);
+              dist = std::sqrt(dsq);
+              centerDistData[(c * k) + cp] = dist;
+              centerDistData[(cp * k) + c] = dist;
+            } else {
+              dist = centerDistData[(c * k) + cp];
+            }
+            if (dist < nearest) {
+              nearest = dist;
+            }
+          }
+          halfDistData[c] = T{0.5} * nearest;
+        }
+      }
+    };
+
+    // Phase 0 prep (runs before the runPlex first phase publishes):
+    preZeroPartialSlabs(useKahan, workers, k, d);
+    packForPhase();
+    std::memcpy(m_centroidsOld.data(), centroids.data(),
+                centroids.dim(0) * centroids.dim(1) * sizeof(T));
+
+    bool converged = false;
+    std::size_t actualIter = 0;
+    bool pendingHamerlySeed = false;
+
+    auto phaseFn = [&](std::size_t phaseIdx, std::uint32_t /*slotU*/, std::size_t slotLo,
+                       std::size_t slotHi, void * /*tls*/) noexcept {
+      if (converged || slotLo >= slotHi) {
+        return;
+      }
+      const std::size_t slot = math::Pool::workerIndex();
+      if (hamerlyEligible && phaseIdx > 0) {
+        runHamerlySlotBody(X, centroids, outLabels, k, useKahan, slot, slotLo, slotHi);
+      } else if (elkanEligible && phaseIdx > 0) {
+        runElkanSlotBody(X, centroids, outLabels, k, useKahan, slot, slotLo, slotHi);
+      } else {
+        runAssignmentSlotBody(X, centroids, outLabels, k, useKahan, useDirect, useFused, slot,
+                              slotLo, slotHi);
+      }
+    };
+
+    auto prePhaseFn = [&](std::size_t phaseIdx) noexcept {
+      if (converged) {
+        return;
+      }
+      if (phaseIdx == 0) {
+        // First phase prep was done above the runPlex call.
+        return;
+      }
+
+      // Seed Hamerly bounds after the very first iter if the small-d/fused dispatch did not
+      // produce them inline. Triggered on phaseIdx == 1, which is post-iter-0 bookkeeping.
+      if (pendingHamerlySeed) {
+        seedHamerlyBoundsFromLabels(X, centroids, outLabels, math::Pool{});
+        pendingHamerlySeed = false;
+      }
+
+      foldPartialSlabs(useKahan, workers, k, d);
+
+      (void)::clustering::kmeans::detail::reseedEmptyClusters<T>(X, centroids, m_sums, m_counts,
+                                                                 m_minDistSq);
+      finalizeMeans(centroids);
+      refreshCentroidSqNorms(centroids);
+
+      math::centroidShift<T>(m_centroidsOld, centroids, m_shiftSq, math::Pool{});
+      const T totalShift = ::clustering::kmeans::detail::totalShiftSqKahan<T>(m_shiftSq);
+      actualIter = phaseIdx;
+
+      if (totalShift <= shiftSqThreshold) {
+        converged = true;
+        return;
+      }
+
+      // Prep next phase:
+      preZeroPartialSlabs(useKahan, workers, k, d);
+      packForPhase();
+      std::memcpy(m_centroidsOld.data(), centroids.data(),
+                  centroids.dim(0) * centroids.dim(1) * sizeof(T));
+      computeBoundsSetup(phaseIdx);
+    };
+
+    // Trigger Hamerly bound seeding after iter 0 if dispatcher used the fused path (which does
+    // not seed bounds inline). The flag is consumed in prePhase(1).
+    pendingHamerlySeed = hamerlyEligible && (useFused || (useDirect && k <= kHamerlyMaxK));
+
+    pool.parallelRunPlex<citor::BulkBalancedHints>(maxIter, n, phaseFn, prePhaseFn);
+
+    if (!converged) {
+      // We exhausted maxIter. The last phase produced slabs that no prePhase folded. Do the
+      // final fold + finalize so callers see consistent centroids/labels.
+      foldPartialSlabs(useKahan, workers, k, d);
+      (void)::clustering::kmeans::detail::reseedEmptyClusters<T>(X, centroids, m_sums, m_counts,
+                                                                 m_minDistSq);
+      finalizeMeans(centroids);
+      refreshCentroidSqNorms(centroids);
+      actualIter = maxIter;
+    }
+
+    outIter = actualIter;
+    outConverged = converged;
+  }
+
+  /// Per-slot body of the small-d direct / fused / chunked assignment + scatter dispatch.
+  /// Operates serially on rows in [slotLo, slotHi); the caller (runLloydPlex's phaseFn or a
+  /// non-runPlex driver) is responsible for fan-out.
+  void runAssignmentSlotBody(const NDArray<T, 2, Layout::Contig> &X,
+                             const NDArray<T, 2, Layout::Contig> &centroids,
+                             NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                             bool useDirect, bool useFused, std::size_t slot, std::size_t slotLo,
+                             std::size_t slotHi) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    if (slotLo >= slotHi) {
+      return;
+    }
+
+    T *partialSums = m_partialSums.data();
+    T *partialComps = m_partialComps.data();
+    std::int32_t *partialCounts = m_partialCounts.data();
+    const T *xBase = X.data();
+    std::int32_t *labelsBase = labels.data();
+
+    auto scatterOneRow = [=](std::size_t i) noexcept {
+      const std::int32_t lbl = labelsBase[i];
+      if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
+        return;
+      }
+      const auto row = static_cast<std::size_t>(lbl);
+      const T *xRow = xBase + (i * d);
+      T *sumRow = partialSums + ((slot * k + row) * d);
+      std::int32_t *cslab = partialCounts + (slot * k);
+      if (useKahan) {
+        T *compRow = partialComps + ((slot * k + row) * d);
+        math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
+      } else {
+        for (std::size_t t = 0; t < d; ++t) {
+          sumRow[t] += xRow[t];
+        }
+      }
+      cslab[row] += 1;
+    };
+
+#ifdef CLUSTERING_USE_AVX2
+    if constexpr (std::is_same_v<T, float>) {
+      if (useDirect) {
+        constexpr std::size_t kMr = 8;
+        const std::size_t tileLo = (slotLo + kMr - 1) / kMr;
+        const std::size_t tileHi = (slotHi + kMr - 1) / kMr;
+        for (std::size_t t = tileLo; t < tileHi; ++t) {
+          math::detail::argminDirectMTileF32(X, centroids, labels, m_minDistSq, t, n, k, d);
+          const std::size_t iBase = t * kMr;
+          const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+          for (std::size_t r = 0; r < mc; ++r) {
+            scatterOneRow(iBase + r);
+          }
+        }
+        return;
+      }
+      if (useFused) {
+        constexpr std::size_t kMr = math::detail::kKernelMr<float>;
+        const std::size_t tileLo = (slotLo + kMr - 1) / kMr;
+        const std::size_t tileHi = (slotHi + kMr - 1) / kMr;
+        const float *bpacked = m_packedB.data();
+        const float *normsPacked = m_packedCSqNorms.data();
+        for (std::size_t t = tileLo; t < tileHi; ++t) {
+          math::detail::argminFusedMTileF32(X, bpacked, normsPacked, labels, m_minDistSq, t, n, k,
+                                            d);
+          const std::size_t iBase = t * kMr;
+          const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+          for (std::size_t r = 0; r < mc; ++r) {
+            scatterOneRow(iBase + r);
+          }
+        }
+        return;
+      }
+    }
+#endif
+
+    // Chunked path: align slot's row range to chunkCap boundaries and process serially.
+    constexpr std::size_t kMcVal = math::detail::kMc<T>;
+    constexpr std::size_t kKcVal = math::detail::kKc<T>;
+    const std::size_t chunkCap = math::pairwiseArgminChunkRows;
+    const std::size_t chunkLo = (slotLo + chunkCap - 1) / chunkCap;
+    const std::size_t chunkHi = (slotHi + chunkCap - 1) / chunkCap;
+    const T *bp = m_packedB.data();
+    T *apArena = m_gemmApArena.data();
+    T *distsBase = m_distsChunk.data();
+    const T *cNormsBase = m_cSqNorms.data();
+    T *minDistBase = m_minDistSq.data();
+    T *uBase = m_u.data();
+    T *lBase = m_l.data();
+    T *elkanBoundsBase = m_elkanBounds.dim(0) == n ? m_elkanBounds.data() : nullptr;
+    T *distsChunk = distsBase + (slot * chunkCap * k);
+    T *apSlice = apArena + (slot * kMcVal * kKcVal);
+    for (std::size_t c = chunkLo; c < chunkHi; ++c) {
+      const std::size_t iBase = c * chunkCap;
+      const std::size_t chunkRows = (iBase + chunkCap <= n) ? chunkCap : (n - iBase);
+      auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(const_cast<T *>(xBase) + (iBase * d),
+                                                          {chunkRows, d});
+      auto distsView = NDArray<T, 2>::borrow(distsChunk, {chunkRows, k});
+      const auto xDesc = ::clustering::detail::describeMatrix(xChunk);
+      auto distsDesc = ::clustering::detail::describeMatrixMut(distsView);
+      math::detail::gemmRunPrepacked<T>(xDesc, bp, d, k, distsDesc, T{-2}, T{0}, apSlice,
+                                        math::Pool{});
+
+      const T *xNormsChunk = m_xNormsSq.data() + iBase;
+      for (std::size_t i = 0; i < chunkRows; ++i) {
+        const T xn = xNormsChunk[i];
+        const T *row = distsChunk + (i * k);
+        T *elkanRow = elkanBoundsBase != nullptr ? elkanBoundsBase + ((iBase + i) * k) : nullptr;
+        T bestVal = std::numeric_limits<T>::infinity();
+        T secondVal = std::numeric_limits<T>::infinity();
+        std::int32_t bestIdx = 0;
+        for (std::size_t j = 0; j < k; ++j) {
+          T v = row[j] + xn + cNormsBase[j];
+          if (v < T{0}) {
+            v = T{0};
+          }
+          if (elkanRow != nullptr) {
+            elkanRow[j] = std::sqrt(v);
+          }
+          if (v < bestVal) {
+            secondVal = bestVal;
+            bestVal = v;
+            bestIdx = static_cast<std::int32_t>(j);
+          } else if (v < secondVal) {
+            secondVal = v;
+          }
+        }
+        minDistBase[iBase + i] = bestVal;
+        labelsBase[iBase + i] = bestIdx;
+        uBase[iBase + i] = std::sqrt(bestVal);
+        lBase[iBase + i] = std::sqrt(secondVal);
+        scatterOneRow(iBase + i);
+      }
+    }
+  }
+
+  /// Per-slot Hamerly body. Reads m_hamerlySMax / m_hamerlyS2Max / m_hamerlyArgMax /
+  /// m_shiftEuclidean / m_halfDistToNearestOther populated by the producer's pre-phase setup.
+  void runHamerlySlotBody(const NDArray<T, 2, Layout::Contig> &X,
+                          const NDArray<T, 2, Layout::Contig> &centroids,
+                          NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                          std::size_t slot, std::size_t slotLo, std::size_t slotHi) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    if (n == 0 || d == 0 || k == 0 || k > kHamerlyMaxK || slotLo >= slotHi) {
+      return;
+    }
+    const T *xData = X.data();
+    const T *cData = centroids.data();
+    T *uData = m_u.data();
+    T *lData = m_l.data();
+    T *minDistData = m_minDistSq.data();
+    std::int32_t *labelsData = labels.data();
+    const T *shiftData = m_shiftEuclidean.data();
+    const T *halfDistData = m_halfDistToNearestOther.data();
+    const T sMax = m_hamerlySMax;
+    const T s2Max = m_hamerlyS2Max;
+    const std::size_t argMax = m_hamerlyArgMax;
+
+    T *partialSums = m_partialSums.data();
+    T *partialComps = m_partialComps.data();
+    std::int32_t *partialCounts = m_partialCounts.data();
+    T *slabSum = partialSums + (slot * k * d);
+    T *slabComp = partialComps + (slot * k * d);
+    std::int32_t *slabCnt = partialCounts + (slot * k);
+
+    std::array<T, kHamerlyMaxK> distBuf{};
+    for (std::size_t i = slotLo; i < slotHi; ++i) {
+      const std::int32_t a = labelsData[i];
+      if (a < 0 || std::cmp_greater_equal(a, k)) {
+        continue;
+      }
+      const auto au = static_cast<std::size_t>(a);
+      T ui = uData[i] + shiftData[au];
+      T li = lData[i] - ((au == argMax) ? s2Max : sMax);
+      std::int32_t bestLabel = a;
+      bool labelDecided = false;
+
+      if (ui <= li) {
+        uData[i] = ui;
+        lData[i] = li;
+        labelDecided = true;
+      } else if (ui <= halfDistData[au]) {
+        uData[i] = ui;
+        lData[i] = li;
+        labelDecided = true;
+      }
+
+      if (!labelDecided) {
+        const T *xi = xData + (i * d);
+        const T *caRow = cData + (au * d);
+        const T tightSq = math::detail::sqEuclideanRowPtr<T>(xi, caRow, d);
+        ui = std::sqrt(tightSq);
+
+        if (ui <= li) {
+          uData[i] = ui;
+          lData[i] = li;
+          minDistData[i] = tightSq;
+        } else {
+          detail::sqEuclideanRowToBatch<T>(xi, cData, k, d, distBuf.data());
+          T best = std::numeric_limits<T>::infinity();
+          T second = std::numeric_limits<T>::infinity();
+          std::int32_t bestIdx = 0;
+          for (std::size_t j = 0; j < k; ++j) {
+            const T v = distBuf[j];
+            if (v < best) {
+              second = best;
+              best = v;
+              bestIdx = static_cast<std::int32_t>(j);
+            } else if (v < second) {
+              second = v;
+            }
+          }
+          bestLabel = bestIdx;
+          labelsData[i] = bestIdx;
+          minDistData[i] = best;
+          uData[i] = std::sqrt(best);
+          lData[i] = std::sqrt(second);
+        }
+      }
+
+      if (bestLabel < 0 || std::cmp_greater_equal(bestLabel, k)) {
+        continue;
+      }
+      const auto row = static_cast<std::size_t>(bestLabel);
+      const T *xRow = xData + (i * d);
+      T *sumRow = slabSum + (row * d);
+      if (useKahan) {
+        T *compRow = slabComp + (row * d);
+        math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
+      } else {
+        for (std::size_t t = 0; t < d; ++t) {
+          sumRow[t] += xRow[t];
+        }
+      }
+      slabCnt[row] += 1;
+    }
+  }
+
+  /// Per-slot Elkan body. Reads m_shiftEuclidean / m_centerDist / m_halfDistToNearestOther
+  /// populated by the producer's pre-phase setup.
+  void runElkanSlotBody(const NDArray<T, 2, Layout::Contig> &X,
+                        const NDArray<T, 2, Layout::Contig> &centroids,
+                        NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                        std::size_t slot, std::size_t slotLo, std::size_t slotHi) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    if (n == 0 || d == 0 || k == 0 || m_elkanBounds.dim(0) != n || m_elkanBounds.dim(1) != k ||
+        slotLo >= slotHi) {
+      return;
+    }
+    const T *xData = X.data();
+    const T *cData = centroids.data();
+    T *uData = m_u.data();
+    T *boundsData = m_elkanBounds.data();
+    T *minDistData = m_minDistSq.data();
+    std::int32_t *labelsData = labels.data();
+    const T *shiftData = m_shiftEuclidean.data();
+    const T *centerDistData = m_centerDist.data();
+    const T *halfDistData = m_halfDistToNearestOther.data();
+
+    T *partialSums = m_partialSums.data();
+    T *partialComps = m_partialComps.data();
+    std::int32_t *partialCounts = m_partialCounts.data();
+    T *slabSum = partialSums + (slot * k * d);
+    T *slabComp = partialComps + (slot * k * d);
+    std::int32_t *slabCnt = partialCounts + (slot * k);
+
+    for (std::size_t i = slotLo; i < slotHi; ++i) {
+      std::int32_t a = labelsData[i];
+      if (a < 0 || std::cmp_greater_equal(a, k)) {
+        continue;
+      }
+      auto au = static_cast<std::size_t>(a);
+      T u = uData[i] + shiftData[au];
+      T *lRow = boundsData + (i * k);
+      for (std::size_t c = 0; c < k; ++c) {
+        T lnew = lRow[c] - shiftData[c];
+        if (lnew < T{0}) {
+          lnew = T{0};
+        }
+        lRow[c] = lnew;
+      }
+
+      if (u <= halfDistData[au]) {
+        uData[i] = u;
+      } else {
+        bool uTight = false;
+        const T *xi = xData + (i * d);
+        for (std::size_t c = 0; c < k; ++c) {
+          if (c == au) {
+            continue;
+          }
+          const T lc = lRow[c];
+          const T half = T{0.5} * centerDistData[(au * k) + c];
+          if (u <= lc || u <= half) {
+            continue;
+          }
+          if (!uTight) {
+            const T tightSq = math::detail::sqEuclideanRowPtr<T>(xi, cData + (au * d), d);
+            u = std::sqrt(tightSq);
+            minDistData[i] = tightSq;
+            uTight = true;
+            if (u <= lc || u <= half) {
+              continue;
+            }
+          }
+          const T dSq = math::detail::sqEuclideanRowPtr<T>(xi, cData + (c * d), d);
+          const T dEuc = std::sqrt(dSq);
+          lRow[c] = dEuc;
+          if (dEuc < u) {
+            au = c;
+            a = static_cast<std::int32_t>(c);
+            u = dEuc;
+            minDistData[i] = dSq;
+          }
+        }
+        uData[i] = u;
+        labelsData[i] = a;
+      }
+
+      const auto row = static_cast<std::size_t>(a);
+      const T *xRow = xData + (i * d);
+      T *sumRow = slabSum + (row * d);
+      if (useKahan) {
+        T *compRow = slabComp + (row * d);
+        math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
+      } else {
+        for (std::size_t t = 0; t < d; ++t) {
+          sumRow[t] += xRow[t];
+        }
+      }
+      slabCnt[row] += 1;
+    }
   }
 
   void ensureShape(std::size_t n, std::size_t d, std::size_t k, std::size_t workerCount) {
@@ -353,10 +1039,12 @@ private:
       m_l = NDArray<T, 1>({n});
       m_shiftEuclidean = NDArray<T, 1>({k});
       m_halfDistToNearestOther = NDArray<T, 1>({k});
-      // Elkan's @c n * k bound matrix and the per-pair centroid-distance matrix are allocated
-      // unconditionally; rows past the caller's active-k index stay zero and the allocation
-      // cost amortizes across Lloyd iterations on the same shape.
-      if (n * k <= kElkanNKLimit && k <= kElkanMaxK) {
+      // Elkan's @c n * k bound matrix and the per-pair centroid-distance matrix are only
+      // touched when @c k > @ref kHamerlyMaxK (Hamerly handles smaller k). Skip the n*k
+      // allocation entirely at small k -- the n*k slab dominates per-call
+      // alloc cost when KMeans is constructed fresh per binding call.
+      const bool elkanCanFire = (k > kHamerlyMaxK) && (k <= kElkanMaxK) && (n * k <= kElkanNKLimit);
+      if (elkanCanFire) {
         m_elkanBounds = NDArray<T, 2, Layout::Contig>({n, k});
         m_centerDist = NDArray<T, 2, Layout::Contig>({k, k});
       } else {
@@ -621,16 +1309,279 @@ private:
       }
     };
 
-    if (pool.shouldParallelize(numChunks, 1, 2)) {
-      pool.parallelForBlocks(std::size_t{0}, numChunks, std::size_t{0},
-                             [&](std::size_t lo, std::size_t hi) {
-                               for (std::size_t c = lo; c < hi; ++c) {
-                                 runOneChunk(c);
-                               }
-                             });
+    pool.parallelForBlocks(std::size_t{0}, numChunks, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) {
+                             for (std::size_t c = lo; c < hi; ++c) {
+                               runOneChunk(c);
+                             }
+                           });
+  }
+
+  /**
+   * @brief Fused assignment + per-cluster scatter.
+   *
+   * One parallel-for per Lloyd iteration: each slot owns a contiguous range of mTiles or
+   * chunks; the worker body runs the appropriate argmin kernel for its slice and immediately
+   * scatters the resulting rows into its private slab. Replaces the legacy two-fork pair
+   * (separate @c runAssignment + @c scatterAndFold*) with a single barrier and avoids the
+   * round-trip through the partial-sum scatter that the unfused path paid every iter.
+   *
+   * Only invoked from the first Lloyd iteration (or from no-prune shapes); the Hamerly and
+   * Elkan paths run their own fused per-row body since they conditionally update labels.
+   */
+  void runAssignmentAndScatter(const NDArray<T, 2, Layout::Contig> &X,
+                               const NDArray<T, 2, Layout::Contig> &centroids,
+                               NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                               math::Pool pool) {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const std::size_t workers = pool.workerCount();
+    if (n == 0 || k == 0 || d == 0) {
+      return;
+    }
+
+    preZeroPartialSlabs(useKahan, workers, k, d);
+
+#ifdef CLUSTERING_USE_AVX2
+    const bool aligned32 = X.template isAligned<32>() && centroids.template isAligned<32>();
+#else
+    const bool aligned32 = false;
+#endif
+    const bool useDirect = aligned32 && d <= detail::kDirectArgminMaxD;
+    const bool useFused = aligned32 && !useDirect && d <= math::defaults::pairwiseArgminMaxD;
+    const bool useChunked = !useDirect && !useFused;
+
+#ifdef CLUSTERING_USE_AVX2
+    if constexpr (std::is_same_v<T, float>) {
+      if (useFused) {
+        math::detail::packCentroidsForFusedArgminF32(centroids, k, d, m_packedB.data());
+        math::detail::packCSqNorms<float>(m_cSqNorms.data(), k, m_packedCSqNorms.data());
+      }
+    }
+#endif
+    if (useChunked) {
+      packCentroidsTiled(centroids);
+    }
+
+    T *partialSums = m_partialSums.data();
+    T *partialComps = m_partialComps.data();
+    std::int32_t *partialCounts = m_partialCounts.data();
+    const T *xBase = X.data();
+    std::int32_t *labelsBase = labels.data();
+
+    auto scatterOneRow = [=](std::size_t i, std::size_t slot) noexcept {
+      const std::int32_t lbl = labelsBase[i];
+      if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
+        return;
+      }
+      const auto row = static_cast<std::size_t>(lbl);
+      const T *xRow = xBase + (i * d);
+      T *sumRow = partialSums + ((slot * k + row) * d);
+      std::int32_t *cslab = partialCounts + (slot * k);
+      if (useKahan) {
+        T *compRow = partialComps + ((slot * k + row) * d);
+        math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
+      } else {
+        for (std::size_t t = 0; t < d; ++t) {
+          sumRow[t] += xRow[t];
+        }
+      }
+      cslab[row] += 1;
+    };
+
+#ifdef CLUSTERING_USE_AVX2
+    if constexpr (std::is_same_v<T, float>) {
+      if (useDirect) {
+        constexpr std::size_t kMr = 8;
+        const std::size_t mTiles = (n + kMr - 1) / kMr;
+        pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+            std::size_t{0}, mTiles, workers,
+            [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
+              for (std::size_t t = lo; t < hi; ++t) {
+                math::detail::argminDirectMTileF32(X, centroids, labels, m_minDistSq, t, n, k, d);
+                const std::size_t iBase = t * kMr;
+                const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+                for (std::size_t r = 0; r < mc; ++r) {
+                  scatterOneRow(iBase + r, slot);
+                }
+              }
+            });
+        foldPartialSlabs(useKahan, workers, k, d);
+        return;
+      }
+      if (useFused) {
+        constexpr std::size_t kMr = math::detail::kKernelMr<float>;
+        const std::size_t mTiles = (n + kMr - 1) / kMr;
+        const float *bpacked = m_packedB.data();
+        const float *normsPacked = m_packedCSqNorms.data();
+        pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+            std::size_t{0}, mTiles, workers,
+            [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
+              for (std::size_t t = lo; t < hi; ++t) {
+                math::detail::argminFusedMTileF32(X, bpacked, normsPacked, labels, m_minDistSq, t,
+                                                  n, k, d);
+                const std::size_t iBase = t * kMr;
+                const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+                for (std::size_t r = 0; r < mc; ++r) {
+                  scatterOneRow(iBase + r, slot);
+                }
+              }
+            });
+        foldPartialSlabs(useKahan, workers, k, d);
+        return;
+      }
+    }
+#endif
+
+    // Chunked path (d > pairwiseArgminMaxD or T == double): fan out over chunks.
+    constexpr std::size_t kMcVal = math::detail::kMc<T>;
+    constexpr std::size_t kKcVal = math::detail::kKc<T>;
+    const std::size_t chunkCap = math::pairwiseArgminChunkRows;
+    const std::size_t numChunks = (n + chunkCap - 1) / chunkCap;
+    const T *bp = m_packedB.data();
+    T *apArena = m_gemmApArena.data();
+    T *distsBase = m_distsChunk.data();
+    const T *cNormsBase = m_cSqNorms.data();
+    T *minDistBase = m_minDistSq.data();
+    T *uBase = m_u.data();
+    T *lBase = m_l.data();
+    T *elkanBoundsBase = m_elkanBounds.dim(0) == n ? m_elkanBounds.data() : nullptr;
+
+    pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+        std::size_t{0}, numChunks, workers,
+        [&](std::size_t chunkLo, std::size_t chunkHi, std::size_t slot) noexcept {
+          T *distsChunk = distsBase + (slot * chunkCap * k);
+          T *apSlice = apArena + (slot * kMcVal * kKcVal);
+          for (std::size_t c = chunkLo; c < chunkHi; ++c) {
+            const std::size_t iBase = c * chunkCap;
+            const std::size_t chunkRows = (iBase + chunkCap <= n) ? chunkCap : (n - iBase);
+
+            auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(
+                const_cast<T *>(xBase) + (iBase * d), {chunkRows, d});
+            auto distsView = NDArray<T, 2>::borrow(distsChunk, {chunkRows, k});
+            const auto xDesc = ::clustering::detail::describeMatrix(xChunk);
+            auto distsDesc = ::clustering::detail::describeMatrixMut(distsView);
+            math::detail::gemmRunPrepacked<T>(xDesc, bp, d, k, distsDesc, T{-2}, T{0}, apSlice,
+                                              math::Pool{});
+
+            const T *xNormsChunk = m_xNormsSq.data() + iBase;
+            for (std::size_t i = 0; i < chunkRows; ++i) {
+              const T xn = xNormsChunk[i];
+              const T *row = distsChunk + (i * k);
+              T *elkanRow =
+                  elkanBoundsBase != nullptr ? elkanBoundsBase + ((iBase + i) * k) : nullptr;
+              T bestVal = std::numeric_limits<T>::infinity();
+              T secondVal = std::numeric_limits<T>::infinity();
+              std::int32_t bestIdx = 0;
+              for (std::size_t j = 0; j < k; ++j) {
+                T v = row[j] + xn + cNormsBase[j];
+                if (v < T{0}) {
+                  v = T{0};
+                }
+                if (elkanRow != nullptr) {
+                  elkanRow[j] = std::sqrt(v);
+                }
+                if (v < bestVal) {
+                  secondVal = bestVal;
+                  bestVal = v;
+                  bestIdx = static_cast<std::int32_t>(j);
+                } else if (v < secondVal) {
+                  secondVal = v;
+                }
+              }
+              minDistBase[iBase + i] = bestVal;
+              labelsBase[iBase + i] = bestIdx;
+              uBase[iBase + i] = std::sqrt(bestVal);
+              lBase[iBase + i] = std::sqrt(secondVal);
+              scatterOneRow(iBase + i, slot);
+            }
+          }
+        });
+
+    foldPartialSlabs(useKahan, workers, k, d);
+  }
+
+  void preZeroPartialSlabs(bool useKahan, std::size_t numBlocks, std::size_t k,
+                           std::size_t d) noexcept {
+    T *partialSums = m_partialSums.data();
+    std::int32_t *partialCounts = m_partialCounts.data();
+
+    for (std::size_t c = 0; c < k; ++c) {
+      m_counts(c) = 0;
+      for (std::size_t t = 0; t < d; ++t) {
+        m_sums(c, t) = T{0};
+      }
+    }
+    if (useKahan) {
+      T *foldComp = m_foldComp.data();
+      for (std::size_t e = 0; e < k * d; ++e) {
+        foldComp[e] = T{0};
+      }
+      T *partialComps = m_partialComps.data();
+      for (std::size_t b = 0; b < numBlocks; ++b) {
+        T *slab = partialSums + (b * k * d);
+        T *cslab = partialComps + (b * k * d);
+        std::int32_t *nslab = partialCounts + (b * k);
+        for (std::size_t e = 0; e < k * d; ++e) {
+          slab[e] = T{0};
+          cslab[e] = T{0};
+        }
+        for (std::size_t c = 0; c < k; ++c) {
+          nslab[c] = 0;
+        }
+      }
     } else {
-      for (std::size_t c = 0; c < numChunks; ++c) {
-        runOneChunk(c);
+      for (std::size_t b = 0; b < numBlocks; ++b) {
+        T *slab = partialSums + (b * k * d);
+        std::int32_t *cslab = partialCounts + (b * k);
+        for (std::size_t e = 0; e < k * d; ++e) {
+          slab[e] = T{0};
+        }
+        for (std::size_t c = 0; c < k; ++c) {
+          cslab[c] = 0;
+        }
+      }
+    }
+  }
+
+  void foldPartialSlabs(bool useKahan, std::size_t numBlocks, std::size_t k,
+                        std::size_t d) noexcept {
+    const T *partialSums = m_partialSums.data();
+    const std::int32_t *partialCounts = m_partialCounts.data();
+    if (useKahan) {
+      const T *partialComps = m_partialComps.data();
+      T *foldComp = m_foldComp.data();
+      for (std::size_t b = 0; b < numBlocks; ++b) {
+        const T *slab = partialSums + (b * k * d);
+        const T *cslab = partialComps + (b * k * d);
+        const std::int32_t *nslab = partialCounts + (b * k);
+        for (std::size_t c = 0; c < k; ++c) {
+          m_counts(c) += nslab[c];
+          const T *src = slab + (c * d);
+          const T *comp = cslab + (c * d);
+          T *dstRow = &m_sums(c, 0);
+          T *foldRow = foldComp + (c * d);
+          for (std::size_t t = 0; t < d; ++t) {
+            const T addend = src[t] - comp[t];
+            const T y = addend - foldRow[t];
+            const T tVal = dstRow[t] + y;
+            foldRow[t] = (tVal - dstRow[t]) - y;
+            dstRow[t] = tVal;
+          }
+        }
+      }
+    } else {
+      for (std::size_t b = 0; b < numBlocks; ++b) {
+        const T *slab = partialSums + (b * k * d);
+        const std::int32_t *cslab = partialCounts + (b * k);
+        for (std::size_t c = 0; c < k; ++c) {
+          m_counts(c) += cslab[c];
+          const T *src = slab + (c * d);
+          T *dstRow = &m_sums(c, 0);
+          for (std::size_t t = 0; t < d; ++t) {
+            dstRow[t] += src[t];
+          }
+        }
       }
     }
   }
@@ -653,9 +1604,7 @@ private:
       return;
     }
 
-    const bool willParallelize =
-        pool.shouldParallelizeWork(n * d) && pool.shouldParallelize(n, 64, 2);
-    const std::size_t desiredBlocks = willParallelize ? pool.workerCount() : std::size_t{1};
+    const std::size_t desiredBlocks = pool.workerCount();
     const detail::BlockPartition part(0, n, desiredBlocks);
     const std::size_t numBlocks = part.num_blocks == 0 ? std::size_t{1} : part.num_blocks;
 
@@ -670,8 +1619,7 @@ private:
       }
     }
 
-    auto scatterRange = [&](std::size_t lo, std::size_t hi) noexcept {
-      const std::size_t b = part.blockIndexOf(lo);
+    auto scatterRange = [&](std::size_t lo, std::size_t hi, std::size_t b) noexcept {
       T *slab = partialSums + (b * k * d);
       std::int32_t *cslab = partialCounts + (b * k);
       for (std::size_t i = lo; i < hi; ++i) {
@@ -689,13 +1637,9 @@ private:
       }
     };
 
-    if (willParallelize) {
-      pool.parallelForExactBlocks<citor::ScatterFoldHints>(
-          std::size_t{0}, n, numBlocks,
-          [&](std::size_t lo, std::size_t hi) { scatterRange(lo, hi); });
-    } else {
-      scatterRange(0, n);
-    }
+    pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+        std::size_t{0}, n, numBlocks,
+        [&](std::size_t lo, std::size_t hi, std::size_t slot) { scatterRange(lo, hi, slot); });
 
     // Ascending-block-index fold. Deterministic at fixed (n, k, d, nJobs); changing this order
     // changes the last-bit of the per-cluster sum and breaks bit-identity.
@@ -736,9 +1680,7 @@ private:
       return;
     }
 
-    const bool willParallelize =
-        pool.shouldParallelizeWork(n * d) && pool.shouldParallelize(n, 64, 2);
-    const std::size_t desiredBlocks = willParallelize ? pool.workerCount() : std::size_t{1};
+    const std::size_t desiredBlocks = pool.workerCount();
     const detail::BlockPartition part(0, n, desiredBlocks);
     const std::size_t numBlocks = part.num_blocks == 0 ? std::size_t{1} : part.num_blocks;
 
@@ -755,8 +1697,7 @@ private:
       }
     }
 
-    auto scatterRange = [&](std::size_t lo, std::size_t hi) noexcept {
-      const std::size_t b = part.blockIndexOf(lo);
+    auto scatterRange = [&](std::size_t lo, std::size_t hi, std::size_t b) noexcept {
       T *slab = partialSums + (b * k * d);
       T *cslab = partialComps + (b * k * d);
       std::int32_t *nslab = partialCounts + (b * k);
@@ -774,13 +1715,9 @@ private:
       }
     };
 
-    if (willParallelize) {
-      pool.parallelForExactBlocks<citor::ScatterFoldKahanHints>(
-          std::size_t{0}, n, numBlocks,
-          [&](std::size_t lo, std::size_t hi) { scatterRange(lo, hi); });
-    } else {
-      scatterRange(0, n);
-    }
+    pool.parallelForExactBlocksWithSlot<citor::ScatterFoldKahanHints>(
+        std::size_t{0}, n, numBlocks,
+        [&](std::size_t lo, std::size_t hi, std::size_t slot) { scatterRange(lo, hi, slot); });
 
     for (std::size_t b = 0; b < numBlocks; ++b) {
       const T *slab = partialSums + (b * k * d);
@@ -826,12 +1763,8 @@ private:
       }
     };
 
-    if (pool.shouldParallelize(n, 64, 2)) {
-      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
-                             [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
-    } else {
-      runRowRange(0, n);
-    }
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
   }
 
   void seedHamerlyBoundsFromLabels(const NDArray<T, 2, Layout::Contig> &X,
@@ -863,12 +1796,8 @@ private:
       }
     };
 
-    if (pool.shouldParallelize(n, 64, 2)) {
-      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
-                             [&](std::size_t lo, std::size_t hi) { seedRange(lo, hi); });
-    } else {
-      seedRange(0, n);
-    }
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { seedRange(lo, hi); });
   }
 
   /**
@@ -895,6 +1824,289 @@ private:
    * assignment each iteration.
    */
   static constexpr std::size_t kElkanNKLimit = std::size_t{32} << 20;
+
+  /**
+   * @brief Hamerly assignment fused with per-slot scatter into @c m_partialSums / @c
+   * m_partialCounts.
+   *
+   * Same per-row body as @ref runHamerlyAssignment, but the outer fan-out is one
+   * @c parallelForExactBlocksWithSlot over slot-aligned row ranges, and after each row's label
+   * is decided the row is scattered into the slot's slab. Pre-zeroes slabs and folds at the end
+   * so callers can drop the standalone @c scatterAndFold* call.
+   */
+  void runHamerlyAssignmentAndScatter(const NDArray<T, 2, Layout::Contig> &X,
+                                      const NDArray<T, 2, Layout::Contig> &centroids,
+                                      NDArray<std::int32_t, 1> &labels, std::size_t k,
+                                      bool useKahan, math::Pool pool) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    if (n == 0 || d == 0 || k == 0 || k > kHamerlyMaxK) {
+      return;
+    }
+    const std::size_t workers = pool.workerCount();
+    preZeroPartialSlabs(useKahan, workers, k, d);
+
+    const T *xData = X.data();
+    const T *cData = centroids.data();
+    T *uData = m_u.data();
+    T *lData = m_l.data();
+    T *minDistData = m_minDistSq.data();
+    std::int32_t *labelsData = labels.data();
+
+    T sMax = T{0};
+    T s2Max = T{0};
+    std::size_t argMax = 0;
+    T *shiftData = m_shiftEuclidean.data();
+    for (std::size_t c = 0; c < k; ++c) {
+      const T s = std::sqrt(m_shiftSq(c));
+      shiftData[c] = s;
+      if (s > sMax) {
+        s2Max = sMax;
+        sMax = s;
+        argMax = c;
+      } else if (s > s2Max) {
+        s2Max = s;
+      }
+    }
+
+    T *halfDistData = m_halfDistToNearestOther.data();
+    for (std::size_t c = 0; c < k; ++c) {
+      T nearestSq = std::numeric_limits<T>::infinity();
+      const T *caRow = cData + (c * d);
+      for (std::size_t cp = 0; cp < k; ++cp) {
+        if (cp == c) {
+          continue;
+        }
+        const T dsq = math::detail::sqEuclideanRowPtr<T>(caRow, cData + (cp * d), d);
+        if (dsq < nearestSq) {
+          nearestSq = dsq;
+        }
+      }
+      halfDistData[c] = T{0.5} * std::sqrt(nearestSq);
+    }
+
+    T *partialSums = m_partialSums.data();
+    T *partialComps = m_partialComps.data();
+    std::int32_t *partialCounts = m_partialCounts.data();
+
+    pool.parallelForBlocks<citor::ScatterFoldHints>(
+        std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) noexcept {
+          std::array<T, kHamerlyMaxK> distBuf{};
+          const std::size_t slot = math::Pool::workerIndex();
+          T *slabSum = partialSums + (slot * k * d);
+          T *slabComp = partialComps + (slot * k * d);
+          std::int32_t *slabCnt = partialCounts + (slot * k);
+          for (std::size_t i = lo; i < hi; ++i) {
+            const std::int32_t a = labelsData[i];
+            if (a < 0 || std::cmp_greater_equal(a, k)) {
+              continue;
+            }
+            const auto au = static_cast<std::size_t>(a);
+            T ui = uData[i] + shiftData[au];
+            T li = lData[i] - ((au == argMax) ? s2Max : sMax);
+            std::int32_t bestLabel = a;
+            bool labelDecided = false;
+
+            if (ui <= li) {
+              uData[i] = ui;
+              lData[i] = li;
+              labelDecided = true;
+            } else if (ui <= halfDistData[au]) {
+              uData[i] = ui;
+              lData[i] = li;
+              labelDecided = true;
+            }
+
+            if (!labelDecided) {
+              const T *xi = xData + (i * d);
+              const T *caRow = cData + (au * d);
+              const T tightSq = math::detail::sqEuclideanRowPtr<T>(xi, caRow, d);
+              ui = std::sqrt(tightSq);
+
+              if (ui <= li) {
+                uData[i] = ui;
+                lData[i] = li;
+                minDistData[i] = tightSq;
+                labelDecided = true;
+              } else {
+                detail::sqEuclideanRowToBatch<T>(xi, cData, k, d, distBuf.data());
+                T best = std::numeric_limits<T>::infinity();
+                T second = std::numeric_limits<T>::infinity();
+                std::int32_t bestIdx = 0;
+                for (std::size_t j = 0; j < k; ++j) {
+                  const T v = distBuf[j];
+                  if (v < best) {
+                    second = best;
+                    best = v;
+                    bestIdx = static_cast<std::int32_t>(j);
+                  } else if (v < second) {
+                    second = v;
+                  }
+                }
+                bestLabel = bestIdx;
+                labelsData[i] = bestIdx;
+                minDistData[i] = best;
+                uData[i] = std::sqrt(best);
+                lData[i] = std::sqrt(second);
+              }
+            }
+
+            if (bestLabel < 0 || std::cmp_greater_equal(bestLabel, k)) {
+              continue;
+            }
+            const auto row = static_cast<std::size_t>(bestLabel);
+            const T *xRow = xData + (i * d);
+            T *sumRow = slabSum + (row * d);
+            if (useKahan) {
+              T *compRow = slabComp + (row * d);
+              math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
+            } else {
+              for (std::size_t t = 0; t < d; ++t) {
+                sumRow[t] += xRow[t];
+              }
+            }
+            slabCnt[row] += 1;
+          }
+        });
+
+    foldPartialSlabs(useKahan, workers, k, d);
+  }
+
+  /**
+   * @brief Elkan assignment fused with per-slot scatter.
+   *
+   * Same row body as @ref runElkanAssignment, with scatter appended after the per-row label is
+   * decided. Pre-zeroes slabs and folds at the end.
+   */
+  void runElkanAssignmentAndScatter(const NDArray<T, 2, Layout::Contig> &X,
+                                    const NDArray<T, 2, Layout::Contig> &centroids,
+                                    NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                                    math::Pool pool) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    if (n == 0 || d == 0 || k == 0 || m_elkanBounds.dim(0) != n || m_elkanBounds.dim(1) != k) {
+      return;
+    }
+    const std::size_t workers = pool.workerCount();
+    preZeroPartialSlabs(useKahan, workers, k, d);
+
+    const T *xData = X.data();
+    const T *cData = centroids.data();
+    T *uData = m_u.data();
+    T *boundsData = m_elkanBounds.data();
+    T *minDistData = m_minDistSq.data();
+    std::int32_t *labelsData = labels.data();
+
+    T *shiftData = m_shiftEuclidean.data();
+    for (std::size_t c = 0; c < k; ++c) {
+      shiftData[c] = std::sqrt(m_shiftSq(c));
+    }
+
+    T *centerDistData = m_centerDist.data();
+    T *halfDistData = m_halfDistToNearestOther.data();
+    for (std::size_t c = 0; c < k; ++c) {
+      centerDistData[(c * k) + c] = T{0};
+      T nearest = std::numeric_limits<T>::infinity();
+      for (std::size_t cp = 0; cp < k; ++cp) {
+        if (cp == c) {
+          continue;
+        }
+        T dist;
+        if (cp > c) {
+          const T dsq = math::detail::sqEuclideanRowPtr<T>(cData + (c * d), cData + (cp * d), d);
+          dist = std::sqrt(dsq);
+          centerDistData[(c * k) + cp] = dist;
+          centerDistData[(cp * k) + c] = dist;
+        } else {
+          dist = centerDistData[(c * k) + cp];
+        }
+        if (dist < nearest) {
+          nearest = dist;
+        }
+      }
+      halfDistData[c] = T{0.5} * nearest;
+    }
+
+    T *partialSums = m_partialSums.data();
+    T *partialComps = m_partialComps.data();
+    std::int32_t *partialCounts = m_partialCounts.data();
+
+    pool.parallelForBlocks<citor::ScatterFoldHints>(
+        std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) noexcept {
+          const std::size_t slot = math::Pool::workerIndex();
+          T *slabSum = partialSums + (slot * k * d);
+          T *slabComp = partialComps + (slot * k * d);
+          std::int32_t *slabCnt = partialCounts + (slot * k);
+          for (std::size_t i = lo; i < hi; ++i) {
+            std::int32_t a = labelsData[i];
+            if (a < 0 || std::cmp_greater_equal(a, k)) {
+              continue;
+            }
+            auto au = static_cast<std::size_t>(a);
+            T u = uData[i] + shiftData[au];
+            T *lRow = boundsData + (i * k);
+            for (std::size_t c = 0; c < k; ++c) {
+              T lnew = lRow[c] - shiftData[c];
+              if (lnew < T{0}) {
+                lnew = T{0};
+              }
+              lRow[c] = lnew;
+            }
+
+            if (u <= halfDistData[au]) {
+              uData[i] = u;
+            } else {
+              bool uTight = false;
+              const T *xi = xData + (i * d);
+              for (std::size_t c = 0; c < k; ++c) {
+                if (c == au) {
+                  continue;
+                }
+                const T lc = lRow[c];
+                const T half = T{0.5} * centerDistData[(au * k) + c];
+                if (u <= lc || u <= half) {
+                  continue;
+                }
+                if (!uTight) {
+                  const T tightSq = math::detail::sqEuclideanRowPtr<T>(xi, cData + (au * d), d);
+                  u = std::sqrt(tightSq);
+                  minDistData[i] = tightSq;
+                  uTight = true;
+                  if (u <= lc || u <= half) {
+                    continue;
+                  }
+                }
+                const T dSq = math::detail::sqEuclideanRowPtr<T>(xi, cData + (c * d), d);
+                const T dEuc = std::sqrt(dSq);
+                lRow[c] = dEuc;
+                if (dEuc < u) {
+                  au = c;
+                  a = static_cast<std::int32_t>(c);
+                  u = dEuc;
+                  minDistData[i] = dSq;
+                }
+              }
+              uData[i] = u;
+              labelsData[i] = a;
+            }
+
+            const auto row = static_cast<std::size_t>(a);
+            const T *xRow = xData + (i * d);
+            T *sumRow = slabSum + (row * d);
+            if (useKahan) {
+              T *compRow = slabComp + (row * d);
+              math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
+            } else {
+              for (std::size_t t = 0; t < d; ++t) {
+                sumRow[t] += xRow[t];
+              }
+            }
+            slabCnt[row] += 1;
+          }
+        });
+
+    foldPartialSlabs(useKahan, workers, k, d);
+  }
 
   /**
    * @brief Hamerly bounds-aware assignment for iterations beyond the first.
@@ -1022,12 +2234,8 @@ private:
       }
     };
 
-    if (pool.shouldParallelize(n, 64, 2)) {
-      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
-                             [&](std::size_t lo, std::size_t hi) { processRange(lo, hi); });
-    } else {
-      processRange(0, n);
-    }
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) { processRange(lo, hi); });
   }
 
   /**
@@ -1173,6 +2381,8 @@ private:
   NDArray<T, 1> m_xNormsSq;
   NDArray<T, 1> m_varSum;
   NDArray<T, 1> m_varSumSq;
+  NDArray<T, 1> m_varPartialSum;
+  NDArray<T, 1> m_varPartialSumSq;
   /// Per-point Hamerly upper bound on ||x - c(a(x))||, Euclidean (not squared). Seeded after
   /// the first iteration's full assignment; updated in-place each subsequent iteration.
   NDArray<T, 1> m_u;
@@ -1191,6 +2401,13 @@ private:
   /// Elkan's pairwise centroid-distance matrix (Euclidean). `m_centerDist(c, c')` = ||c - c'||,
   /// populated each Elkan call and consulted for the 0.5-times bound shortcut.
   NDArray<T, 2, Layout::Contig> m_centerDist;
+
+  // Hamerly per-iter top-2 shift cache, populated by runLloydPlex's prePhase setup and read by
+  // every worker's runHamerlySlotBody. Owned by the producer; workers read after the phase
+  // publishes so happens-before is established.
+  T m_hamerlySMax = T{0};
+  T m_hamerlyS2Max = T{0};
+  std::size_t m_hamerlyArgMax = 0;
 
   std::size_t m_n = 0;
   std::size_t m_d = 0;

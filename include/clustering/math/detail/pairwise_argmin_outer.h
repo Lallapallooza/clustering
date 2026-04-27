@@ -56,6 +56,134 @@ template <class T> inline void packCSqNorms(const T *cSqNorms, std::size_t k, T 
 #ifdef CLUSTERING_USE_AVX2
 
 /**
+ * @brief Process a single 8-row M-tile of the fused argmin-GEMM driver.
+ *
+ * Serial entry point used by callers that want to run their own outer fan-out (e.g. the kmeans
+ * Lloyd loop, which fuses assignment with the per-cluster scatter to halve the per-iter
+ * fork-join count).
+ */
+inline void argminFusedMTileF32(const NDArray<float, 2, Layout::Contig> &X, const float *bpacked,
+                                const float *normsPacked, NDArray<std::int32_t, 1> &labels,
+                                NDArray<float, 1> &outMinSq, std::size_t tileIdx, std::size_t n,
+                                std::size_t k, std::size_t d) noexcept {
+  constexpr std::size_t kMr = kKernelMr<float>;
+  constexpr std::size_t kNr = kKernelNr<float>;
+  const std::size_t nPanels = (k + kNr - 1) / kNr;
+  const std::size_t cpanelSize = kNr * d;
+
+  const std::size_t iBase = tileIdx * kMr;
+  const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+
+  alignas(32) std::array<float, kMr * defaults::pairwiseArgminMaxD> apScratch{};
+  CLUSTERING_ALWAYS_ASSERT(d <= defaults::pairwiseArgminMaxD);
+  const auto xDesc = ::clustering::detail::describeMatrix(X);
+  packA<float>(xDesc, iBase, mc, 0, d, apScratch.data());
+
+  __m256 bestMin = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+  __m256i bestArg = _mm256_set1_epi32(-1);
+
+  for (std::size_t p = 0; p < nPanels; ++p) {
+    const auto jBase = static_cast<std::int32_t>(p * kNr);
+    const float *bpPanel = bpacked + (p * cpanelSize);
+    const float *normsPanel = normsPacked + (p * kNr);
+    gemmKernel8x6Avx2F32FusedArgmin(apScratch.data(), bpPanel, normsPanel, d, jBase, bestMin,
+                                    bestArg);
+  }
+
+  alignas(32) std::array<float, kMr> xNorms{};
+  for (std::size_t r = 0; r < mc; ++r) {
+    const float *row = X.data() + ((iBase + r) * d);
+    float s = 0.0F;
+    for (std::size_t t = 0; t < d; ++t) {
+      s += row[t] * row[t];
+    }
+    xNorms[r] = s;
+  }
+  bestMin = _mm256_add_ps(bestMin, _mm256_load_ps(xNorms.data()));
+  bestMin = _mm256_max_ps(bestMin, _mm256_setzero_ps());
+
+  alignas(32) std::array<float, kMr> minBuf{};
+  alignas(32) std::array<std::int32_t, kMr> argBuf{};
+  _mm256_store_ps(minBuf.data(), bestMin);
+  _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf.data()), bestArg);
+
+  std::memcpy(outMinSq.data() + iBase, minBuf.data(), mc * sizeof(float));
+  std::memcpy(labels.data() + iBase, argBuf.data(), mc * sizeof(std::int32_t));
+}
+
+/**
+ * @brief Process a single 8-row M-tile of the small-d direct argmin path.
+ *
+ * Serial entry point. Companion to @ref argminFusedMTileF32 for the @c d <= 8 regime where the
+ * direct `||x - c||^2` formula beats the packed-GEMM path.
+ */
+inline void argminDirectMTileF32(const NDArray<float, 2, Layout::Contig> &X,
+                                 const NDArray<float, 2, Layout::Contig> &C,
+                                 NDArray<std::int32_t, 1> &labels, NDArray<float, 1> &outMinSq,
+                                 std::size_t tileIdx, std::size_t n, std::size_t k,
+                                 std::size_t d) noexcept {
+  constexpr std::size_t kMr = 8;
+  const float *xData = X.data();
+  const float *cData = C.data();
+  std::int32_t *labelsData = labels.data();
+  float *minSqData = outMinSq.data();
+
+  const std::size_t iBase = tileIdx * kMr;
+  const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+
+  alignas(32) std::array<float, kMr * 8> xTile{};
+  for (std::size_t r = 0; r < mc; ++r) {
+    const float *src = xData + ((iBase + r) * d);
+    for (std::size_t t = 0; t < d; ++t) {
+      xTile[(t * kMr) + r] = src[t];
+    }
+  }
+
+  __m256 bestMin = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+  __m256i bestArg = _mm256_set1_epi32(-1);
+
+  for (std::size_t j = 0; j < k; ++j) {
+    const float *cRow = cData + (j * d);
+    __m256 acc = _mm256_setzero_ps();
+    for (std::size_t t = 0; t < d; ++t) {
+      const __m256 xv = _mm256_load_ps(xTile.data() + (t * kMr));
+      const __m256 cv = _mm256_set1_ps(cRow[t]);
+      const __m256 diff = _mm256_sub_ps(xv, cv);
+      acc = _mm256_fmadd_ps(diff, diff, acc);
+    }
+    const __m256 mask = _mm256_cmp_ps(acc, bestMin, _CMP_LT_OQ);
+    bestMin = _mm256_blendv_ps(bestMin, acc, mask);
+    const __m256i jVec = _mm256_set1_epi32(static_cast<std::int32_t>(j));
+    bestArg = _mm256_blendv_epi8(bestArg, jVec, _mm256_castps_si256(mask));
+  }
+
+  alignas(32) std::array<float, kMr> minBuf{};
+  alignas(32) std::array<std::int32_t, kMr> argBuf{};
+  _mm256_store_ps(minBuf.data(), bestMin);
+  _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf.data()), bestArg);
+  std::memcpy(minSqData + iBase, minBuf.data(), mc * sizeof(float));
+  std::memcpy(labelsData + iBase, argBuf.data(), mc * sizeof(std::int32_t));
+}
+
+/**
+ * @brief Pack the centroid matrix into the panel layout used by @ref argminFusedMTileF32.
+ */
+inline void packCentroidsForFusedArgminF32(const NDArray<float, 2, Layout::Contig> &C,
+                                           std::size_t k, std::size_t d, float *bpacked) noexcept {
+  constexpr std::size_t kNr = kKernelNr<float>;
+  const std::size_t nPanels = (k + kNr - 1) / kNr;
+  const std::size_t cpanelSize = kNr * d;
+  const auto cTransposed = C.t();
+  const auto cDesc = ::clustering::detail::describeMatrix(cTransposed);
+  for (std::size_t p = 0; p < nPanels; ++p) {
+    const std::size_t jBase = p * kNr;
+    const std::size_t nc = (jBase + kNr <= k) ? kNr : (k - jBase);
+    float *panelOut = bpacked + (p * cpanelSize);
+    packB<float>(cDesc, 0, d, jBase, nc, panelOut);
+  }
+}
+
+/**
  * @brief AVX2 f32 specialization of the fused argmin-GEMM outer driver.
  *
  * Iterates 8-row M-tiles. For each tile, packs an Mr x d A-strip via @c packA (full K range,
@@ -104,81 +232,16 @@ inline void pairwiseArgminOuterAvx2F32(const NDArray<float, 2, Layout::Contig> &
   std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> normsPackedStorage(
       normsPaddedSize);
 
-  // packB expects B in `(K x N)` orientation, i.e. features-by-centroids. Our @p C is
-  // `(centroids x features)`, so take its transpose view before handing the descriptor to
-  // packB. `C.t()` is a borrowed MaybeStrided view; describeMatrix preserves the strides so
-  // packB's scalar element access picks up the right C[j][k_iter] per packed position.
-  const auto cTransposed = C.t();
-  const auto cDesc = ::clustering::detail::describeMatrix(cTransposed);
-  for (std::size_t p = 0; p < nPanels; ++p) {
-    const std::size_t jBase = p * kNr;
-    const std::size_t nc = (jBase + kNr <= k) ? kNr : (k - jBase);
-    float *panelOut = bpackedStorage.data() + (p * cpanelSize);
-    packB<float>(cDesc, 0, d, jBase, nc, panelOut);
-  }
+  packCentroidsForFusedArgminF32(C, k, d, bpackedStorage.data());
   packCSqNorms<float>(cSqNorms.data(), k, normsPackedStorage.data());
 
-  auto runOneMTile = [&](std::size_t tileIdx) noexcept {
-    const std::size_t iBase = tileIdx * kMr;
-    const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
-
-    // Pack the M-strip via packA at column 0, full K. Full K in-register is the reason the fused
-    // driver caps at @c defaults::pairwiseArgminMaxD: the 8 YMM accumulators cannot absorb more
-    // than that many columns without spilling.
-    alignas(32) std::array<float, kMr * defaults::pairwiseArgminMaxD> apScratch{};
-    CLUSTERING_ALWAYS_ASSERT(d <= defaults::pairwiseArgminMaxD);
-    const auto xDesc = ::clustering::detail::describeMatrix(X);
-    packA<float>(xDesc, iBase, mc, 0, d, apScratch.data());
-
-    __m256 bestMin = _mm256_set1_ps(std::numeric_limits<float>::infinity());
-    __m256i bestArg = _mm256_set1_epi32(-1);
-
-    for (std::size_t p = 0; p < nPanels; ++p) {
-      const auto jBase = static_cast<std::int32_t>(p * kNr);
-      const float *bpPanel = bpackedStorage.data() + (p * cpanelSize);
-      const float *normsPanel = normsPackedStorage.data() + (p * kNr);
-      gemmKernel8x6Avx2F32FusedArgmin(apScratch.data(), bpPanel, normsPanel, d, jBase, bestMin,
-                                      bestArg);
-    }
-
-    alignas(32) std::array<float, kMr> xNorms{};
-    for (std::size_t r = 0; r < mc; ++r) {
-      const float *row = X.data() + ((iBase + r) * d);
-      float s = 0.0F;
-      for (std::size_t t = 0; t < d; ++t) {
-        s += row[t] * row[t];
-      }
-      xNorms[r] = s;
-    }
-    // Padding lanes for the last (partial) tile carry bogus norms; their best* entries are
-    // discarded by the write-back below, so setting xNorms past mc to zero is a consistency
-    // hygiene rather than a correctness requirement.
-
-    bestMin = _mm256_add_ps(bestMin, _mm256_load_ps(xNorms.data()));
-    bestMin = _mm256_max_ps(bestMin, _mm256_setzero_ps());
-
-    alignas(32) std::array<float, kMr> minBuf{};
-    alignas(32) std::array<std::int32_t, kMr> argBuf{};
-    _mm256_store_ps(minBuf.data(), bestMin);
-    _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf.data()), bestArg);
-
-    std::memcpy(outMinSq.data() + iBase, minBuf.data(), mc * sizeof(float));
-    std::memcpy(labels.data() + iBase, argBuf.data(), mc * sizeof(std::int32_t));
-  };
-
-  const std::size_t totalOps = n * d * k;
-  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2)) {
-    pool.parallelForBlocks(std::size_t{0}, mTiles, std::size_t{0},
-                           [&](std::size_t lo, std::size_t hi) {
-                             for (std::size_t t = lo; t < hi; ++t) {
-                               runOneMTile(t);
-                             }
-                           });
-  } else {
-    for (std::size_t t = 0; t < mTiles; ++t) {
-      runOneMTile(t);
-    }
-  }
+  pool.parallelForBlocks(
+      std::size_t{0}, mTiles, std::size_t{0}, [&](std::size_t lo, std::size_t hi) {
+        for (std::size_t t = lo; t < hi; ++t) {
+          argminFusedMTileF32(X, bpackedStorage.data(), normsPackedStorage.data(), labels, outMinSq,
+                              t, n, k, d);
+        }
+      });
 }
 
 /**
@@ -253,80 +316,22 @@ inline void pairwiseArgminOuterAvx2F32WithScratch(const NDArray<float, 2, Layout
                                                   float *bpackedScratch, float *normsPackedScratch,
                                                   Pool pool) noexcept {
   constexpr std::size_t kMr = kKernelMr<float>;
-  constexpr std::size_t kNr = kKernelNr<float>;
 
   const std::size_t n = X.dim(0);
   const std::size_t k = C.dim(0);
   const std::size_t d = X.dim(1);
 
   const std::size_t mTiles = (n + kMr - 1) / kMr;
-  const std::size_t nPanels = (k + kNr - 1) / kNr;
-  const std::size_t cpanelSize = kNr * d;
 
-  const auto cTransposed = C.t();
-  const auto cDesc = ::clustering::detail::describeMatrix(cTransposed);
-  for (std::size_t p = 0; p < nPanels; ++p) {
-    const std::size_t jBase = p * kNr;
-    const std::size_t nc = (jBase + kNr <= k) ? kNr : (k - jBase);
-    float *panelOut = bpackedScratch + (p * cpanelSize);
-    packB<float>(cDesc, 0, d, jBase, nc, panelOut);
-  }
+  packCentroidsForFusedArgminF32(C, k, d, bpackedScratch);
   packCSqNorms<float>(cSqNorms.data(), k, normsPackedScratch);
 
-  auto runOneMTile = [&](std::size_t tileIdx) noexcept {
-    const std::size_t iBase = tileIdx * kMr;
-    const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
-
-    alignas(32) std::array<float, kMr * defaults::pairwiseArgminMaxD> apScratch{};
-    CLUSTERING_ALWAYS_ASSERT(d <= defaults::pairwiseArgminMaxD);
-    const auto xDesc = ::clustering::detail::describeMatrix(X);
-    packA<float>(xDesc, iBase, mc, 0, d, apScratch.data());
-
-    __m256 bestMin = _mm256_set1_ps(std::numeric_limits<float>::infinity());
-    __m256i bestArg = _mm256_set1_epi32(-1);
-
-    for (std::size_t p = 0; p < nPanels; ++p) {
-      const auto jBase = static_cast<std::int32_t>(p * kNr);
-      const float *bpPanel = bpackedScratch + (p * cpanelSize);
-      const float *normsPanel = normsPackedScratch + (p * kNr);
-      gemmKernel8x6Avx2F32FusedArgmin(apScratch.data(), bpPanel, normsPanel, d, jBase, bestMin,
-                                      bestArg);
-    }
-
-    alignas(32) std::array<float, kMr> xNorms{};
-    for (std::size_t r = 0; r < mc; ++r) {
-      const float *row = X.data() + ((iBase + r) * d);
-      float s = 0.0F;
-      for (std::size_t t = 0; t < d; ++t) {
-        s += row[t] * row[t];
-      }
-      xNorms[r] = s;
-    }
-    bestMin = _mm256_add_ps(bestMin, _mm256_load_ps(xNorms.data()));
-    bestMin = _mm256_max_ps(bestMin, _mm256_setzero_ps());
-
-    alignas(32) std::array<float, kMr> minBuf{};
-    alignas(32) std::array<std::int32_t, kMr> argBuf{};
-    _mm256_store_ps(minBuf.data(), bestMin);
-    _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf.data()), bestArg);
-
-    std::memcpy(outMinSq.data() + iBase, minBuf.data(), mc * sizeof(float));
-    std::memcpy(labels.data() + iBase, argBuf.data(), mc * sizeof(std::int32_t));
-  };
-
-  const std::size_t totalOps = n * d * k;
-  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2)) {
-    pool.parallelForBlocks(std::size_t{0}, mTiles, std::size_t{0},
-                           [&](std::size_t lo, std::size_t hi) {
-                             for (std::size_t t = lo; t < hi; ++t) {
-                               runOneMTile(t);
-                             }
-                           });
-  } else {
-    for (std::size_t t = 0; t < mTiles; ++t) {
-      runOneMTile(t);
-    }
-  }
+  pool.parallelForBlocks(
+      std::size_t{0}, mTiles, std::size_t{0}, [&](std::size_t lo, std::size_t hi) {
+        for (std::size_t t = lo; t < hi; ++t) {
+          argminFusedMTileF32(X, bpackedScratch, normsPackedScratch, labels, outMinSq, t, n, k, d);
+        }
+      });
 }
 
 /**
@@ -358,67 +363,13 @@ inline void pairwiseArgminDirectSmallDF32(const NDArray<float, 2, Layout::Contig
   CLUSTERING_ALWAYS_ASSERT(d >= 1);
   CLUSTERING_ALWAYS_ASSERT(d <= kMaxD);
 
-  const float *xData = X.data();
-  const float *cData = C.data();
-  std::int32_t *labelsData = labels.data();
-  float *minSqData = outMinSq.data();
   const std::size_t mTiles = (n + kMr - 1) / kMr;
-  const std::size_t totalOps = n * d * k;
-
-  auto runOneTile = [&](std::size_t tileIdx) noexcept {
-    const std::size_t iBase = tileIdx * kMr;
-    const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
-
-    // Gather the 8 rows' d coordinates into per-feature YMM registers. At `d <= 8` the full
-    // tile fits in 8 YMM registers (one per feature lane); each register holds the same feature
-    // for the 8 rows. If @c mc < kMr the tail rows are zero-padded; their @c bestMin/bestArg are
-    // discarded by the write-back below.
-    alignas(32) std::array<float, kMr * 8> xTile{};
-    for (std::size_t r = 0; r < mc; ++r) {
-      const float *src = xData + ((iBase + r) * d);
-      for (std::size_t t = 0; t < d; ++t) {
-        xTile[(t * kMr) + r] = src[t];
-      }
-    }
-
-    __m256 bestMin = _mm256_set1_ps(std::numeric_limits<float>::infinity());
-    __m256i bestArg = _mm256_set1_epi32(-1);
-
-    for (std::size_t j = 0; j < k; ++j) {
-      const float *cRow = cData + (j * d);
-      __m256 acc = _mm256_setzero_ps();
-      for (std::size_t t = 0; t < d; ++t) {
-        const __m256 xv = _mm256_load_ps(xTile.data() + (t * kMr));
-        const __m256 cv = _mm256_set1_ps(cRow[t]);
-        const __m256 diff = _mm256_sub_ps(xv, cv);
-        acc = _mm256_fmadd_ps(diff, diff, acc);
-      }
-      const __m256 mask = _mm256_cmp_ps(acc, bestMin, _CMP_LT_OQ);
-      bestMin = _mm256_blendv_ps(bestMin, acc, mask);
-      const __m256i jVec = _mm256_set1_epi32(static_cast<std::int32_t>(j));
-      bestArg = _mm256_blendv_epi8(bestArg, jVec, _mm256_castps_si256(mask));
-    }
-
-    alignas(32) std::array<float, kMr> minBuf{};
-    alignas(32) std::array<std::int32_t, kMr> argBuf{};
-    _mm256_store_ps(minBuf.data(), bestMin);
-    _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf.data()), bestArg);
-    std::memcpy(minSqData + iBase, minBuf.data(), mc * sizeof(float));
-    std::memcpy(labelsData + iBase, argBuf.data(), mc * sizeof(std::int32_t));
-  };
-
-  if (pool.shouldParallelizeWork(totalOps) && pool.shouldParallelize(mTiles, 1, 2)) {
-    pool.parallelForBlocks(std::size_t{0}, mTiles, std::size_t{0},
-                           [&](std::size_t lo, std::size_t hi) {
-                             for (std::size_t t = lo; t < hi; ++t) {
-                               runOneTile(t);
-                             }
-                           });
-  } else {
-    for (std::size_t t = 0; t < mTiles; ++t) {
-      runOneTile(t);
-    }
-  }
+  pool.parallelForBlocks(std::size_t{0}, mTiles, std::size_t{0},
+                         [&](std::size_t lo, std::size_t hi) {
+                           for (std::size_t t = lo; t < hi; ++t) {
+                             argminDirectMTileF32(X, C, labels, outMinSq, t, n, k, d);
+                           }
+                         });
 }
 
 #endif // CLUSTERING_USE_AVX2
