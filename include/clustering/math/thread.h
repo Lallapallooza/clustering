@@ -444,23 +444,69 @@ struct Pool {
   }
 
   /**
-   * @brief @ref parallelRunPlex with a producer-serial pre-phase hook.
+   * @brief Two-pass exclusive-prefix scan over `[0, n)`.
    *
-   * Same shape as @ref parallelRunPlex but @p prePhaseFn runs serially on the producer
-   * BEFORE phase @c p publishes, with happens-before to every worker's per-phase body.
-   * Use the hook to read the previous phase's per-slot results and update the shared
-   * state the upcoming phase reads.
+   * Forwards to `citor::ThreadPool::parallelScan<HintsT>`: pass 1 invokes @p body once per
+   * slot with `initial = @p identity` to compute the chunk's partial; the producer then
+   * runs an `O(slots)` reduce via @p prefix; pass 2 re-invokes @p body with `initial` set to
+   * the chunk's exclusive prefix so the body can finish writing its slice. Returns the
+   * inclusive accumulator at the right edge.
    *
-   * @tparam HintsT     Hint type whose static-constexpr members drive compile-time policy.
-   * @tparam Phase      Callable invocable as
-   *                    `Phase(std::size_t phaseIdx, std::uint32_t slot, std::size_t lo,
-   *                     std::size_t hi, void* tlsArena)`.
-   * @tparam PrePhase   Callable invocable as `PrePhase(std::size_t phaseIdx)`.
-   * @param nPhases     Number of phases to run; @c 0 is a no-op.
-   * @param n           Row-range upper bound; partitioned per-slot.
-   * @param phaseFn     Callable invoked once per `(phase, slot)` pair.
-   * @param prePhaseFn  Callable invoked serially on the producer before each phase publish.
+   * On the BS backend the form is emulated with one `parallelForExactBlocksWithSlot` for the
+   * first pass, a serial prefix walk on the producer, and a second
+   * `parallelForExactBlocksWithSlot` for the offset add. Output is functionally equivalent;
+   * the serialization between passes is identical to citor's.
+   *
+   * @tparam HintsT   Hint type whose static-constexpr members drive compile-time policy.
+   * @tparam T        Reduction value type.
+   * @tparam BodyFn   Callable: `T(chunkId, lo, hi, initial, out)`. `out` is unused on the BS
+   *                  path (always `nullptr`) and the citor path (the body owns the
+   *                  destination buffer captured by reference); kept in the signature so
+   *                  citor's CPO surface monomorphizes identically.
+   * @tparam PrefixFn Callable: `T(T a, T b)` cross-chunk reduce.
+   * @param n        Range length.
+   * @param identity Identity value seeded into pass 1's body and returned for empty ranges.
+   * @param body     Per-chunk body invoked twice (once per pass).
+   * @param prefix   Cross-chunk binary combiner.
+   * @return Inclusive accumulator at the right edge of the scan.
    */
+  template <class HintsT = citor::BulkBalancedHints, class T, class BodyFn, class PrefixFn>
+  T parallelScan(std::size_t n, T identity, BodyFn body, PrefixFn prefix) {
+    if (n == 0) {
+      return identity;
+    }
+    if (pool == nullptr) {
+      T partial = body(std::size_t{0}, std::size_t{0}, n, identity, static_cast<T *>(nullptr));
+      return prefix(std::move(identity), std::move(partial));
+    }
+#if defined(CLUSTERING_USE_BS_POOL)
+    const std::size_t participants = workerCount();
+    if (participants <= 1) {
+      T partial = body(std::size_t{0}, std::size_t{0}, n, identity, static_cast<T *>(nullptr));
+      return prefix(std::move(identity), std::move(partial));
+    }
+    std::vector<T> partials(participants);
+    parallelForExactBlocksWithSlot<HintsT>(
+        std::size_t{0}, n, participants, [&](std::size_t lo, std::size_t hi, std::size_t slot) {
+          partials[slot] = body(slot, lo, hi, identity, static_cast<T *>(nullptr));
+        });
+    T running = identity;
+    std::vector<T> exclusivePrefix(participants);
+    for (std::size_t s = 0; s < participants; ++s) {
+      exclusivePrefix[s] = running;
+      running = prefix(std::move(running), std::move(partials[s]));
+    }
+    parallelForExactBlocksWithSlot<HintsT>(
+        std::size_t{0}, n, participants, [&](std::size_t lo, std::size_t hi, std::size_t slot) {
+          (void)body(slot, lo, hi, exclusivePrefix[slot], static_cast<T *>(nullptr));
+        });
+    return running;
+#else
+    return pool->template parallelScan<HintsT>(n, std::move(identity), std::move(body),
+                                               std::move(prefix));
+#endif
+  }
+
   template <class HintsT = citor::BulkBalancedHints, class Phase, class PrePhase>
   void parallelRunPlex(std::size_t nPhases, std::size_t n, Phase phaseFn, PrePhase prePhaseFn) {
     if (nPhases == 0) {

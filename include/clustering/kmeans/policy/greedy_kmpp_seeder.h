@@ -401,15 +401,31 @@ public:
     std::vector<std::size_t> candidates(nLocalTrials, 0);
     std::vector<T> scores(nLocalTrials, T{0});
 
+    // The cum-dist build is a Blelloch-style parallel exclusive-prefix scan: each chunk
+    // computes its block-local inclusive scan into @c cumDistSq, returns its block total,
+    // then the second pass adds the cross-chunk exclusive prefix to make the array global.
+    // Forwarded to @c citor::parallelScan via @c math::Pool::parallelScan; at n=250k d=2 the
+    // previous pure-serial build was a latency-bound hot path (a dependent
+    // fadd over 250k rows).
     for (std::size_t c = 1; c < k; ++c) {
-      // Build the cumulative-distance array in a single pass. The cum array is only used as a
-      // probability normalizer, so no Kahan compensation.
-      T runningSum = T{0};
-      for (std::size_t i = 0; i < n; ++i) {
-        runningSum += minSq[i];
-        cumDistSq[i] = runningSum;
-      }
-      const T total = runningSum;
+      // Canonical Blelloch body: pass 1 invokes with `initial = identity` and the body's
+      // writes lay down a block-local prefix scan + a 0-offset (so cumDistSq holds the
+      // block-local scan when pass 1 returns). Pass 2 invokes with `initial = exclusive
+      // prefix from earlier chunks` and the same body re-walks the chunk, this time writing
+      // the global scan. Both passes return the chunk total; the second pass's return is
+      // discarded by citor.
+      const T total = pool.template parallelScan<citor::BulkBalancedHints>(
+          n, T{0},
+          [&](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi, T initial,
+              T * /*out*/) noexcept -> T {
+            T s = T{0};
+            for (std::size_t i = lo; i < hi; ++i) {
+              s += minSq[i];
+              cumDistSq[i] = s + initial;
+            }
+            return s;
+          },
+          [](T a, T b) noexcept { return a + b; });
 
       // Degenerate guard: when every chosen centroid coincides with every remaining point the
       // total collapses to ~0; pick the next centroid uniformly so the routine cannot stall.
