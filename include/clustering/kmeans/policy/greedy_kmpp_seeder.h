@@ -225,6 +225,47 @@ inline void sqEuclideanRowAgainst8Transposed(const float *x, const float *candDa
 }
 
 /**
+ * @brief Register-only variant of @ref sqEuclideanRowAgainst8Transposed.
+ *
+ * Returns the 8-lane squared-distance vector instead of storing it. Used by the seeder's
+ * score sweep to skip a per-row materialization into a `(n, L)` distance buffer when only
+ * the score reduction is needed; the winner column is recomputed cheaply after pick time.
+ */
+inline __m256 sqEuclideanRowAgainst8TransposedReg(const float *x, const float *candData,
+                                                  std::size_t d) noexcept {
+  __m256 acc = _mm256_setzero_ps();
+  for (std::size_t k = 0; k < d; ++k) {
+    const __m256 cv = _mm256_load_ps(candData + (k * 8));
+    const __m256 xv = _mm256_set1_ps(x[k]);
+    const __m256 diff = _mm256_sub_ps(xv, cv);
+    acc = _mm256_fmadd_ps(diff, diff, acc);
+  }
+  return acc;
+}
+
+/**
+ * @brief Register-only 16-wide variant of @ref sqEuclideanRowAgainst16Transposed.
+ *
+ * Returns the two 8-lane squared-distance vectors as a pair.
+ */
+inline std::pair<__m256, __m256> sqEuclideanRowAgainst16TransposedReg(const float *x,
+                                                                      const float *candData,
+                                                                      std::size_t d) noexcept {
+  __m256 accLo = _mm256_setzero_ps();
+  __m256 accHi = _mm256_setzero_ps();
+  for (std::size_t k = 0; k < d; ++k) {
+    const __m256 cLo = _mm256_load_ps(candData + (k * 16));
+    const __m256 cHi = _mm256_load_ps(candData + (k * 16) + 8);
+    const __m256 xv = _mm256_set1_ps(x[k]);
+    const __m256 diffLo = _mm256_sub_ps(xv, cLo);
+    const __m256 diffHi = _mm256_sub_ps(xv, cHi);
+    accLo = _mm256_fmadd_ps(diffLo, diffLo, accLo);
+    accHi = _mm256_fmadd_ps(diffHi, diffHi, accHi);
+  }
+  return {accLo, accHi};
+}
+
+/**
  * @brief Compute two 8-way squared distance slabs against an `(d, 16)` transposed candidate
  *        layout in one streaming pass over the @p x row.
  *
@@ -510,10 +551,8 @@ public:
               for (std::size_t i = lo; i < hi; ++i) {
                 const float *xi = xData + (i * d);
                 const __m256 miVec = _mm256_set1_ps(minSq[i]);
-                float *dstRow = candDistSqData + (i * transposedWidth);
-                detail::sqEuclideanRowAgainst16Transposed(xi, candRowsTData, d, dstRow);
-                const __m256 dLo = _mm256_loadu_ps(dstRow);
-                const __m256 dHi = _mm256_loadu_ps(dstRow + 8);
+                const auto [dLo, dHi] =
+                    detail::sqEuclideanRowAgainst16TransposedReg(xi, candRowsTData, d);
                 scoresLoAcc = _mm256_add_ps(scoresLoAcc, _mm256_min_ps(dLo, miVec));
                 scoresHiAcc = _mm256_add_ps(scoresHiAcc, _mm256_min_ps(dHi, miVec));
               }
@@ -539,9 +578,7 @@ public:
               for (std::size_t i = lo; i < hi; ++i) {
                 const float *xi = xData + (i * d);
                 const __m256 miVec = _mm256_set1_ps(minSq[i]);
-                float *dstRow = candDistSqData + (i * transposedWidth);
-                detail::sqEuclideanRowAgainst8Transposed(xi, candRowsTData, d, dstRow);
-                const __m256 dv = _mm256_loadu_ps(dstRow);
+                const __m256 dv = detail::sqEuclideanRowAgainst8TransposedReg(xi, candRowsTData, d);
                 scoresAcc = _mm256_add_ps(scoresAcc, _mm256_min_ps(dv, miVec));
               }
               std::array<float, 8> tmp{};
@@ -769,13 +806,17 @@ public:
       }
       const std::size_t bestCandidate = candidates[bestT];
 
-      // Commit best candidate: copy its row into outCentroids and refresh @c minSq from the
-      // cached candidate-distance plane, skipping a fresh O(n*d) scan against the winner row.
+      // Commit best candidate: copy its row into outCentroids, then refresh @c minSq with a
+      // fresh O(n*d) scan against the winner row. We deliberately DO NOT materialize the
+      // full (n, L) candidate-distance plane during the score sweep -- at the d=2 envelope
+      // its per-row plane write traffic dominated the seeder's runtime. Recomputing one
+      // column for the winner trades 1 row-distance call per row against L row-distance
+      // writes per row in the score sweep.
       const T *winnerRow = xData + (bestCandidate * d);
       std::memcpy(centroidsData + (c * d), winnerRow, d * sizeof(T));
       auto winnerRange = [&](std::size_t lo, std::size_t hi) noexcept {
         for (std::size_t i = lo; i < hi; ++i) {
-          const T cand = candDistSqData[(i * transposedWidth) + bestT];
+          const T cand = detail::sqEuclideanRowPtr(xData + (i * d), winnerRow, d);
           if (cand < minSq[i]) {
             minSq[i] = cand;
           }
