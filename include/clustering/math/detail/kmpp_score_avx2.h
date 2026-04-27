@@ -39,7 +39,7 @@ namespace clustering::math::detail {
  * @param outStride Row stride of @p outDist; must be `>= L`.
  * @param scoresOut Per-candidate score accumulator, length @c L; accumulated into.
  */
-template <std::size_t L>
+template <std::size_t L, bool WriteOutDist = true>
 [[gnu::always_inline]] inline void
 kmppScoreSoaRowsAvx2F32(const float *xData, std::size_t n, std::size_t d, const float *candData,
                         const float *minSq, float *outDist, std::size_t outStride,
@@ -158,16 +158,23 @@ kmppScoreSoaRowsAvx2F32(const float *xData, std::size_t n, std::size_t d, const 
     }
 
     const __m256 vMin = _mm256_loadu_ps(minSq + iBase);
-    alignas(32) std::array<float, L * 8> distScatter{};
-    for (std::size_t t = 0; t < L; ++t) {
-      const __m256 capped = _mm256_min_ps(acc[t], vMin);
-      scoreAcc[t] = _mm256_add_ps(scoreAcc[t], capped);
-      _mm256_store_ps(distScatter.data() + (t * 8), acc[t]);
-    }
-    for (std::size_t r = 0; r < 8; ++r) {
-      float *dstRow = outDist + ((iBase + r) * outStride);
+    if constexpr (WriteOutDist) {
+      alignas(32) std::array<float, L * 8> distScatter{};
       for (std::size_t t = 0; t < L; ++t) {
-        dstRow[t] = distScatter[(t * 8) + r];
+        const __m256 capped = _mm256_min_ps(acc[t], vMin);
+        scoreAcc[t] = _mm256_add_ps(scoreAcc[t], capped);
+        _mm256_store_ps(distScatter.data() + (t * 8), acc[t]);
+      }
+      for (std::size_t r = 0; r < 8; ++r) {
+        float *dstRow = outDist + ((iBase + r) * outStride);
+        for (std::size_t t = 0; t < L; ++t) {
+          dstRow[t] = distScatter[(t * 8) + r];
+        }
+      }
+    } else {
+      for (std::size_t t = 0; t < L; ++t) {
+        const __m256 capped = _mm256_min_ps(acc[t], vMin);
+        scoreAcc[t] = _mm256_add_ps(scoreAcc[t], capped);
       }
     }
   }
@@ -190,7 +197,9 @@ kmppScoreSoaRowsAvx2F32(const float *xData, std::size_t n, std::size_t d, const 
         const float diff = xi[k] - cand[k];
         s += diff * diff;
       }
-      outDist[(i * outStride) + t] = s;
+      if constexpr (WriteOutDist) {
+        outDist[(i * outStride) + t] = s;
+      }
       scoresOut[t] += (s < mi) ? s : mi;
     }
   }

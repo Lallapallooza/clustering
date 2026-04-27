@@ -695,37 +695,39 @@ public:
                 const std::size_t rangeN = hi - lo;
                 const float *xSlice = xData + (lo * d);
                 const float *minSlice = minSq + lo;
-                float *distSlice = candDistSqData + (lo * transposedWidth);
+                // Score-only path: skip the (n, L) cand-dist materialization. The winner row
+                // is recomputed by @ref winnerRange below, trading L stores per row for one
+                // sqEuclideanRowPtr per row at pick time.
                 switch (nLocalTrials) {
                 case 1:
-                  math::detail::kmppScoreSoaRowsAvx2F32<1>(xSlice, rangeN, d, candRowsData,
-                                                           minSlice, distSlice, transposedWidth,
-                                                           localScores);
+                  math::detail::kmppScoreSoaRowsAvx2F32<1, /*WriteOutDist=*/false>(
+                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
+                      localScores);
                   break;
                 case 2:
-                  math::detail::kmppScoreSoaRowsAvx2F32<2>(xSlice, rangeN, d, candRowsData,
-                                                           minSlice, distSlice, transposedWidth,
-                                                           localScores);
+                  math::detail::kmppScoreSoaRowsAvx2F32<2, /*WriteOutDist=*/false>(
+                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
+                      localScores);
                   break;
                 case 3:
-                  math::detail::kmppScoreSoaRowsAvx2F32<3>(xSlice, rangeN, d, candRowsData,
-                                                           minSlice, distSlice, transposedWidth,
-                                                           localScores);
+                  math::detail::kmppScoreSoaRowsAvx2F32<3, /*WriteOutDist=*/false>(
+                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
+                      localScores);
                   break;
                 case 4:
-                  math::detail::kmppScoreSoaRowsAvx2F32<4>(xSlice, rangeN, d, candRowsData,
-                                                           minSlice, distSlice, transposedWidth,
-                                                           localScores);
+                  math::detail::kmppScoreSoaRowsAvx2F32<4, /*WriteOutDist=*/false>(
+                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
+                      localScores);
                   break;
                 case 5:
-                  math::detail::kmppScoreSoaRowsAvx2F32<5>(xSlice, rangeN, d, candRowsData,
-                                                           minSlice, distSlice, transposedWidth,
-                                                           localScores);
+                  math::detail::kmppScoreSoaRowsAvx2F32<5, /*WriteOutDist=*/false>(
+                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
+                      localScores);
                   break;
                 case 6:
-                  math::detail::kmppScoreSoaRowsAvx2F32<6>(xSlice, rangeN, d, candRowsData,
-                                                           minSlice, distSlice, transposedWidth,
-                                                           localScores);
+                  math::detail::kmppScoreSoaRowsAvx2F32<6, /*WriteOutDist=*/false>(
+                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
+                      localScores);
                   break;
                 default:
                   break;
