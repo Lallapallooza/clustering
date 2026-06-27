@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <vector>
 
 #include "clustering/always_assert.h"
@@ -25,7 +24,8 @@ namespace clustering {
  * @note @c DBSCAN does NOT own @p X. The caller must keep the @c NDArray alive for the duration
  *       of every @ref run call. Construction is stateless in @p X so a single @c DBSCAN instance
  *       can be reused across fits; repeated runs reallocate the label buffer only when @p n
- *       changes and keep the lazy thread pool spawned after the first parallel-eligible shape.
+ *       changes and borrow a worker pool from the process-wide shared registry on
+ *       parallel-eligible shapes.
  *
  * @tparam T Element type of the point cloud.
  * @tparam QueryModel Range-index backend. Defaults to @ref clustering::index::AutoRangeIndex,
@@ -51,9 +51,9 @@ public:
   explicit DBSCAN(T eps, std::size_t minPts, std::size_t nJobs = 0)
       : m_eps(eps), m_minPts(minPts), m_nJobs(math::clampedJobCount(nJobs)), m_labels({0}) {
     CLUSTERING_ALWAYS_ASSERT(minPts >= 1);
-    // Defer pool construction to @ref run: at small shapes every hot phase gates serial, and
-    // spawning nJobs workers in the ctor burns tens of microseconds of thread-create futex
-    // traffic that the fit never amortizes. @ref run emplaces on first need and reuses.
+    // Pool acquisition is deferred to @ref run: at small shapes every hot phase gates serial, so
+    // a fully-serial fit should not force the shared registry to materialize a worker pool. The
+    // shape-gated borrow from @ref math::sharedPool happens inside @ref run.
   }
 
   DBSCAN(const DBSCAN &) = delete;
@@ -90,10 +90,9 @@ public:
     // under-estimate DBSCAN work -- the backend does per-query tree walks that are much heavier
     // than @c d ops -- and caused @c n_jobs=16 at low @c d to fall back to serial here while
     // every worker-side kernel would have cleared its own gate.
-    if (!m_pool.has_value() && math::shouldSpawnPool(n, m_nJobs, /*minOpsPerWorker=*/16)) {
-      m_pool.emplace(m_nJobs);
-    }
-    const math::Pool pool{m_pool.has_value() ? &*m_pool : nullptr};
+    const math::Pool pool{math::shouldSpawnPool(n, m_nJobs, /*minOpsPerWorker=*/16)
+                              ? &math::sharedPool(m_nJobs)
+                              : nullptr};
 
     QueryModel queryModel(X);
     const auto adj = queryModel.query(m_eps, pool);
@@ -181,10 +180,6 @@ private:
   std::size_t m_minPts; ///< Minimum neighbour count for a core point.
   std::size_t m_nJobs;  ///< Worker count clamped at construction via @ref math::clampedJobCount.
   std::size_t m_clusterId = 0; ///< Next cluster id to assign; also the final cluster count.
-  /// Lazy worker pool. Emplaced inside @ref run on the first call whose shape clears
-  /// @ref math::shouldSpawnPool; reused across subsequent runs so repeat fits on the same
-  /// @c DBSCAN instance skip the thread-spawn cost.
-  std::optional<math::OwnedPool> m_pool;
   /// Dense label buffer. Reallocated inside @ref run only when @c n differs from the previous
   /// call's size; the `[0, n)` range is overwritten each run with @ref UNCLASSIFIED, then
   /// filled with cluster ids (or @ref NOISY) by the expansion sweep.

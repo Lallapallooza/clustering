@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <optional>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -93,9 +92,10 @@ namespace clustering {
  *
  * @par Thread safety
  * A single @c HDBSCAN instance is not safe to drive concurrently; @ref run mutates internal
- * state. Separate instances on distinct inputs are safe when each instance spawns its own
- * internal pool (the default). The internal pool obeys a no-nested-dispatch invariant:
- * worker tasks never re-submit to the pool.
+ * state. Parallel-eligible runs borrow a worker pool from the process-wide shared registry, so
+ * instances that share a worker count share that pool; drive each pool from one thread at a time.
+ * The borrowed pool obeys a no-nested-dispatch invariant: worker tasks never re-submit to the
+ * pool.
  *
  * @tparam T          Element type. Only @c float is supported in this class; a @c double
  *                    specialization is out of scope.
@@ -157,9 +157,9 @@ public:
         m_nJobs(math::clampedJobCount(nJobs)), m_convention(convention), m_labels({0}),
         m_outlierScores({0}) {
     CLUSTERING_ALWAYS_ASSERT(minClusterSize >= 2);
-    // Defer pool construction to @ref run: at small shapes every hot phase gates serial, and
-    // spawning nJobs workers in the ctor burns thread-create overhead that the fit never
-    // amortizes at small shapes. @ref run emplaces on first need and reuses.
+    // Pool acquisition is deferred to @ref run: at small shapes every hot phase gates serial, so
+    // a fully-serial fit should not force the shared registry to materialize a worker pool. The
+    // shape-gated borrow from @ref math::sharedPool happens inside @ref run.
   }
 
   HDBSCAN(const HDBSCAN &) = delete;
@@ -202,14 +202,12 @@ public:
     CLUSTERING_ALWAYS_ASSERT(n <=
                              static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()));
 
-    // Lazy pool spawn: the MST backend is the only phase that can parallelise at all; post-MST is
-    // serial by contract. Size the work gate by the backend's dominant shape (N * N) so small
-    // inputs never pay the thread-create cost.
-    if (!m_pool.has_value() &&
-        math::shouldSpawnPool(n * n, m_nJobs, /*minOpsPerWorker=*/1U << 15)) {
-      m_pool.emplace(m_nJobs);
-    }
-    const math::Pool pool{m_pool.has_value() ? &*m_pool : nullptr};
+    // Shape-gated pool borrow: the MST backend is the only phase that can parallelise at all;
+    // post-MST is serial by contract. Size the work gate by the backend's dominant shape (N * N)
+    // so small inputs stay fully serial and never touch the shared registry.
+    const math::Pool pool{math::shouldSpawnPool(n * n, m_nJobs, /*minOpsPerWorker=*/1U << 15)
+                              ? &math::sharedPool(m_nJobs)
+                              : nullptr};
 
     // Phase 1: MST via the pinned backend. The backend writes edges and core distances into
     // `m_mstOutput`.
@@ -315,10 +313,6 @@ private:
   hdbscan::ClusterSelectionMethod m_method;
   std::size_t m_nJobs;
   hdbscan::MinSamplesConvention m_convention;
-  /// Lazy worker pool. Emplaced inside @ref run on the first call whose shape clears
-  /// @ref math::shouldSpawnPool; reused across subsequent runs so repeat fits on the same
-  /// @c HDBSCAN instance skip the thread-spawn cost.
-  std::optional<math::OwnedPool> m_pool;
   NDArray<std::int32_t, 1> m_labels;
   NDArray<T, 1> m_outlierScores;
   std::size_t m_nClusters = 0;
