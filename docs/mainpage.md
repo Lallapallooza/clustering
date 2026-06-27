@@ -2,7 +2,7 @@
 
 <div class="hero">
   <div class="hero-tagline">
-    Header-only C++20 clustering library &mdash; KD-Tree acceleration, AVX2 hot paths, a BS::thread_pool worker pool, and a nanobind Python binding.
+    Header-only C++20 clustering library &mdash; KD-Tree acceleration, AVX2 hot paths, a citor worker pool, and a nanobind Python binding.
   </div>
   <div class="hero-pills">
     <span class="hero-pill">C++20</span>
@@ -15,7 +15,7 @@
 
 ## Algorithms
 
-- \ref clustering::DBSCAN "DBSCAN" &mdash; KD-tree-accelerated region queries; parallel via `BS::thread_pool`.
+- \ref clustering::DBSCAN "DBSCAN" &mdash; KD-tree-accelerated region queries; parallel via `citor`.
 - \ref clustering::HDBSCAN "HDBSCAN*" &mdash; Campello 2015 hierarchy with Prim / Boruvka / NN-Descent MST backends, EOM + leaf extraction, GLOSH outlier scores.
 - \ref clustering::KMeans "k-means" &mdash; fused argmin-GEMM Lloyd with greedy k-means++ and AFK-MC2 seeders; direct small-d kernel; chunked materialized fallback.
 - \ref clustering::NDArray "NDArray" &mdash; shape/stride owned-or-borrowed tensor, layout-tagged for contiguity, with aligned-allocator storage.

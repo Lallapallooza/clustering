@@ -1,6 +1,7 @@
 #pragma once
 
 #include <citor/hints.h>
+#include <citor/thread_pool.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -11,28 +12,15 @@
 #include <utility>
 #include <vector>
 
-#if defined(CLUSTERING_USE_BS_POOL)
-#include <BS_thread_pool.hpp>
-#else
-#include <citor/thread_pool.h>
-#endif
-
 namespace clustering::math {
 
 /**
  * @brief Type alias for the owning pool the algorithm wrappers (@c KMeans, @c DBSCAN,
  *        @c HDBSCAN) hold inside an @c std::optional.
  *
- * Selects @c citor::ThreadPool by default and @c BS::light_thread_pool when
- * @c CLUSTERING_USE_BS_POOL is defined. The two backends share an identical owning shape
- * (constructible from a single worker count) so the algorithm wrappers do not branch on
- * backend choice anywhere except the type alias.
+ * Aliases @c citor::ThreadPool, constructible from a single worker count.
  */
-#if defined(CLUSTERING_USE_BS_POOL)
-using OwnedPool = BS::light_thread_pool;
-#else
 using OwnedPool = citor::ThreadPool;
-#endif
 
 /**
  * @brief Process-wide pool registry, keyed by worker count.
@@ -105,12 +93,9 @@ inline bool shouldSpawnPool(std::size_t totalOps, std::size_t nJobs,
  * The dispatch API methods (@ref parallelForBlocks, @ref parallelForChunks,
  * @ref parallelRunPlex) are templated on @c HintsT and forward through to
  * @c citor::parallelFor<HintsT>(...) (or @c citor::ThreadPool::runPlex<HintsT> for the
- * persistent-worker form). On the @c CLUSTERING_USE_BS_POOL backend they map to the
- * matching @c BS::light_thread_pool primitives; the @c HintsT template parameter is
- * accepted for API uniformity and silently ignored at codegen time because BS does not
- * carry a hint concept. Each call therefore monomorphizes into the same code the direct
- * @c citor::parallelFor<HintsT> / @c BS::submit_blocks call would produce, with no
- * runtime branching on hint fields.
+ * persistent-worker form). Each call monomorphizes into the same code a direct
+ * @c citor::parallelFor<HintsT> call would produce, with no runtime branching on hint
+ * fields.
  *
  * @note @c workerIndex returns @c 0 outside any pool task. Callers that rely on
  *       per-worker scratch isolation must invoke it from inside a pool task body or
@@ -129,11 +114,7 @@ struct Pool {
     if (pool == nullptr) {
       return std::size_t{1};
     }
-#if defined(CLUSTERING_USE_BS_POOL)
-    return pool->get_thread_count();
-#else
     return pool->participants();
-#endif
   }
 
   /**
@@ -143,11 +124,7 @@ struct Pool {
    *         from a pool task body, otherwise @c 0.
    */
   [[nodiscard]] static std::size_t workerIndex() noexcept {
-#if defined(CLUSTERING_USE_BS_POOL)
-    return BS::this_thread::get_index().value_or(std::size_t{0});
-#else
     return citor::ThreadPool::workerIndex();
-#endif
   }
 
   /**
@@ -214,16 +191,11 @@ struct Pool {
       body(first, last);
       return;
     }
-#if defined(CLUSTERING_USE_BS_POOL)
-    const std::size_t blocks = numBlocks == 0 ? workerCount() : numBlocks;
-    pool->submit_blocks(first, last, body, blocks).wait();
-#else
     if (numBlocks != 0) {
       parallelForExactBlocks<HintsT>(first, last, numBlocks, std::move(body));
       return;
     }
     pool->template parallelFor<HintsT>(first, last, body);
-#endif
   }
 
   /**
@@ -256,19 +228,6 @@ struct Pool {
     auto sliceLo = [first, span, numBlocks](std::size_t s) noexcept {
       return first + ((span * s) / numBlocks);
     };
-#if defined(CLUSTERING_USE_BS_POOL)
-    pool->submit_blocks(
-            std::size_t{0}, numBlocks,
-            [&](std::size_t loSlot, std::size_t hiSlot) {
-              for (std::size_t s = loSlot; s < hiSlot; ++s) {
-                const std::size_t blockLo = sliceLo(s);
-                const std::size_t blockHi = sliceLo(s + 1);
-                body(blockLo, blockHi);
-              }
-            },
-            numBlocks)
-        .wait();
-#else
     pool->template parallelFor<HintsT>(std::size_t{0}, numBlocks,
                                        [&](std::size_t loSlot, std::size_t hiSlot) {
                                          for (std::size_t s = loSlot; s < hiSlot; ++s) {
@@ -277,7 +236,6 @@ struct Pool {
                                            body(blockLo, blockHi);
                                          }
                                        });
-#endif
   }
 
   /**
@@ -309,24 +267,12 @@ struct Pool {
     auto sliceLo = [first, span, numBlocks](std::size_t s) noexcept {
       return first + ((span * s) / numBlocks);
     };
-#if defined(CLUSTERING_USE_BS_POOL)
-    pool->submit_blocks(
-            std::size_t{0}, numBlocks,
-            [&](std::size_t loSlot, std::size_t hiSlot) {
-              for (std::size_t s = loSlot; s < hiSlot; ++s) {
-                body(sliceLo(s), sliceLo(s + 1), s);
-              }
-            },
-            numBlocks)
-        .wait();
-#else
     pool->template parallelFor<HintsT>(std::size_t{0}, numBlocks,
                                        [&](std::size_t loSlot, std::size_t hiSlot) {
                                          for (std::size_t s = loSlot; s < hiSlot; ++s) {
                                            body(sliceLo(s), sliceLo(s + 1), s);
                                          }
                                        });
-#endif
   }
 
   /**
@@ -350,16 +296,12 @@ struct Pool {
       }
       return;
     }
-#if defined(CLUSTERING_USE_BS_POOL)
-    pool->submit_sequence(std::size_t{0}, numChunks, [&](std::size_t c) { body(c); }).wait();
-#else
     pool->template parallelFor<HintsT>(std::size_t{0}, numChunks,
                                        [&](std::size_t lo, std::size_t hi) {
                                          for (std::size_t c = lo; c < hi; ++c) {
                                            body(c);
                                          }
                                        });
-#endif
   }
 
   /**
@@ -389,29 +331,8 @@ struct Pool {
     if (pool == nullptr) {
       return combine(std::move(init), map(first, last));
     }
-#if defined(CLUSTERING_USE_BS_POOL)
-    const std::size_t blocks = workerCount();
-    std::vector<T> partials(blocks);
-    std::vector<unsigned char> active(blocks, 0);
-    parallelForExactBlocksWithSlot<HintsT>(first, last, blocks,
-                                           [&](std::size_t lo, std::size_t hi, std::size_t slot) {
-                                             if (lo >= hi) {
-                                               return;
-                                             }
-                                             partials[slot] = map(lo, hi);
-                                             active[slot] = 1;
-                                           });
-    T result = std::move(init);
-    for (std::size_t slot = 0; slot < blocks; ++slot) {
-      if (active[slot] != 0) {
-        result = combine(std::move(result), std::move(partials[slot]));
-      }
-    }
-    return result;
-#else
     return pool->template parallelReduce<HintsT>(first, last, std::move(init), std::move(map),
                                                  std::move(combine));
-#endif
   }
 
   /**
@@ -478,32 +399,8 @@ struct Pool {
       T partial = body(std::size_t{0}, std::size_t{0}, n, identity, static_cast<T *>(nullptr));
       return prefix(std::move(identity), std::move(partial));
     }
-#if defined(CLUSTERING_USE_BS_POOL)
-    const std::size_t participants = workerCount();
-    if (participants <= 1) {
-      T partial = body(std::size_t{0}, std::size_t{0}, n, identity, static_cast<T *>(nullptr));
-      return prefix(std::move(identity), std::move(partial));
-    }
-    std::vector<T> partials(participants);
-    parallelForExactBlocksWithSlot<HintsT>(
-        std::size_t{0}, n, participants, [&](std::size_t lo, std::size_t hi, std::size_t slot) {
-          partials[slot] = body(slot, lo, hi, identity, static_cast<T *>(nullptr));
-        });
-    T running = identity;
-    std::vector<T> exclusivePrefix(participants);
-    for (std::size_t s = 0; s < participants; ++s) {
-      exclusivePrefix[s] = running;
-      running = prefix(std::move(running), std::move(partials[s]));
-    }
-    parallelForExactBlocksWithSlot<HintsT>(
-        std::size_t{0}, n, participants, [&](std::size_t lo, std::size_t hi, std::size_t slot) {
-          (void)body(slot, lo, hi, exclusivePrefix[slot], static_cast<T *>(nullptr));
-        });
-    return running;
-#else
     return pool->template parallelScan<HintsT>(n, std::move(identity), std::move(body),
                                                std::move(prefix));
-#endif
   }
 
   template <class HintsT = citor::HintsDefaults, class Phase, class PrePhase>
@@ -519,33 +416,8 @@ struct Pool {
       }
       return;
     }
-#if defined(CLUSTERING_USE_BS_POOL)
-    const std::size_t participants = workerCount();
-    if (participants <= 1) {
-      for (std::size_t p = 0; p < nPhases; ++p) {
-        prePhaseFn(p);
-        phaseFn(p, std::uint32_t{0}, std::size_t{0}, n, static_cast<void *>(nullptr));
-      }
-      return;
-    }
-    for (std::size_t p = 0; p < nPhases; ++p) {
-      prePhaseFn(p);
-      pool->submit_blocks(
-              std::size_t{0}, participants,
-              [&, p](std::size_t loSlot, std::size_t hiSlot) {
-                for (std::size_t s = loSlot; s < hiSlot; ++s) {
-                  const std::size_t lo = (n * s) / participants;
-                  const std::size_t hi = (n * (s + 1)) / participants;
-                  phaseFn(p, static_cast<std::uint32_t>(s), lo, hi, static_cast<void *>(nullptr));
-                }
-              },
-              participants)
-          .wait();
-    }
-#else
     pool->template runPlex<HintsT>(nPhases, n, std::forward<Phase>(phaseFn),
                                    std::forward<PrePhase>(prePhaseFn));
-#endif
   }
 };
 

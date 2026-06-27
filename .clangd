@@ -14,7 +14,7 @@ CompileFlags:
   Add:
     - -std=c++20
     - -Iinclude
-    - -Ibuild/_deps/bshoshany_thread_pool-src/include
+    - -Ibuild/_deps/citor-src/include
     - -mavx2
     - -mfma
     - -DCLUSTERING_USE_AVX2
