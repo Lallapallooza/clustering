@@ -1,6 +1,6 @@
 #pragma once
 
-#include <citor/example_hints.h>
+#include <citor/hints.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -208,7 +208,7 @@ struct Pool {
    * @param numBlocks Requested block count; @c 0 selects the backend's default partition.
    * @param body      Callable invoked once per block.
    */
-  template <class HintsT = citor::BulkBalancedHints, class Body>
+  template <class HintsT = citor::HintsDefaults, class Body>
   void parallelForBlocks(std::size_t first, std::size_t last, std::size_t numBlocks, Body body) {
     if (pool == nullptr || first >= last) {
       body(first, last);
@@ -242,7 +242,7 @@ struct Pool {
    * @param numBlocks Number of contiguous blocks; must be at least 1.
    * @param body      Callable invoked once per block.
    */
-  template <class HintsT = citor::BulkBalancedHints, class Body>
+  template <class HintsT = citor::HintsDefaults, class Body>
   void parallelForExactBlocks(std::size_t first, std::size_t last, std::size_t numBlocks,
                               Body body) {
     if (first >= last || numBlocks == 0) {
@@ -295,7 +295,7 @@ struct Pool {
    * @param numBlocks Number of contiguous blocks; must be at least 1.
    * @param body      Callable invoked once per block with the block's slot index.
    */
-  template <class HintsT = citor::BulkBalancedHints, class Body>
+  template <class HintsT = citor::HintsDefaults, class Body>
   void parallelForExactBlocksWithSlot(std::size_t first, std::size_t last, std::size_t numBlocks,
                                       Body body) {
     if (first >= last || numBlocks == 0) {
@@ -342,7 +342,7 @@ struct Pool {
    * @param numChunks Total number of chunks to dispatch.
    * @param body      Callable invoked once per chunk.
    */
-  template <class HintsT = citor::BulkBalancedHints, class Body>
+  template <class HintsT = citor::HintsDefaults, class Body>
   void parallelForChunks(std::size_t numChunks, Body body) {
     if (pool == nullptr || numChunks == 0) {
       for (std::size_t c = 0; c < numChunks; ++c) {
@@ -369,8 +369,7 @@ struct Pool {
    * citor's chunk-id tree and determinism policy. On the BS backend the same surface is
    * emulated with one partial per worker-count slot, then folded by the producer in slot order.
    *
-   * @tparam HintsT  citor reduction hint type, e.g. @c citor::FixedBlockReduceHints or
-   *                 @c citor::KahanReduceHints.
+   * @tparam HintsT  citor reduction hint type, e.g. `citor::HintsDefaults`.
    * @tparam T       Reduction value type.
    * @tparam Map     Callable invocable as `T(std::size_t lo, std::size_t hi)`.
    * @tparam Combine Callable invocable as `T(T a, T b)`.
@@ -381,7 +380,7 @@ struct Pool {
    * @param combine  Producer-side combiner.
    * @return Combined reduction value.
    */
-  template <class HintsT = citor::FixedBlockReduceHints, class T, class Map, class Combine>
+  template <class HintsT = citor::HintsDefaults, class T, class Map, class Combine>
   [[nodiscard]] T parallelReduce(std::size_t first, std::size_t last, T init, Map map,
                                  Combine combine) {
     if (first >= last) {
@@ -437,7 +436,7 @@ struct Pool {
    *                 `[n*slot/P, n*(slot+1)/P)`.
    * @param phaseFn  Callable invoked once per `(phase, slot)` pair.
    */
-  template <class HintsT = citor::BulkBalancedHints, class Phase>
+  template <class HintsT = citor::HintsDefaults, class Phase>
   void parallelRunPlex(std::size_t nPhases, std::size_t n, Phase phaseFn) {
     auto noPrePhase = [](std::size_t /*phaseIdx*/) noexcept {};
     parallelRunPlex<HintsT>(nPhases, n, std::move(phaseFn), noPrePhase);
@@ -470,7 +469,7 @@ struct Pool {
    * @param prefix   Cross-chunk binary combiner.
    * @return Inclusive accumulator at the right edge of the scan.
    */
-  template <class HintsT = citor::BulkBalancedHints, class T, class BodyFn, class PrefixFn>
+  template <class HintsT = citor::HintsDefaults, class T, class BodyFn, class PrefixFn>
   T parallelScan(std::size_t n, T identity, BodyFn body, PrefixFn prefix) {
     if (n == 0) {
       return identity;
@@ -507,7 +506,7 @@ struct Pool {
 #endif
   }
 
-  template <class HintsT = citor::BulkBalancedHints, class Phase, class PrePhase>
+  template <class HintsT = citor::HintsDefaults, class Phase, class PrePhase>
   void parallelRunPlex(std::size_t nPhases, std::size_t n, Phase phaseFn, PrePhase prePhaseFn) {
     if (nPhases == 0) {
       return;

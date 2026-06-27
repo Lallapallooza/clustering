@@ -325,7 +325,7 @@ private:
         partialSum[e] = T{0};
         partialSumSq[e] = T{0};
       }
-      pool.parallelForExactBlocksWithSlot<citor::BulkBalancedHints>(
+      pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
           std::size_t{0}, n, workers,
           [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
             T *localSum = partialSum + (slot * d);
@@ -402,7 +402,7 @@ private:
         partialSum[e] = T{0};
         partialSumSq[e] = T{0};
       }
-      pool.parallelForExactBlocksWithSlot<citor::BulkBalancedHints>(
+      pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
           std::size_t{0}, n, workers,
           [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
             T *localSum = partialSum + (slot * d);
@@ -469,7 +469,7 @@ private:
       }
       return sum;
     };
-    return pool.parallelReduce<citor::KahanReduceHints>(
+    return pool.parallelReduce<citor::HintsDefaults>(
         std::size_t{0}, n, 0.0, sumRange,
         [](double lhs, double rhs) noexcept { return lhs + rhs; });
   }
@@ -670,7 +670,7 @@ private:
     // not seed bounds inline). The flag is consumed in prePhase(1).
     pendingHamerlySeed = hamerlyEligible && (useFused || (useDirect && k <= kHamerlyMaxK));
 
-    pool.parallelRunPlex<citor::BulkBalancedHints>(maxIter, n, phaseFn, prePhaseFn);
+    pool.parallelRunPlex<citor::HintsDefaults>(maxIter, n, phaseFn, prePhaseFn);
 
     if (!converged) {
       // We exhausted maxIter. The last phase produced slabs that no prePhase folded. Do the
@@ -1405,7 +1405,7 @@ private:
       if (useDirect) {
         constexpr std::size_t kMr = 8;
         const std::size_t mTiles = (n + kMr - 1) / kMr;
-        pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+        pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
             std::size_t{0}, mTiles, workers,
             [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
               for (std::size_t t = lo; t < hi; ++t) {
@@ -1425,7 +1425,7 @@ private:
         const std::size_t mTiles = (n + kMr - 1) / kMr;
         const float *bpacked = m_packedB.data();
         const float *normsPacked = m_packedCSqNorms.data();
-        pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+        pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
             std::size_t{0}, mTiles, workers,
             [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
               for (std::size_t t = lo; t < hi; ++t) {
@@ -1458,7 +1458,7 @@ private:
     T *lBase = m_l.data();
     T *elkanBoundsBase = m_elkanBounds.dim(0) == n ? m_elkanBounds.data() : nullptr;
 
-    pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+    pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
         std::size_t{0}, numChunks, workers,
         [&](std::size_t chunkLo, std::size_t chunkHi, std::size_t slot) noexcept {
           T *distsChunk = distsBase + (slot * chunkCap * k);
@@ -1648,7 +1648,7 @@ private:
       }
     };
 
-    pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+    pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
         std::size_t{0}, n, numBlocks,
         [&](std::size_t lo, std::size_t hi, std::size_t slot) { scatterRange(lo, hi, slot); });
 
@@ -1726,7 +1726,7 @@ private:
       }
     };
 
-    pool.parallelForExactBlocksWithSlot<citor::ScatterFoldKahanHints>(
+    pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
         std::size_t{0}, n, numBlocks,
         [&](std::size_t lo, std::size_t hi, std::size_t slot) { scatterRange(lo, hi, slot); });
 
@@ -1900,7 +1900,7 @@ private:
     T *partialComps = m_partialComps.data();
     std::int32_t *partialCounts = m_partialCounts.data();
 
-    pool.parallelForBlocks<citor::ScatterFoldHints>(
+    pool.parallelForBlocks<citor::HintsDefaults>(
         std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) noexcept {
           std::array<T, kHamerlyMaxK> distBuf{};
           const std::size_t slot = math::Pool::workerIndex();
@@ -2042,7 +2042,7 @@ private:
     T *partialComps = m_partialComps.data();
     std::int32_t *partialCounts = m_partialCounts.data();
 
-    pool.parallelForBlocks<citor::ScatterFoldHints>(
+    pool.parallelForBlocks<citor::HintsDefaults>(
         std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) noexcept {
           const std::size_t slot = math::Pool::workerIndex();
           T *slabSum = partialSums + (slot * k * d);

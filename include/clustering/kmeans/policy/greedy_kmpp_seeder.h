@@ -460,7 +460,7 @@ public:
         // prefix from earlier chunks` and the same body re-walks the chunk, this time
         // writing the global scan. Both passes return the chunk total; the second pass's
         // return is discarded by citor.
-        total = pool.template parallelScan<citor::BulkBalancedHints>(
+        total = pool.template parallelScan<citor::HintsDefaults>(
             n, T{0},
             [&](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi, T initial,
                 T * /*out*/) noexcept -> T {

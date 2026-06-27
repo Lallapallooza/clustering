@@ -440,7 +440,7 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
   (void)allSingletonComponents;
   const bool useParallel = (nWorkers > std::size_t{1}) && (n >= (nWorkers * std::size_t{64}));
   if (useParallel) {
-    pool.parallelForExactBlocksWithSlot<citor::BulkBalancedHints>(
+    pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
         std::size_t{0}, n, nWorkers,
         [&](std::size_t lo, std::size_t hi, std::size_t slot) { runChunk(lo, hi, slot); });
   } else {

@@ -322,15 +322,15 @@ public:
       };
 
       auto phaseFn = [&](std::size_t /*phaseIdx*/, std::uint32_t slot, std::size_t /*lo*/,
-                         std::size_t /*hi*/, void * /*tlsArena*/) noexcept {
+                         std::size_t /*hi*/, void * /*tlsArena*/ = nullptr) noexcept {
         auto [bv, bw] = relaxBlock(slot, phaseTarget);
         localBest[slot].vertex = bv;
         localBest[slot].weight = bw;
       };
 
       const std::size_t totalPhases = n - 1;
-      pool.parallelRunPlex<citor::FrontierPlexHints>(totalPhases, n, std::move(phaseFn),
-                                                     std::move(prePhase));
+      pool.parallelRunPlex<citor::HintsDefaults>(totalPhases, n, std::move(phaseFn),
+                                                 std::move(prePhase));
       // Final commit: the last phase's argmin closes the spanning tree.
       auto [bv, bw] = reduceBest();
       CLUSTERING_ALWAYS_ASSERT(bv >= 0);
@@ -351,7 +351,7 @@ public:
       // Per-iter parallel dispatch: the gate uses the per-worker op budget `(n*d / nWorkers)`
       // so very small @c n stays serial and avoids submit_blocks overhead.
       if (pool.shouldParallelizeWork(n * d)) {
-        pool.parallelForBlocks<citor::BulkFrontierHints>(
+        pool.parallelForBlocks<citor::HintsDefaults>(
             std::size_t{0}, n, std::size_t{0},
             [&](std::size_t lo, std::size_t hi) { relaxRange(lo, hi, target, tIdx, coreT, rowT); });
         return findNext();
@@ -450,7 +450,7 @@ private:
     // owns its top-k state, so the pool path has no cross-row writes and can reuse the batched
     // four-neighbour distance kernel that amortises AVX2 horizontal sums.
     if (pool.workerCount() >= 4 && pool.shouldParallelizeWork(n * n * d)) {
-      pool.parallelForBlocks<citor::BulkBalancedHints>(
+      pool.parallelForBlocks<citor::HintsDefaults>(
           std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) {
             computeDenseCoreDistancesRows(X, minSamples, lo, hi, topK.data(), worstSlot);
           });

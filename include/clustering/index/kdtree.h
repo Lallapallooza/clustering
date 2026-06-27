@@ -204,7 +204,7 @@ public:
     };
 
     if (pool.shouldParallelize(n, 4, 2)) {
-      pool.parallelForBlocks<citor::BulkQueryHints>(
+      pool.parallelForBlocks<citor::HintsDefaults>(
           std::size_t{0}, n, std::size_t{0},
           [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); });
     } else {
@@ -266,7 +266,7 @@ public:
     };
 
     if (pool.shouldParallelize(n, 4, 2)) {
-      pool.parallelForBlocks<citor::BulkQueryHints>(
+      pool.parallelForBlocks<citor::HintsDefaults>(
           std::size_t{0}, n, std::size_t{0},
           [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); });
     } else {

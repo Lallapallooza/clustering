@@ -131,8 +131,7 @@ template <class T> struct JoinStep {
     };
 
     if (pool.shouldParallelize(n, 256, 2)) {
-      pool.parallelForBlocks<citor::ScatterFoldHints>(std::size_t{0}, n, std::size_t{0},
-                                                      countRange);
+      pool.parallelForBlocks<citor::HintsDefaults>(std::size_t{0}, n, std::size_t{0}, countRange);
     } else {
       countRange(0, n);
     }
@@ -193,8 +192,7 @@ template <class T> struct JoinStep {
     };
 
     if (pool.shouldParallelize(n, 256, 2)) {
-      pool.parallelForBlocks<citor::ScatterFoldHints>(std::size_t{0}, n, std::size_t{0},
-                                                      scatterRange);
+      pool.parallelForBlocks<citor::HintsDefaults>(std::size_t{0}, n, std::size_t{0}, scatterRange);
     } else {
       scatterRange(0, n);
     }
@@ -314,7 +312,7 @@ template <class T> struct JoinStep {
 
     // Work gate: parallelism only when the per-worker work amortizes pool dispatch.
     if (pool.shouldParallelize(n, 64, 2)) {
-      pool.parallelForBlocks<citor::LocalJoinHints>(
+      pool.parallelForBlocks<citor::HintsDefaults>(
           std::size_t{0}, n, std::size_t{0},
           [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); });
     } else {

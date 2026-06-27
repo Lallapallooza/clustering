@@ -424,7 +424,7 @@ private:
     const std::size_t workers = pool.workerCount();
     std::array<T, 64> partials{};
     CLUSTERING_ALWAYS_ASSERT(workers <= 64);
-    pool.parallelForExactBlocksWithSlot<citor::ScatterFoldHints>(
+    pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
         std::size_t{0}, n, workers,
         [&, p](std::size_t startIdx, std::size_t endIdx, std::size_t slot) noexcept {
           partials[slot] = sumReduceAvx2(p + startIdx, endIdx - startIdx);
