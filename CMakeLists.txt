@@ -11,6 +11,7 @@ include(CheckCXXCompilerFlag)
 include(cmake/CPM.cmake)
 include(cmake/Tooling.cmake)
 include(cmake/ThreadPoolDep.cmake)
+include(cmake/CitorDep.cmake)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,7 +37,10 @@ target_include_directories(
     clustering_header_lib
     INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(clustering_header_lib INTERFACE bshoshany_thread_pool)
+target_link_libraries(
+    clustering_header_lib
+    INTERFACE bshoshany_thread_pool citor::citor
+)
 
 # Top-level-only: enforce -Wall -Wextra -Werror on our executables.
 # Consumers that pull us in as a subdirectory do not inherit these flags.
