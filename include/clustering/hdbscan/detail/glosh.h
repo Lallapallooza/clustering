@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "clustering/hdbscan/detail/condensed_tree.h"
+#include "clustering/math/thread.h"
 
 namespace clustering::hdbscan::detail {
 
@@ -37,10 +38,15 @@ namespace clustering::hdbscan::detail {
  *               an outlier score of @c 0 -- scores are only meaningful for selected clusters.
  * @param out    Destination vector of length @p n; overwritten with the per-point scores in
  *               `[0, 1]`.
+ * @param pool   Worker pool. The subtree-max precompute runs serial (child-before-parent data
+ *               dependency); the per-point score loop fans out as an independent map when the row
+ *               count clears the work gate, otherwise it runs serial. Scores are independent of the
+ *               partition: each leaf row writes a distinct point's score.
  */
 template <class T>
 inline void computeGlosh(const CondensedTree<T> &tree, std::size_t n,
-                         const std::vector<std::int32_t> & /*labels*/, std::vector<T> &out) {
+                         const std::vector<std::int32_t> & /*labels*/, std::vector<T> &out,
+                         math::Pool pool) {
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
                 "computeGlosh<T> requires float or double");
   out.assign(n, T{0});
@@ -94,11 +100,13 @@ inline void computeGlosh(const CondensedTree<T> &tree, std::size_t n,
 
   // Step 2: per-point score. For each leaf-row (the point fell out of its containing cluster at
   // `lambdaVal`), the parent of the row is the containing cluster `C_parent`. The score uses
-  // `lambdaMaxInSubtree[C_parent]` as the normaliser.
-  for (std::size_t i = 0; i < nRows; ++i) {
+  // `lambdaMaxInSubtree[C_parent]` as the normaliser. Each point falls out exactly once, so leaf
+  // rows write disjoint slots of `out`; with `lambdaMaxInSubtree` read-only the body is an
+  // independent map and the result does not depend on how rows are partitioned across workers.
+  auto scoreRow = [&](std::size_t i) {
     const std::int32_t child = tree.child[i];
     if (child >= kSignedN) {
-      continue;
+      return;
     }
     const auto pointIdx = static_cast<std::size_t>(child);
     const std::int32_t parent = tree.parent[i];
@@ -124,6 +132,22 @@ inline void computeGlosh(const CondensedTree<T> &tree, std::size_t n,
       }
     }
     out[pointIdx] = score;
+  };
+
+  // The score is a cheap O(1) per row, so fan-out only pays once there are enough rows that the
+  // per-worker slice dwarfs pool dispatch. Below the gate the loop runs on the calling thread.
+  constexpr std::size_t kGloshScoreMinChunk = std::size_t{1} << 11;
+  if (pool.shouldParallelize(nRows, kGloshScoreMinChunk)) {
+    pool.parallelForBlocks<citor::HintsDefaults>(std::size_t{0}, nRows, std::size_t{0},
+                                                 [&](std::size_t lo, std::size_t hi) {
+                                                   for (std::size_t i = lo; i < hi; ++i) {
+                                                     scoreRow(i);
+                                                   }
+                                                 });
+  } else {
+    for (std::size_t i = 0; i < nRows; ++i) {
+      scoreRow(i);
+    }
   }
 }
 

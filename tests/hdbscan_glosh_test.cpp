@@ -7,9 +7,12 @@
 
 #include "clustering/hdbscan/detail/condensed_tree.h"
 #include "clustering/hdbscan/detail/glosh.h"
+#include "clustering/math/thread.h"
 
 using clustering::hdbscan::detail::computeGlosh;
 using clustering::hdbscan::detail::CondensedTree;
+using clustering::math::OwnedPool;
+using clustering::math::Pool;
 
 // Hand-crafted condensed tree matching the Campello 2015 GLOSH definition.
 //
@@ -43,7 +46,7 @@ TEST(Glosh, HandCraftedAllPointsAtSubtreeMax) {
 
   const std::vector<std::int32_t> labels(6, 0);
   std::vector<float> scores;
-  computeGlosh(tree, 6, labels, scores);
+  computeGlosh(tree, 6, labels, scores, Pool{});
   ASSERT_EQ(scores.size(), 6u);
   for (std::size_t i = 0; i < 6; ++i) {
     EXPECT_NEAR(scores[i], 0.0F, 1e-5F);
@@ -81,7 +84,7 @@ TEST(Glosh, HandCraftedDyingSubcluster) {
 
   const std::vector<std::int32_t> labels(6, 0);
   std::vector<float> scores;
-  computeGlosh(tree, 6, labels, scores);
+  computeGlosh(tree, 6, labels, scores, Pool{});
 
   // Every score must be in [0, 1].
   for (std::size_t i = 0; i < 6; ++i) {
@@ -122,7 +125,7 @@ TEST(Glosh, HandCraftedClosedForm) {
 
   const std::vector<std::int32_t> labels{0, 0, 0};
   std::vector<float> scores;
-  computeGlosh(tree, 3, labels, scores);
+  computeGlosh(tree, 3, labels, scores, Pool{});
   ASSERT_EQ(scores.size(), 3u);
   EXPECT_NEAR(scores[0], 0.0F, 1e-5F);
   EXPECT_NEAR(scores[1], 0.5F, 1e-5F);
@@ -156,7 +159,7 @@ TEST(Glosh, BugDistinguishingFixtureBoundedScore) {
 
   const std::vector<std::int32_t> labels{-1, 0, 0};
   std::vector<float> scores;
-  computeGlosh(tree, 3, labels, scores);
+  computeGlosh(tree, 3, labels, scores, Pool{});
   ASSERT_EQ(scores.size(), 3u);
   EXPECT_NEAR(scores[0], 0.95F, 1e-5F);
   EXPECT_NEAR(scores[1], 0.0F, 1e-5F);
@@ -174,7 +177,7 @@ TEST(Glosh, EmptyTreeZeroScores) {
   tree.numClusters = 0;
   const std::vector<std::int32_t> labels(4, -1);
   std::vector<float> scores;
-  computeGlosh(tree, 4, labels, scores);
+  computeGlosh(tree, 4, labels, scores, Pool{});
   ASSERT_EQ(scores.size(), 4u);
   for (const float s : scores) {
     EXPECT_EQ(s, 0.0F);
@@ -196,9 +199,51 @@ TEST(Glosh, InfiniteLambdaMaxFallbacks) {
 
   const std::vector<std::int32_t> labels(3, 0);
   std::vector<float> scores;
-  computeGlosh(tree, 3, labels, scores);
+  computeGlosh(tree, 3, labels, scores, Pool{});
   ASSERT_EQ(scores.size(), 3u);
   EXPECT_EQ(scores[0], 0.0F);
   EXPECT_EQ(scores[1], 1.0F);
   EXPECT_EQ(scores[2], 0.0F);
+}
+
+// Parallel fan-out of the per-point score loop must reproduce the serial result bit-for-bit. The
+// score loop is a pure independent map (each leaf row writes a distinct point's score from
+// read-only inputs), so partitioning the rows across workers may not perturb any value. A flat
+// single-cluster tree large enough to clear the work gate exercises the parallel path.
+TEST(Glosh, ParallelMatchesSerialBitIdentical) {
+  constexpr std::size_t kN = 50000;
+  const auto kSignedN = static_cast<std::int32_t>(kN);
+
+  // One root cluster (id = kN) with every point falling out directly at a spread of lambdas. The
+  // root's subtree max is the largest lambda, so scores span (0, 1).
+  CondensedTree<float> tree;
+  tree.parent.assign(kN, kSignedN);
+  tree.child.resize(kN);
+  tree.lambdaVal.resize(kN);
+  tree.childSize.assign(kN, std::int32_t{1});
+  for (std::size_t i = 0; i < kN; ++i) {
+    tree.child[i] = static_cast<std::int32_t>(i);
+    tree.lambdaVal[i] = 1.0F + static_cast<float>(i % 997);
+  }
+  tree.numClusters = 1;
+
+  const std::vector<std::int32_t> labels(kN, 0);
+
+  std::vector<float> serial;
+  computeGlosh(tree, kN, labels, serial, Pool{});
+
+  OwnedPool ownedPool(4);
+  Pool pool{&ownedPool};
+  // Guard against the gate silently keeping the run serial, which would make the comparison
+  // vacuous: the constant mirrors `kGloshScoreMinChunk` in glosh.h.
+  ASSERT_TRUE(pool.shouldParallelize(kN, std::size_t{1} << 11));
+
+  std::vector<float> parallel;
+  computeGlosh(tree, kN, labels, parallel, pool);
+
+  ASSERT_EQ(serial.size(), kN);
+  ASSERT_EQ(parallel.size(), kN);
+  for (std::size_t i = 0; i < kN; ++i) {
+    EXPECT_EQ(parallel[i], serial[i]) << "mismatch at point " << i;
+  }
 }

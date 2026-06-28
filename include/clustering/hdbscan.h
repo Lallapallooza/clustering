@@ -246,9 +246,10 @@ public:
       hdbscan::detail::extractLeaf(condensed, n, labels);
     }
 
-    // Phase 5: GLOSH outlier scores.
+    // Phase 5: GLOSH outlier scores. The per-point score loop fans out over the same pool the MST
+    // borrowed; its internal subtree-max precompute stays serial.
     std::vector<T> scores;
-    hdbscan::detail::computeGlosh(condensed, n, labels, scores);
+    hdbscan::detail::computeGlosh(condensed, n, labels, scores, pool);
 
     // Finalise result accessors. The label array lands in the public NDArray buffer; ditto the
     // outlier-score array. The condensed tree is retained in its parallel-array form so the
