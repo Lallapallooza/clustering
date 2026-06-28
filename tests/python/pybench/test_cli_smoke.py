@@ -86,6 +86,7 @@ def _stub_run_one_with_labels_factory(
         params=None,
         ours_only=False,
         capture_labels=capture_labels,
+        baseline="sklearn",
     ):
         effective_params = (
             dict(params) if params is not None else dict(recipe.default_params)

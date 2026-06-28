@@ -115,9 +115,8 @@ def _add_bench_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "CPU-perf-only fast path: time the @c ours implementation only, skip the @c theirs"
-            " sklearn baseline, the ARI gate, and the memray peak-RSS tracker. Useful for"
-            " tight perf iteration loops on large shapes where the baseline is minutes per"
-            " cell."
+            " sklearn baseline and the ARI gate. Useful for tight perf iteration loops on large"
+            " shapes where the baseline is minutes per cell."
         ),
     )
     parser.add_argument(
@@ -469,6 +468,7 @@ def _run_live(args: argparse.Namespace, recipes: dict[str, Recipe]) -> int:
                         params=params,
                         ours_only=args.ours_only,
                         capture_labels=args.capture_labels,
+                        baseline=args.baseline,
                     )
                     eps_info = ""
                     if "eps" in result.effective_params:
@@ -962,19 +962,20 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    # Apply the intelex patch BEFORE recipe discovery: recipe modules import
-    # sklearn at module-import time, and sklearnex.patch_sklearn() only takes
-    # effect for sklearn imports that happen after it runs.
+    # The intelex patch is applied inside the theirs subprocess, not here: the
+    # parent's sklearn drives eps resolution and data generation and must stay
+    # stock so both engines compare against the same fixtures. Validate the
+    # install up front so a missing package fails with a clear CLI error rather
+    # than a worker traceback.
     if getattr(args, "baseline", "sklearn") == "intelex":
         try:
-            from sklearnex import patch_sklearn
+            import sklearnex  # noqa: F401
         except ImportError as exc:
             parser.error(
                 f"--baseline intelex requires scikit-learn-intelex: {exc}. "
                 "Install with `uv pip install scikit-learn-intelex`."
             )
-        patch_sklearn()
-        logger.info("scikit-learn-intelex patch applied; theirs runs on oneDAL")
+        logger.info("--baseline intelex selected; theirs runs on oneDAL per subprocess")
 
     recipes = all_recipes()
 

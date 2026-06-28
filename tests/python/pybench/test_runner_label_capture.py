@@ -52,6 +52,25 @@ def _make_recipe(*, ours=_stub_ours, theirs=_stub_theirs, n_runs: int = 2) -> Re
     )
 
 
+def _patch_engine(monkeypatch: pytest.MonkeyPatch, recipe: Recipe) -> None:
+    """Run each engine in-process against @p recipe's stub callables.
+
+    The real runner times each engine in a spawn subprocess that reconstructs
+    the recipe from the registry by name. Stub recipes built here are not in the
+    registry, so we replace the subprocess seam with a direct call that drives
+    the same orchestration (ARI, speedup, bundle assembly) with deterministic
+    labels.
+    """
+
+    def _fake(engine, baseline, recipe_name, data_path, params, n_runs):
+        data = np.load(data_path)
+        fn = recipe.ours if engine == "ours" else recipe.theirs
+        labels = np.asarray(fn(data, **params))
+        return [0.001] * n_runs, labels, 1.0
+
+    monkeypatch.setattr("pybench.runner._run_engine_subprocess", _fake)
+
+
 def test_make_data_with_gt_shape_blobs() -> None:
     spec = DatasetSpec(
         n_features=8, centers=5, random_state=0, vmf_switch_dim=16, cluster_std=1.0
@@ -139,8 +158,9 @@ def test_project_2d_deterministic_under_seed() -> None:
     assert np.array_equal(p_a, p_b)
 
 
-def test_run_one_with_labels_returns_bundle() -> None:
+def test_run_one_with_labels_returns_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
     recipe = _make_recipe(n_runs=2)
+    _patch_engine(monkeypatch, recipe)
     result, bundle = run_one_with_labels(recipe, size=64, dims=2, capture_labels=True)
     assert bundle is not None
     assert isinstance(bundle, LabelsBundle)
@@ -157,10 +177,13 @@ def test_run_one_with_labels_returns_bundle() -> None:
     assert result.ari == pytest.approx(1.0)
 
 
-def test_run_one_with_labels_ari_matches_run_result() -> None:
+def test_run_one_with_labels_ari_matches_run_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The captured @c ours/@c theirs labels must yield the same ARI as
     @c RunResult.ari -- downstream tooling relies on that equality."""
     recipe = _make_recipe(ours=_stub_ours_differs, theirs=_stub_theirs, n_runs=2)
+    _patch_engine(monkeypatch, recipe)
     result, bundle = run_one_with_labels(recipe, size=120, dims=2, capture_labels=True)
     assert bundle is not None
     assert bundle.theirs_labels is not None
@@ -168,10 +191,13 @@ def test_run_one_with_labels_ari_matches_run_result() -> None:
     assert captured_ari == pytest.approx(result.ari, abs=1e-12)
 
 
-def test_run_one_with_labels_ours_only_returns_theirs_none() -> None:
+def test_run_one_with_labels_ours_only_returns_theirs_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """@c --ours-only mode must capture gt + ours + projection but leave
     @c theirs_labels as @c None."""
     recipe = _make_recipe()
+    _patch_engine(monkeypatch, recipe)
     result, bundle = run_one_with_labels(
         recipe, size=48, dims=2, ours_only=True, capture_labels=True
     )
@@ -184,23 +210,31 @@ def test_run_one_with_labels_ours_only_returns_theirs_none() -> None:
     assert result.ari == pytest.approx(1.0)
 
 
-def test_run_one_with_labels_returns_none_bundle_when_disabled() -> None:
+def test_run_one_with_labels_returns_none_bundle_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     recipe = _make_recipe()
+    _patch_engine(monkeypatch, recipe)
     result, bundle = run_one_with_labels(recipe, size=32, dims=2, capture_labels=False)
     assert bundle is None
     assert result.size == 32
 
 
-def test_run_one_preserves_external_signature() -> None:
+def test_run_one_preserves_external_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """@c run_one must still accept @c (recipe, size, dims, params, ours_only)
     so existing callers (e.g. @c test_cli_smoke._stub_run_one) keep working."""
     recipe = _make_recipe()
+    _patch_engine(monkeypatch, recipe)
     result = run_one(recipe, size=32, dims=2, params={"n_jobs": 1}, ours_only=False)
     assert result.size == 32
     assert result.dims == 2
 
 
-def test_run_one_with_labels_high_dim_projection_shape() -> None:
+def test_run_one_with_labels_high_dim_projection_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """At @c dims >= 16, the projection uses @c TruncatedSVD and still returns
     @c float32[n, 2]."""
     spec = DatasetSpec(
@@ -221,6 +255,7 @@ def test_run_one_with_labels_high_dim_projection_shape() -> None:
         ari_threshold=0.0,
         n_runs=1,
     )
+    _patch_engine(monkeypatch, recipe)
     _, bundle = run_one_with_labels(recipe, size=96, dims=32, capture_labels=True)
     assert bundle is not None
     assert bundle.projection_2d.shape == (96, 2)
