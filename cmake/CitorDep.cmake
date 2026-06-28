@@ -4,5 +4,5 @@
 cpmaddpackage(
     NAME citor
     GITHUB_REPOSITORY Lallapallooza/citor
-    GIT_TAG v0.5.0
+    GIT_TAG v0.6.0
 )
