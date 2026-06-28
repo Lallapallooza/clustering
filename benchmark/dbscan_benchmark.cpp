@@ -125,8 +125,8 @@ float pinnedEpsFor(std::size_t n, std::size_t d) {
   return 7.6F;
 }
 
-// Full @c DBSCAN::run end-to-end: index construction, adjacency sweep, core marking and BFS
-// expansion. Shape arguments are @c (n, d, n_jobs) so the matrix covers the KDTree-path cells
+// Full @c DBSCAN::run end-to-end: index construction, adjacency sweep, core marking and cluster
+// labelling. Shape arguments are @c (n, d, n_jobs) so the matrix covers the KDTree-path cells
 // pybench exercises (@c d < 16); higher-d cells route through @c BruteForcePairwise, which is
 // out of this fixture's scope.
 void BM_DBSCANRun(benchmark::State &state) {
@@ -151,8 +151,8 @@ void BM_DBSCANRun(benchmark::State &state) {
 }
 
 // Adjacency-sweep only: isolates the range-index's radius query so regressions in the tree
-// walk / leaf brute force surface without BFS + core-marking noise. Also reports the adjacency
-// degree distribution so callers can see how much raw distance work the sweep did.
+// walk / leaf brute force surface without the core-marking or labelling work. Also reports
+// the adjacency degree distribution so callers can see how much raw distance work the sweep did.
 template <class Index> void BM_RangeQuery(benchmark::State &state) {
   const auto n = static_cast<std::size_t>(state.range(0));
   const auto d = static_cast<std::size_t>(state.range(1));

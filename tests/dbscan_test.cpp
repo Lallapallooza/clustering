@@ -84,6 +84,44 @@ TEST(DBSCAN, MarksIsolatedPointsAsNoise) {
   EXPECT_EQ(dbscan.labels().flatIndex(5), DBSCAN<float>::NOISY);
 }
 
+// A border point reachable from two separate clusters must land in the lower of the two cluster
+// ids; the tie-break is deterministic so both adjacency producers agree on the partition, which
+// keeps the result ARI-stable.
+TEST(DBSCAN, BorderPointTakesLowestAdjacentClusterId) {
+  // Cluster 0 cores at x in {-0.6,-0.4,-0.2,0.0}, cluster 1 cores at {1.8,2.0,2.2,2.4}, both dense
+  // enough that every member has degree 4 at eps=1.0. The border at x=0.9 sits within eps of one
+  // core in each cluster (x=0.0 and x=1.8) but only reaches three points total, so it is non-core.
+  // The two clusters' nearest cores are 1.8 apart, beyond eps, so they never merge.
+  NDArray<float, 2> points({9, 2});
+  const std::array<float, 9> xs{-0.6f, -0.4f, -0.2f, 0.0f, 1.8f, 2.0f, 2.2f, 2.4f, 0.9f};
+  for (std::size_t i = 0; i < xs.size(); ++i) {
+    points[i][0] = xs[i];
+    points[i][1] = 0.0f;
+  }
+
+  {
+    DBSCAN<float, KDTree<float, KDTreeDistanceType::kEucledian>> viaTree(1.0f, 4, 1);
+    viaTree.run(points);
+    ASSERT_EQ(viaTree.nClusters(), 2u);
+    const auto cluster0 = viaTree.labels().flatIndex(0);
+    const auto cluster1 = viaTree.labels().flatIndex(4);
+    EXPECT_EQ(cluster0, 0);
+    EXPECT_EQ(cluster1, 1);
+    for (std::size_t i = 0; i < 4; ++i) {
+      EXPECT_EQ(viaTree.labels().flatIndex(i), cluster0);
+      EXPECT_EQ(viaTree.labels().flatIndex(i + 4), cluster1);
+    }
+    EXPECT_EQ(viaTree.labels().flatIndex(8), cluster0) << "border must take the lower cluster id";
+  }
+  {
+    DBSCAN<float, BruteForcePairwise<float>> viaBrute(1.0f, 4, 1);
+    viaBrute.run(points);
+    ASSERT_EQ(viaBrute.nClusters(), 2u);
+    EXPECT_EQ(viaBrute.labels().flatIndex(8), viaBrute.labels().flatIndex(0))
+        << "brute-force border must take the lower cluster id too";
+  }
+}
+
 // Both backends must produce the same partition across the KDTree/brute-force dimension
 // boundary so callers who pin either explicitly see identical clustering behaviour.
 TEST(DBSCAN, ExplicitBackendsAgreeAcrossDims) {

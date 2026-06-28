@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -8,6 +7,7 @@
 #include "clustering/always_assert.h"
 #include "clustering/index/auto_range_index.h"
 #include "clustering/index/range_query.h"
+#include "clustering/math/dsu.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
 
@@ -36,7 +36,8 @@ template <class T, class QueryModel = index::AutoRangeIndex<T>>
   requires index::RangeIndex<QueryModel, T>
 class DBSCAN {
 public:
-  static constexpr std::int32_t UNCLASSIFIED = -2; ///< Sentinel for a point not yet visited.
+  static constexpr std::int32_t UNCLASSIFIED = -2; ///< Sentinel for a component without a
+                                                   ///< cluster id yet; never an output label.
   static constexpr std::int32_t NOISY = -1; ///< Label assigned to points that no cluster claimed.
 
   /**
@@ -65,9 +66,10 @@ public:
   /**
    * @brief Fit to @p X.
    *
-   * Queries the backend for the full eps-neighbourhood adjacency, derives core-point flags
-   * from per-row degrees, then expands clusters sequentially via graph BFS over the adjacency.
-   * Remaining unclassified points are marked @ref NOISY.
+   * Queries the backend for the full eps-neighbourhood adjacency, derives core-point flags from
+   * per-row degrees, unions core-core edges into connected components, then labels every point:
+   * cores carry their component id, border points take the lowest cluster id among their adjacent
+   * cores, and the rest are @ref NOISY.
    *
    * @param X Contiguous n x d dataset. The caller retains ownership; @p X must outlive this
    *          @c run call.
@@ -97,22 +99,49 @@ public:
     QueryModel queryModel(X);
     const auto adj = queryModel.query(m_eps, pool);
 
+    // Core flag per point: degree (adjacency size, counts self) at or above minPts. Each entry is
+    // an independent size read with a disjoint write.
     std::vector<std::uint8_t> isCore(n, 0);
     for (std::size_t i = 0; i < n; ++i) {
-      isCore[i] = (adj[i].size() >= m_minPts) ? 1U : 0U;
+      isCore[i] = (adj[i].size() >= m_minPts) ? std::uint8_t{1} : std::uint8_t{0};
     }
 
-    std::int32_t *labelPtr = m_labels.data();
-    std::fill(labelPtr, labelPtr + n, UNCLASSIFIED);
-
+    // Connected components over core-core edges: density-reachability is the transitive closure of
+    // "core within eps of core", which a disjoint-set union builds directly. The union is the
+    // intrinsically serial spine of run() once the range queries fan out.
+    UnionFind<std::uint32_t> components(n);
     for (std::size_t i = 0; i < n; ++i) {
-      if (labelPtr[i] == UNCLASSIFIED && isCore[i] != 0) {
-        expandCluster(i, isCore, adj, labelPtr);
-        ++m_clusterId;
+      if (isCore[i] == 0) {
+        continue;
+      }
+      const auto iu = static_cast<std::uint32_t>(i);
+      for (const std::int32_t neighbor : adj[i]) {
+        const auto j = static_cast<std::size_t>(neighbor);
+        if (j > i && isCore[j] != 0) {
+          components.unite(iu, static_cast<std::uint32_t>(j));
+        }
       }
     }
 
-    std::replace(labelPtr, labelPtr + n, UNCLASSIFIED, NOISY);
+    // Dense cluster ids in first-core-index order so the lowest-index core of each component names
+    // its cluster. Writing each core's id into the label buffer now freezes it so the border pass
+    // reads it without touching the mutating @ref UnionFind::find.
+    std::int32_t *labels = m_labels.data();
+    std::vector<std::int32_t> rootCluster(n, UNCLASSIFIED);
+    for (std::size_t i = 0; i < n; ++i) {
+      if (isCore[i] == 0) {
+        continue;
+      }
+      const auto root = components.find(static_cast<std::uint32_t>(i));
+      std::int32_t &slot = rootCluster[root];
+      if (slot == UNCLASSIFIED) {
+        slot = static_cast<std::int32_t>(m_clusterId);
+        ++m_clusterId;
+      }
+      labels[i] = slot;
+    }
+
+    assignBorderAndNoise(adj, isCore);
   }
 
   /// Per-point cluster labels after @ref run; @ref NOISY marks outliers.
@@ -135,44 +164,36 @@ private:
   }
 
   /**
-   * @brief Expands a cluster from @p seed via BFS over the pre-computed adjacency.
+   * @brief Label every non-core point: borders take the lowest cluster id among adjacent cores,
+   *        the rest are @ref NOISY.
    *
-   * Per DBSCAN's density-reachability rule, border points are labelled into the cluster but do
-   * not seed further expansion -- only core points contribute their neighbours to the frontier.
+   * Core labels were frozen into the buffer by the dense-id pass, so this pass reads them and the
+   * immutable @p adj / @p isCore. A border within eps of cores from several clusters takes the
+   * lowest cluster id, a deterministic tie-break so both adjacency backends agree on the partition.
    *
-   * @param seed    Index of the core point that starts the cluster.
-   * @param isCore  Per-point core-point flag derived from the adjacency row sizes.
-   * @param adj     Borrowed eps-adjacency list indexed by point row.
-   * @param labels  Pointer to the dense label buffer; aliased from `m_labels.data()`.
+   * @param adj    Eps-adjacency list indexed by point row.
+   * @param isCore Per-point core flag.
    */
-  void expandCluster(std::size_t seed, const std::vector<std::uint8_t> &isCore,
-                     const std::vector<std::vector<std::int32_t>> &adj, std::int32_t *labels) {
-    const auto clusterLabel = static_cast<std::int32_t>(m_clusterId);
-    labels[seed] = clusterLabel;
-    std::vector<std::size_t> frontier;
-    frontier.reserve(adj[seed].size());
-    for (const std::int32_t n : adj[seed]) {
-      frontier.push_back(static_cast<std::size_t>(n));
-    }
-
-    while (!frontier.empty()) {
-      std::vector<std::size_t> next;
-      next.reserve(frontier.size());
-      for (const std::size_t point : frontier) {
-        if (labels[point] != UNCLASSIFIED) {
+  void assignBorderAndNoise(const std::vector<std::vector<std::int32_t>> &adj,
+                            const std::vector<std::uint8_t> &isCore) {
+    const std::size_t n = adj.size();
+    std::int32_t *labels = m_labels.data();
+    for (std::size_t p = 0; p < n; ++p) {
+      if (isCore[p] != 0) {
+        continue;
+      }
+      std::int32_t best = NOISY;
+      for (const std::int32_t neighbor : adj[p]) {
+        const auto q = static_cast<std::size_t>(neighbor);
+        if (isCore[q] == 0) {
           continue;
         }
-        labels[point] = clusterLabel;
-        if (isCore[point] == 0) {
-          continue;
-        }
-        for (const std::int32_t n : adj[point]) {
-          if (labels[static_cast<std::size_t>(n)] == UNCLASSIFIED) {
-            next.push_back(static_cast<std::size_t>(n));
-          }
+        const std::int32_t cluster = labels[q];
+        if (best == NOISY || cluster < best) {
+          best = cluster;
         }
       }
-      frontier.swap(next);
+      labels[p] = best;
     }
   }
 
@@ -181,8 +202,8 @@ private:
   std::size_t m_nJobs;  ///< Worker count clamped at construction via @ref math::clampedJobCount.
   std::size_t m_clusterId = 0; ///< Next cluster id to assign; also the final cluster count.
   /// Dense label buffer. Reallocated inside @ref run only when @c n differs from the previous
-  /// call's size; the `[0, n)` range is overwritten each run with @ref UNCLASSIFIED, then
-  /// filled with cluster ids (or @ref NOISY) by the expansion sweep.
+  /// call's size; every entry in `[0, n)` is rewritten each run with a cluster id (cores and
+  /// claimed borders) or @ref NOISY, so no stale label survives across calls.
   NDArray<std::int32_t, 1> m_labels;
 };
 
