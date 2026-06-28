@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "clustering/math/detail/coherence_cache.h"
+
 namespace clustering::math {
 
 /**
@@ -431,7 +433,15 @@ inline OwnedPool &sharedPool(std::size_t nJobs) {
   const std::scoped_lock guard{registryMutex};
   auto &slot = registry[effective];
   if (!slot) {
+    // Seed citor's coherence-probe cache from disk before constructing the pool
+    // so a short-lived or single-fit process skips the live inter-core
+    // calibration. On a cold cache the ctor runs the probe; persist the fresh
+    // result so the next process replays it.
+    const bool seeded = detail::importPersistedCoherenceProbe(effective);
     slot = std::make_unique<OwnedPool>(effective);
+    if (!seeded) {
+      detail::exportPersistedCoherenceProbe(*slot, effective);
+    }
   }
   return *slot;
 }
