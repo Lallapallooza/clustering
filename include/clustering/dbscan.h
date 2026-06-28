@@ -107,21 +107,8 @@ public:
     }
 
     // Connected components over core-core edges: density-reachability is the transitive closure of
-    // "core within eps of core", which a disjoint-set union builds directly. The union is the
-    // intrinsically serial spine of run() once the range queries fan out.
-    UnionFind<std::uint32_t> components(n);
-    for (std::size_t i = 0; i < n; ++i) {
-      if (isCore[i] == 0) {
-        continue;
-      }
-      const auto iu = static_cast<std::uint32_t>(i);
-      for (const std::int32_t neighbor : adj[i]) {
-        const auto j = static_cast<std::size_t>(neighbor);
-        if (j > i && isCore[j] != 0) {
-          components.unite(iu, static_cast<std::uint32_t>(j));
-        }
-      }
-    }
+    // "core within eps of core", which a disjoint-set union builds directly.
+    UnionFind<std::uint32_t> components = buildComponents(adj, isCore, pool);
 
     // Dense cluster ids in first-core-index order so the lowest-index core of each component names
     // its cluster. Writing each core's id into the label buffer now freezes it so the border pass
@@ -161,6 +148,74 @@ private:
     if (m_labels.dim(0) != n) {
       m_labels = NDArray<std::int32_t, 1>({n});
     }
+  }
+
+  /**
+   * @brief Connected components over the core-core eps-graph as a disjoint-set union.
+   *
+   * Once the range queries fan out, the component build is the dominant serial cost at low
+   * dimension, where dense neighbourhoods make the core-core edge set far larger than @p n. Each
+   * worker folds a disjoint slice of source rows into its own union-find with no shared writes,
+   * then the per-worker sets merge serially. Connectivity is order independent, so the partition
+   * is identical to a single-threaded pass. With no pool attached, or a single worker, the merge
+   * overhead buys nothing so the whole graph unites in one serial pass.
+   *
+   * @param adj    Eps-adjacency list indexed by point row.
+   * @param isCore Per-point core flag.
+   * @param pool   Worker pool borrowed by @ref run, or an unset handle for serial execution.
+   * @return Disjoint-set union whose roots name the density-reachable components.
+   */
+  static UnionFind<std::uint32_t> buildComponents(const std::vector<std::vector<std::int32_t>> &adj,
+                                                  const std::vector<std::uint8_t> &isCore,
+                                                  math::Pool pool) {
+    const std::size_t n = adj.size();
+    const auto uniteRange = [&](UnionFind<std::uint32_t> &dsu, std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i) {
+        if (isCore[i] == 0) {
+          continue;
+        }
+        const auto iu = static_cast<std::uint32_t>(i);
+        for (const std::int32_t neighbor : adj[i]) {
+          const auto j = static_cast<std::size_t>(neighbor);
+          if (j > i && isCore[j] != 0) {
+            dsu.unite(iu, static_cast<std::uint32_t>(j));
+          }
+        }
+      }
+    };
+
+    const std::size_t workers = pool.workerCount();
+    if (pool.pool == nullptr || workers <= 1) {
+      UnionFind<std::uint32_t> components(n);
+      uniteRange(components, 0, n);
+      return components;
+    }
+
+    // One union-find per worker, indexed by the worker's stable id inside the task body so no two
+    // threads ever touch the same set. More blocks than workers lets dynamic stealing balance the
+    // skewed per-row degree.
+    std::vector<UnionFind<std::uint32_t>> locals;
+    locals.reserve(workers);
+    for (std::size_t w = 0; w < workers; ++w) {
+      locals.emplace_back(n);
+    }
+    pool.parallelForBlocks(std::size_t{0}, n, workers * 4, [&](std::size_t lo, std::size_t hi) {
+      uniteRange(locals[math::Pool::workerIndex()], lo, hi);
+    });
+
+    // Fold every worker's connectivity into one set: uniting each row with its per-worker root
+    // transfers that worker's unions without revisiting the adjacency.
+    UnionFind<std::uint32_t> components(n);
+    for (std::size_t w = 0; w < workers; ++w) {
+      UnionFind<std::uint32_t> &local = locals[w];
+      for (std::uint32_t x = 0; x < static_cast<std::uint32_t>(n); ++x) {
+        const std::uint32_t root = local.find(x);
+        if (root != x) {
+          components.unite(x, root);
+        }
+      }
+    }
+    return components;
   }
 
   /**
