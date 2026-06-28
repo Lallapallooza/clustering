@@ -113,6 +113,26 @@ std::int32_t computeNodeSingleComp(const KDTreeNode *node, std::span<const std::
 }
 
 /**
+ * @brief Strict `(weight, u, v)` order on candidate edges.
+ *
+ * The per-component reduction folds candidates through this order so the surviving edge does not
+ * depend on the order candidates arrive in. The fan-out work-steals query points across workers,
+ * so an arrival-order tie-break would let the parallel MST diverge from the serial one on
+ * equal-weight edges. Matches the order `BoruvkaMstBackend` sorts component edges by.
+ */
+template <class T>
+inline bool edgeLess(T weightA, std::int32_t uA, std::int32_t vA, T weightB, std::int32_t uB,
+                     std::int32_t vB) noexcept {
+  if (weightA != weightB) {
+    return weightA < weightB;
+  }
+  if (uA != uB) {
+    return uA < uB;
+  }
+  return vA < vB;
+}
+
+/**
  * @brief MRD weight lift + per-component best update, given a precomputed squared distance.
  *
  * Split from the distance compute so leaf walks can batch the @c d-wide squared-distance
@@ -136,7 +156,7 @@ inline void considerPairWithSq(TraversalCtx<T, Tree> &ctx, std::int32_t origI, s
     mrd = coreJ;
   }
   T &bestForComp = ctx.bestW[compI];
-  if (mrd < bestForComp) {
+  if (edgeLess<T>(mrd, origI, origJ, bestForComp, ctx.bestU[compI], ctx.bestV[compI])) {
     bestForComp = mrd;
     ctx.bestU[compI] = origI;
     ctx.bestV[compI] = origJ;
@@ -384,7 +404,8 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
       if (coreJ > w) {
         w = coreJ;
       }
-      if (w < seedW[compISize]) {
+      if (internal::edgeLess<T>(w, static_cast<std::int32_t>(i), j, seedW[compISize],
+                                seedU[compISize], seedV[compISize])) {
         seedW[compISize] = w;
         seedU[compISize] = static_cast<std::int32_t>(i);
         seedV[compISize] = j;
@@ -428,29 +449,31 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
     }
   };
 
-  // Outer fan-out over original points in reordered order. Chunking by slot lets each worker
-  // pick up a dense `(chunk * d)` region of the reordered buffer, keeping per-worker memory
-  // access largely contiguous in the point cloud. @ref math::Pool::shouldParallelize decides
-  // whether the fan-out amortises task dispatch given the per-slot arithmetic cost.
-  //
-  // The per-slot cost is roughly O(log(n) * d + k * d) where k is the count of surviving
-  // out-of-component leaf candidates -- concretely ~16 * d comparisons per leaf hit plus a
-  // handful of AABB gaps. The parallelism gate uses @c 64 as the per-slot minimum chunk so
-  // very small inputs stay serial.
+  // Outer fan-out over query points in reordered slot order. The per-point cost is wildly
+  // uneven: a query whose component bound already sits at the core-distance floor, or whose
+  // subtree is single-component, returns almost immediately, while a query in a mixed region
+  // descends much of the tree. A static one-block-per-worker split therefore strands the fast
+  // workers once their block drains. Fan out into more blocks than workers under dynamic
+  // balancing so an idle worker steals the next block; each block reduces into its running
+  // worker's slot, picked by `Pool::workerIndex`, so the slot arrays stay sized by participant
+  // count regardless of how many blocks a worker ends up running. The gate keeps very small
+  // inputs serial, where dispatch would not amortise.
   (void)allSingletonComponents;
   const bool useParallel = (nWorkers > std::size_t{1}) && (n >= (nWorkers * std::size_t{64}));
   if (useParallel) {
-    pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
-        std::size_t{0}, n, nWorkers,
-        [&](std::size_t lo, std::size_t hi, std::size_t slot) { runChunk(lo, hi, slot); });
+    pool.parallelForBlocks<citor::HintsDefaults>(
+        std::size_t{0}, n, /*numBlocks=*/0,
+        [&](std::size_t lo, std::size_t hi) { runChunk(lo, hi, math::Pool::workerIndex()); });
   } else {
     runChunk(0, n, /*workerSlot=*/0);
   }
 
   // Merge per-worker bests into the output. @p bestOut starts at `{+inf, -1, -1}`; the merge
-  // compares each worker's candidate against the running best and takes the lower-weight one.
-  // Ties are resolved by first-writer (stable across worker indices) so the output is
-  // deterministic at a fixed pool size.
+  // folds each worker's candidate through the `(weight, u, v)` order, so for a fixed set of
+  // per-worker candidates the result is independent of worker index and fold order. The set a
+  // worker accumulates still depends on the steal partition: the per-query bound prunes discard
+  // an equal-weight candidate once the bound is reached, so the surviving edge can differ on ties
+  // across worker counts. The total MST weight stays invariant, which is what the clustering uses.
   for (std::size_t c = 0; c < n; ++c) {
     bestOut[c] = ComponentBestEdge<T>{std::numeric_limits<T>::max(), -1, -1};
   }
@@ -459,7 +482,8 @@ void nearestOutComponent(const Tree &tree, std::span<const std::int32_t> compone
     const std::int32_t *wU = workerU[w].data();
     const std::int32_t *wV = workerV[w].data();
     for (std::size_t c = 0; c < n; ++c) {
-      if (wW[c] < bestOut[c].weight) {
+      if (internal::edgeLess<T>(wW[c], wU[c], wV[c], bestOut[c].weight, bestOut[c].u,
+                                bestOut[c].v)) {
         bestOut[c].weight = wW[c];
         bestOut[c].u = wU[c];
         bestOut[c].v = wV[c];
