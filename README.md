@@ -48,7 +48,7 @@ target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
 Install a specific tag:
 
 ```bash
-uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git@v0.8.0"
+uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git@v0.9.0"
 ```
 
 Or the latest `main`:
