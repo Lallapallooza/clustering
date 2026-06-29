@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <span>
 #include <type_traits>
 #include <vector>
 
@@ -389,6 +390,12 @@ public:
     (void)pool;
 
     const std::size_t nLocalTrials = detail::greedyKmppLocalTrials(k);
+    // Per-worker score slab padded to a cache line so adjacent workers do not false-share it
+    // while accumulating. An unpadded slab packs several workers onto one line and serialises
+    // the sweep on cross-die coherence traffic.
+    constexpr std::size_t kScoreSlabFloats = 16; // 64 bytes / sizeof(float)
+    const std::size_t scoreSlab =
+        ((nLocalTrials + kScoreSlabFloats - 1) / kScoreSlabFloats) * kScoreSlabFloats;
     ensureShape(n, d, nLocalTrials, pool.workerCount());
 
     math::pcg64 rng;
@@ -429,7 +436,7 @@ public:
         }
       };
       if (pool.shouldParallelize(n, 1024, 2)) {
-        pool.parallelForBlocks(std::size_t{0}, n, pool.workerCount(), initRange);
+        pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n), initRange);
       } else {
         initRange(0, n);
       }
@@ -442,44 +449,13 @@ public:
     std::vector<std::size_t> candidates(nLocalTrials, 0);
     std::vector<T> scores(nLocalTrials, T{0});
 
-    // The cum-dist build is a Blelloch-style parallel exclusive-prefix scan: each chunk
-    // computes its block-local inclusive scan into @c cumDistSq, returns its block total,
-    // then the second pass adds the cross-chunk exclusive prefix to make the array global.
-    // Forwarded to @c citor::parallelScan via @c math::Pool::parallelScan; at n=250k d=2 the
-    // previous pure-serial build was a latency-bound hot path (a dependent
-    // fadd over 250k rows). At small @p n the per-pass dispatch dominates the chain length;
-    // gate on `n / workers` >= ~1k rows so the parallel path only activates when each
-    // worker's slice amortizes the producer-side reduce + barrier cost.
-    const bool willParallelizeCum = pool.shouldParallelize(n, 1024, 2);
+    // Cumulative weight array driving inverse-CDF candidate sampling. The single-pass
+    // decoupled-lookback inclusiveScan work-steals and weights its lookback chains per CCD, so a
+    // slower cache cluster does not gate the scan the way a block-per-worker Blelloch pass would.
     for (std::size_t c = 1; c < k; ++c) {
-      T total;
-      if (willParallelizeCum) {
-        // Canonical Blelloch body: pass 1 invokes with `initial = identity` and the body's
-        // writes lay down a block-local prefix scan + a 0-offset (so cumDistSq holds the
-        // block-local scan when pass 1 returns). Pass 2 invokes with `initial = exclusive
-        // prefix from earlier chunks` and the same body re-walks the chunk, this time
-        // writing the global scan. Both passes return the chunk total; the second pass's
-        // return is discarded by citor.
-        total = pool.template parallelScan<citor::HintsDefaults>(
-            n, T{0},
-            [&](std::size_t /*chunkId*/, std::size_t lo, std::size_t hi, T initial,
-                T * /*out*/) noexcept -> T {
-              T s = T{0};
-              for (std::size_t i = lo; i < hi; ++i) {
-                s += minSq[i];
-                cumDistSq[i] = s + initial;
-              }
-              return s;
-            },
-            [](T a, T b) noexcept { return a + b; });
-      } else {
-        T runningSum = T{0};
-        for (std::size_t i = 0; i < n; ++i) {
-          runningSum += minSq[i];
-          cumDistSq[i] = runningSum;
-        }
-        total = runningSum;
-      }
+      const T total = pool.template inclusiveScan<citor::HintsDefaults>(
+          std::span<const T>(minSq, n), std::span<T>(cumDistSq, n), T{0},
+          [](T a, T b) noexcept { return a + b; });
 
       // Degenerate guard: when every chosen centroid coincides with every remaining point the
       // total collapses to ~0; pick the next centroid uniformly so the routine cannot stall.
@@ -496,7 +472,7 @@ public:
           }
         };
         if (pool.shouldParallelize(n, 1024, 2)) {
-          pool.parallelForBlocks(std::size_t{0}, n, pool.workerCount(), degenRange);
+          pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n), degenRange);
         } else {
           degenRange(0, n);
         }
@@ -553,7 +529,7 @@ public:
           const bool willParallelizeT = pool.shouldParallelize(n, 1024, 2);
           const std::size_t workersT = willParallelizeT ? pool.workerCount() : std::size_t{1};
           T *localScoresT = m_localScores.data();
-          for (std::size_t e = 0; e < workersT * nLocalTrials; ++e) {
+          for (std::size_t e = 0; e < workersT * scoreSlab; ++e) {
             localScoresT[e] = T{0};
           }
 
@@ -577,10 +553,10 @@ public:
               }
             };
             if (willParallelizeT) {
-              pool.parallelForBlocks(std::size_t{0}, n, workersT,
+              pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
-                                       rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
+                                       rangeFn(lo, hi, localScoresT + (w * scoreSlab));
                                      });
             } else {
               rangeFn(0, n, localScoresT);
@@ -601,10 +577,10 @@ public:
               }
             };
             if (willParallelizeT) {
-              pool.parallelForBlocks(std::size_t{0}, n, workersT,
+              pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
-                                       rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
+                                       rangeFn(lo, hi, localScoresT + (w * scoreSlab));
                                      });
             } else {
               rangeFn(0, n, localScoresT);
@@ -627,17 +603,17 @@ public:
               }
             };
             if (willParallelizeT) {
-              pool.parallelForBlocks(std::size_t{0}, n, workersT,
+              pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
-                                       rangeFn(lo, hi, localScoresT + (w * nLocalTrials));
+                                       rangeFn(lo, hi, localScoresT + (w * scoreSlab));
                                      });
             } else {
               rangeFn(0, n, localScoresT);
             }
           }
           for (std::size_t w = 0; w < workersT; ++w) {
-            const T *row = localScoresT + (w * nLocalTrials);
+            const T *row = localScoresT + (w * scoreSlab);
             for (std::size_t t = 0; t < nLocalTrials; ++t) {
               scores[t] += row[t];
             }
@@ -750,16 +726,16 @@ public:
               if (willParallelize) {
                 const std::size_t workers = pool.workerCount();
                 T *localScores = m_localScores.data();
-                for (std::size_t e = 0; e < workers * nLocalTrials; ++e) {
+                for (std::size_t e = 0; e < workers * scoreSlab; ++e) {
                   localScores[e] = T{0};
                 }
-                pool.parallelForBlocks(std::size_t{0}, n, workers,
+                pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
                                        [&](std::size_t lo, std::size_t hi) {
                                          const std::size_t w = math::Pool::workerIndex();
-                                         soaRange(lo, hi, localScores + (w * nLocalTrials));
+                                         soaRange(lo, hi, localScores + (w * scoreSlab));
                                        });
                 for (std::size_t w = 0; w < workers; ++w) {
-                  const T *row = localScores + (w * nLocalTrials);
+                  const T *row = localScores + (w * scoreSlab);
                   for (std::size_t t = 0; t < nLocalTrials; ++t) {
                     scores[t] += row[t];
                   }
@@ -790,16 +766,16 @@ public:
             if (willParallelize) {
               const std::size_t workers = pool.workerCount();
               T *localScores = m_localScores.data();
-              for (std::size_t e = 0; e < workers * nLocalTrials; ++e) {
+              for (std::size_t e = 0; e < workers * scoreSlab; ++e) {
                 localScores[e] = T{0};
               }
-              pool.parallelForBlocks(std::size_t{0}, n, workers,
+              pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
-                                       scanRange(lo, hi, localScores + (w * nLocalTrials));
+                                       scanRange(lo, hi, localScores + (w * scoreSlab));
                                      });
               for (std::size_t w = 0; w < workers; ++w) {
-                const T *row = localScores + (w * nLocalTrials);
+                const T *row = localScores + (w * scoreSlab);
                 for (std::size_t t = 0; t < nLocalTrials; ++t) {
                   scores[t] += row[t];
                 }
@@ -838,7 +814,7 @@ public:
         }
       };
       if (pool.shouldParallelize(n, 1024, 2)) {
-        pool.parallelForBlocks(std::size_t{0}, n, pool.workerCount(), winnerRange);
+        pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n), winnerRange);
       } else {
         winnerRange(0, n);
       }
@@ -901,7 +877,8 @@ private:
     if (m_gemmBpArena.dim(0) != bpSize) {
       m_gemmBpArena = NDArray<T, 1>({bpSize});
     }
-    const std::size_t lsLen = workersClamped * (L == 0 ? std::size_t{1} : L);
+    const std::size_t scoreSlab = ((lSafe + 15U) / 16U) * 16U; // cache-line-padded per-worker slab
+    const std::size_t lsLen = workersClamped * scoreSlab;
     if (m_localScores.dim(0) != lsLen) {
       m_localScores = NDArray<T, 1>({lsLen});
     }

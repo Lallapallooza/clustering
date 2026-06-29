@@ -3,10 +3,12 @@
 #include <citor/hints.h>
 #include <citor/thread_pool.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -169,6 +171,32 @@ struct Pool {
       return false;
     }
     return (totalOps / workerCount()) >= minOpsPerWorker;
+  }
+
+  /**
+   * @brief Block count for a fan-out over @p n rows that lets work-stealing balance heterogeneous
+   *        cores.
+   *
+   * `parallelForBlocks` with exactly @ref workerCount blocks hands each worker one block, so a
+   * slower core (a different-clocked or different-cache CCD) gates the join while faster cores
+   * idle. Oversubscribing the block count gives @c DynamicChunked the slack to let faster cores
+   * claim more blocks. The count is capped so each block keeps at least @p minRowsPerBlock rows,
+   * which bounds the per-block dispatch overhead, and never drops below @ref workerCount.
+   *
+   * @param n               Row count being partitioned.
+   * @param minRowsPerBlock Lower bound on rows per block; caps the oversubscription at small @p n.
+   * @return A block count in `[workerCount, workerCount * 8]`, clamped down for small @p n.
+   */
+  [[nodiscard]] std::size_t stealBlocks(std::size_t n,
+                                        std::size_t minRowsPerBlock = 256) const noexcept {
+    const std::size_t workers = workerCount();
+    if (workers <= 1 || n == 0) {
+      return workers;
+    }
+    const std::size_t byRows =
+        (minRowsPerBlock == 0) ? n : std::max<std::size_t>(1, n / minRowsPerBlock);
+    const std::size_t blocks = std::min(workers * 8, byRows);
+    return std::max(blocks, workers);
   }
 
   /**
@@ -403,6 +431,36 @@ struct Pool {
     }
     return pool->template parallelScan<HintsT>(n, std::move(identity), std::move(body),
                                                std::move(prefix));
+  }
+
+  /**
+   * @brief Buffer-to-buffer inclusive prefix scan of @p in into @p out.
+   *
+   * Forwards to @c citor::ThreadPool::inclusiveScan, a single-pass decoupled-lookback scan with
+   * per-cluster lookback chains on multi-CCD parts: it both work-steals and weights its prefix
+   * chains by cluster, so a slower CCD does not gate the whole scan the way the block-per-worker
+   * Blelloch body does. Aliasing (`in.data() == out.data()`) is safe. A null pool runs the
+   * scan serially on the calling thread.
+   *
+   * @tparam HintsT  Hint type whose static-constexpr members drive compile-time policy.
+   * @param in       Input span.
+   * @param out      Output span; same length as @p in.
+   * @param identity Monoid identity for @p prefix.
+   * @param prefix   Associative binary combiner.
+   * @return Inclusive accumulator at the right edge of the scan.
+   */
+  template <class HintsT = citor::HintsDefaults, class T, class PrefixFn>
+  [[nodiscard]] T inclusiveScan(std::span<const T> in, std::span<T> out, T identity,
+                                PrefixFn prefix) {
+    if (pool == nullptr) {
+      T acc = identity;
+      for (std::size_t i = 0; i < in.size(); ++i) {
+        acc = prefix(acc, in[i]);
+        out[i] = acc;
+      }
+      return acc;
+    }
+    return pool->template inclusiveScan<HintsT>(in, out, std::move(identity), std::move(prefix));
   }
 
   template <class HintsT = citor::HintsDefaults, class Phase, class PrePhase>
