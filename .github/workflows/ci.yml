@@ -4,10 +4,195 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [clang-19, gcc-14]
+    name: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          if [[ "${{ matrix.compiler }}" == clang-* ]]; then
+            # Ubuntu 24.04's default repos cap at clang-18; pull clang-19 and
+            # clang-tidy-19 from apt.llvm.org so the build and the tidy gate
+            # run on the same compiler version.
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+              | sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" \
+              | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+            sudo apt-get update
+            sudo apt-get install -y clang-19 clang-tidy-19 lld-19 ninja-build
+            echo "CC=clang-19"   >> "$GITHUB_ENV"
+            echo "CXX=clang++-19" >> "$GITHUB_ENV"
+            # clang is the benchmark's supported toolchain and the only row
+            # that carries clang-tidy. Tooling.cmake auto-discovers
+            # clang-tidy-19 by name, so no PATH alias is needed.
+            echo "CLUSTERING_CMAKE_EXTRA=-DCLUSTERING_BUILD_BENCHMARK=ON -DCLUSTERING_ENABLE_CLANG_TIDY=ON" >> "$GITHUB_ENV"
+          else
+            sudo apt-get install -y gcc-14 g++-14 ninja-build
+            echo "CC=gcc-14"  >> "$GITHUB_ENV"
+            echo "CXX=g++-14"  >> "$GITHUB_ENV"
+            # gcc is a tests-only library-compat row: tidy needs clang, and the
+            # benchmark pulls third-party headers tuned for the clang build.
+            echo "CLUSTERING_CMAKE_EXTRA=-DCLUSTERING_BUILD_BENCHMARK=OFF -DCLUSTERING_ENABLE_CLANG_TIDY=OFF" >> "$GITHUB_ENV"
+          fi
+
+      - name: CPM source cache
+        uses: actions/cache@v4
+        with:
+          # Path must match the CPM_SOURCE_CACHE env in Configure; otherwise the
+          # cache action saves an empty home directory and CPM repopulates the
+          # workspace path on every run.
+          path: ${{ github.workspace }}/.cache/CPM
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake', 'cmake/CitorDep.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.compiler }}-ci
+          max-size: 500M
+
+      - name: Configure
+        env:
+          CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/CPM
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            $CLUSTERING_CMAKE_EXTRA
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j
+
+  asan-ubsan:
+    name: asan+ubsan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 ninja-build llvm-18
+
+      - name: CPM source cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/CPM
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake', 'cmake/CitorDep.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: asan-ubsan-ci
+          max-size: 500M
+
+      - name: Configure
+        env:
+          CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/CPM
+        # RelWithDebInfo keeps DWARF for sanitizer frames while leaving
+        # optimisation on. -fno-sanitize-recover=all makes every finding fail
+        # the test rather than printing and continuing.
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCLUSTERING_BUILD_BENCHMARK=OFF \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        env:
+          ASAN_OPTIONS: "halt_on_error=1:abort_on_error=0:detect_leaks=0"
+          UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
+        # Death tests fork and deliberately abort, which is fragile under the
+        # sanitizers, and the aligned-borrow death test relies on a debug
+        # assert the optimised build strips. They run unsanitised in the main
+        # matrix job, so exclude them here.
+        run: ctest --test-dir build --output-on-failure -j -E 'Death'
+
+  tsan:
+    name: tsan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 ninja-build llvm-18
+
+      - name: CPM source cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/CPM
+          key: cpm-${{ runner.os }}-${{ hashFiles('cmake/CPM.cmake', 'cmake/GTestDep.cmake', 'cmake/CitorDep.cmake') }}
+          restore-keys: |
+            cpm-${{ runner.os }}-
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: tsan-ci
+          max-size: 500M
+
+      - name: Configure
+        env:
+          CPM_SOURCE_CACHE: ${{ github.workspace }}/.cache/CPM
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCLUSTERING_BUILD_BENCHMARK=OFF \
+            -DCLUSTERING_BUILD_WITH_SANITIZER=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        env:
+          TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
+        # The whole suite runs clean under TSan and the concurrency stress test
+        # only registers in a sanitizer build, so run everything except the
+        # fork-and-abort death tests.
+        run: ctest --test-dir build --output-on-failure -j -E 'Death'
+
   format:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,18 +212,40 @@ jobs:
       - run: pip install pre-commit
       - run: pre-commit run --all-files --show-diff-on-failure
 
-  build:
+  version-sync:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchain
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check every version_files line carries the project version
+        # Nothing on push validates version_files, so a README or docs snippet
+        # pinned to an older tag slips through until the release bump catches it.
+        # Read the commitizen config directly and assert every version_files
+        # line that names a version names the project's.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang-18 clang-tidy-18 libstdc++-13-dev
-          sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-18 100
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-18 -DCLUSTERING_ENABLE_CLANG_TIDY=ON
-      - name: Build
-        run: cmake --build build
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+          python - <<'PY'
+          import re, sys, tomllib
+
+          cz = tomllib.load(open("pyproject.toml", "rb"))["tool"]["commitizen"]
+          version = cz["version"]
+          semver = re.compile(r"\d+\.\d+\.\d+")
+          drift = []
+          for entry in cz["version_files"]:
+              path, _, pattern = entry.partition(":")
+              with open(path, encoding="utf-8") as handle:
+                  for num, line in enumerate(handle, 1):
+                      # A version_files filter can match lines that hold no version
+                      # at all (a `version_scheme` key, a list opener); only a line
+                      # that carries an x.y.z token has to carry the project one.
+                      if pattern and re.search(pattern, line) \
+                              and semver.search(line) and version not in line:
+                          drift.append(f"{path}:{num}: {line.strip()}")
+          if drift:
+              print(f"version_files out of sync with project version {version}:")
+              print("\n".join(drift))
+              sys.exit(1)
+          print(f"all version_files agree at {version}")
+          PY
