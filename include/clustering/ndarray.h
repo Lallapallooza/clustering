@@ -138,8 +138,9 @@ template <class T, std::size_t N, Layout L = Layout::Contig> class NDArray {
   // Widened from {float, double} so integer widths (signed/unsigned) are permitted as label /
   // index / count storage. bool stays excluded: std::vector<bool> is a specialization without
   // contiguous T-addressable storage, which would silently break data(), alignedData, and the
-  // AlignedAllocator<T, 32> invariant. Distance / reduction / GEMM primitives carry their own
-  // float/double gates so integer NDArrays cannot reach numeric math without a compile error.
+  // AlignedAllocator cache-line alignment invariant. Distance / reduction / GEMM primitives
+  // carry their own float/double gates so integer NDArrays cannot reach numeric math without a
+  // compile error.
   static_assert(std::is_arithmetic_v<T> && !std::is_same_v<T, bool>,
                 "NDArray element type must be arithmetic and not bool");
 
@@ -1086,7 +1087,7 @@ private:
 
   T *m_data;
   T *m_base;
-  std::vector<T, clustering::detail::AlignedAllocator<T, 32>> m_vec;
+  std::vector<T, clustering::detail::AlignedAllocator<T, 64>> m_vec;
   std::array<std::size_t, N> m_shape;
   std::array<std::ptrdiff_t, N> m_strides;
   std::ptrdiff_t m_offset;
