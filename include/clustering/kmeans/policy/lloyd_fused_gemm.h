@@ -1094,11 +1094,7 @@ private:
             std::int32_t bestLabel = a;
             bool labelDecided = false;
 
-            if (ui <= li) {
-              uData[i] = ui;
-              lData[i] = li;
-              labelDecided = true;
-            } else if (ui <= halfDistData[au]) {
+            if (ui <= li || ui <= halfDistData[au]) {
               uData[i] = ui;
               lData[i] = li;
               labelDecided = true;

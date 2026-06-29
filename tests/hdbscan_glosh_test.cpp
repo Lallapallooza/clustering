@@ -233,7 +233,7 @@ TEST(Glosh, ParallelMatchesSerialBitIdentical) {
   computeGlosh(tree, kN, labels, serial, Pool{});
 
   OwnedPool ownedPool(4);
-  Pool pool{&ownedPool};
+  const Pool pool{&ownedPool};
   // Guard against the gate silently keeping the run serial, which would make the comparison
   // vacuous: the constant mirrors `kGloshScoreMinChunk` in glosh.h.
   ASSERT_TRUE(pool.shouldParallelize(kN, std::size_t{1} << 11));

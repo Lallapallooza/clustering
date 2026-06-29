@@ -41,7 +41,7 @@ inline std::uint64_t coherenceKeyHash(std::string_view text) noexcept {
 
 // Lower-case 16-digit hex of a 64-bit value, fixed width for a stable filename.
 inline std::string coherenceKeyHex(std::uint64_t value) {
-  static constexpr char digits[] = "0123456789abcdef";
+  static constexpr std::string_view digits = "0123456789abcdef";
   std::string out(16, '0');
   for (int i = 15; i >= 0; --i) {
     out[static_cast<std::size_t>(i)] = digits[value & 0xFU];
@@ -60,7 +60,7 @@ inline std::string cpuModelName() {
   }
   std::string line;
   while (std::getline(cpuinfo, line)) {
-    if (line.compare(0, 10, "model name") != 0) {
+    if (!line.starts_with("model name")) {
       continue;
     }
     const auto colon = line.find(':');
@@ -171,8 +171,10 @@ inline void exportPersistedCoherenceProbe(const citor::ThreadPool &pool,
     if (ec) {
       std::filesystem::remove(tmp, ec);
     }
-  } catch (...) {
-    // best-effort: a cache write failure leaves the next run to re-probe.
+    // Best-effort persistence: a write failure (full disk, a lost race, an
+    // allocation failure) just leaves the next process to re-probe. Nothing to
+    // recover, so the catch is intentionally empty.
+  } catch (...) { // NOLINT(bugprone-empty-catch)
   }
 }
 
