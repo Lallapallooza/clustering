@@ -91,7 +91,9 @@ TEST(GemmPlanF32, ScratchSizeIsWorkerCountTimesMcTimesKc) {
   fillRandom(B, 3U);
   clustering::math::OwnedPool pool(8);
   const GemmPlan<float> plan(B, Pool{&pool});
-  EXPECT_EQ(plan.debugScratchSize(), 8u * kMc<float> * kKc<float>);
+  // The pool truncates participants to the physical core count, so assert against the count it
+  // actually carries rather than the requested eight.
+  EXPECT_EQ(plan.debugScratchSize(), pool.participants() * kMc<float> * kKc<float>);
 }
 
 TEST(GemmPlanF32, SerialPoolScratchSizeIsOneMcKc) {

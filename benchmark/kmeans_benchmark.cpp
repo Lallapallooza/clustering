@@ -41,7 +41,7 @@ void runKMeans(benchmark::State &state, std::size_t n, std::size_t d, std::size_
   // same way a Python caller pays it per fit().
   for (auto _ : state) {
     KMeans<float> km(k, nJobs);
-    km.run(X, /*maxIter=*/300, /*tol=*/1e-4F, /*seed=*/42U);
+    km.run(X, /*maxIter=*/300, /*tol=*/1e-4F, /*seedFirst=*/42U);
     benchmark::DoNotOptimize(km.inertia());
     benchmark::ClobberMemory();
   }
