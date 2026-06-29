@@ -47,12 +47,30 @@ jobs:
         id: bump
         run: |
           set -o pipefail
-          if cz bump --yes --check-consistency 2>&1 | tee /tmp/cz.log; then
-            echo "bumped=true" >> "$GITHUB_OUTPUT"
-            echo "tag=v$(cz version --project)" >> "$GITHUB_OUTPUT"
-          else
-            echo "bumped=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Distinguish commitizen's exit codes so a real failure cannot pass as
+          # a clean skip. 0 means bumped; 3 and 21 mean there are no bumpable
+          # commits since the last tag and the job exits clean; any other status
+          # is a genuine failure (a version_files consistency mismatch, an IO
+          # error) and fails the job rather than silently skipping the
+          # release.
+          set +e
+          cz bump --yes --check-consistency 2>&1 | tee /tmp/cz.log
+          status=${PIPESTATUS[0]}
+          set -e
+          case "$status" in
+            0)
+              echo "bumped=true" >> "$GITHUB_OUTPUT"
+              echo "tag=v$(cz version --project)" >> "$GITHUB_OUTPUT"
+              ;;
+            3 | 21)
+              echo "no bumpable commits since last tag; exiting clean"
+              echo "bumped=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::cz bump failed with status $status (see log above)"
+              exit "$status"
+              ;;
+          esac
 
       - name: Push
         if: steps.bump.outputs.bumped == 'true'
