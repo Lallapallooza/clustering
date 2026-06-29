@@ -26,7 +26,7 @@ API docs: [Lallapallooza.github.io/clustering](https://Lallapallooza.github.io/c
 CPMAddPackage(
     NAME clustering
     GITHUB_REPOSITORY Lallapallooza/clustering
-    GIT_TAG v0.9.0
+    GIT_TAG v0.10.0
     OPTIONS "CLUSTERING_USE_AVX2 ON"
 )
 target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
@@ -48,7 +48,7 @@ target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
 Install a specific tag:
 
 ```bash
-uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git@v0.9.0"
+uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git@v0.10.0"
 ```
 
 Or the latest `main`:

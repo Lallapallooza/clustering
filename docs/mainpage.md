@@ -28,7 +28,7 @@ include(CPM.cmake)
 CPMAddPackage(
     NAME clustering
     GITHUB_REPOSITORY Lallapallooza/clustering
-    GIT_TAG v0.9.0
+    GIT_TAG v0.10.0
     OPTIONS "CLUSTERING_USE_AVX2 ON"
 )
 
@@ -53,7 +53,7 @@ target_link_libraries(MyTarget PRIVATE clustering_header_lib)
 The Python binding is built through scikit-build-core + nanobind. Install straight from a release tag with `uv`:
 
 ```bash
-uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git@v0.9.0"
+uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git@v0.10.0"
 ```
 
 Or from `main`:
