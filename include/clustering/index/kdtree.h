@@ -200,7 +200,11 @@ public:
         // Walk in tree-build order so consecutive queries share tree paths and keep the visited
         // nodes warm in cache; m_indices[k] maps the reordered row back to its original slot.
         const T *qp = reordered + (k * m_dim);
-        queryImpl(m_root, qp, radius_sq, adj[m_indices[k]], stack, /*limit=*/-1);
+        std::vector<std::int32_t> &row = adj[m_indices[k]];
+        // Each row is filled by exactly this query. Seed a small floor so the first survivors do
+        // not walk the vector-doubling reallocation cascade from a zero-capacity start.
+        row.reserve(kAdjReserveFloor);
+        queryImpl(m_root, qp, radius_sq, row, stack, /*limit=*/-1);
       }
     };
 
@@ -761,6 +765,10 @@ private:
   /// `log2(n / LeafSize)` in the balanced case; 64 slots absorb the worst-case spillover
   /// from unbalanced subtrees so the vector almost never grows past this reserve.
   static constexpr std::size_t kDefaultStackReserve = 64;
+
+  /// Per-row adjacency capacity floor seeded before a radius query fills a row, sized to absorb a
+  /// typical eps-neighbourhood so early survivors skip the vector-doubling reallocation cascade.
+  static constexpr std::size_t kAdjReserveFloor = 8;
 
   AllocT m_allocator; ///< Bump-allocator for @ref KDTreeNode instances owned by the tree.
 
