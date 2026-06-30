@@ -71,19 +71,42 @@ public:
     };
     math::pairwiseSqEuclideanThresholdedSymmetric(m_points, radiusSq, pool, emit);
 
-    // Mirror pass: each surviving upper-triangular pair `(i, j)` lives in `adj[i]`; push
-    // @c i to `adj[j]` sequentially so the parallel sweep above never crosses worker
-    // boundaries. The size snapshot stops the loop from walking the freshly-mirrored entries
-    // when the next outer @c i lands on a row that earlier iterations already augmented.
+    // Mirror pass: each surviving upper-triangular pair `(i, j)` lives in `adj[i]`; the mirror
+    // adds `i` to `adj[j]`. Done sequentially this is an Amdahl tail that caps scaling on dense
+    // graphs at high worker counts. Snapshot the upper neighbours into a flat read-only buffer,
+    // then partition the scatter by destination row: every worker reads only the immutable
+    // snapshot and is the sole writer of its own `adj[j]` shard, so the fan-out is race-free.
+    std::vector<std::size_t> upperOffsets(n + 1);
+    upperOffsets[0] = 0;
     for (std::size_t i = 0; i < n; ++i) {
-      const std::size_t origSize = adj[i].size();
-      for (std::size_t k = 0; k < origSize; ++k) {
-        const auto jSigned = adj[i][k];
-        const auto j = static_cast<std::size_t>(jSigned);
-        if (j > i) {
-          adj[j].push_back(static_cast<std::int32_t>(i));
+      upperOffsets[i + 1] = upperOffsets[i] + adj[i].size();
+    }
+    std::vector<std::int32_t> upperFlat(upperOffsets[n]);
+    const auto snapshot = [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i) {
+        std::int32_t *dst = upperFlat.data() + upperOffsets[i];
+        const std::int32_t *src = adj[i].data();
+        for (std::size_t k = 0, e = adj[i].size(); k < e; ++k) {
+          dst[k] = src[k];
         }
       }
+    };
+    const auto mirrorShard = [&](std::size_t destLo, std::size_t destHi) {
+      for (std::size_t i = 0; i < destHi; ++i) {
+        for (std::size_t k = upperOffsets[i]; k < upperOffsets[i + 1]; ++k) {
+          const auto j = static_cast<std::size_t>(upperFlat[k]);
+          if (j > i && j >= destLo && j < destHi) {
+            adj[j].push_back(static_cast<std::int32_t>(i));
+          }
+        }
+      }
+    };
+    if (pool.shouldParallelize(n, 256, 2)) {
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, snapshot);
+      pool.parallelForBlocks(std::size_t{0}, n, pool.workerCount() * 2, mirrorShard);
+    } else {
+      snapshot(0, n);
+      mirrorShard(0, n);
     }
     return adj;
   }
