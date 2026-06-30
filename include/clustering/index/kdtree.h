@@ -533,20 +533,17 @@ private:
 
       const T pivotCoord = pivotRow[splitDim];
       const T diff = qp[splitDim] - pivotCoord;
-      if (diff < 0) {
-        if (node->m_left != nullptr) {
-          stack.push_back(node->m_left);
-        }
-        if (diff * diff <= radius_sq && node->m_right != nullptr) {
-          stack.push_back(node->m_right);
-        }
-      } else {
-        if (node->m_right != nullptr) {
-          stack.push_back(node->m_right);
-        }
-        if (diff * diff <= radius_sq && node->m_left != nullptr) {
-          stack.push_back(node->m_left);
-        }
+      // Range queries scan the near side unconditionally and the far side only when the split
+      // plane lies within the radius. Discovery order does not matter here -- every matching leaf
+      // is scanned and the adjacency is order independent -- so the symmetric near / far branches
+      // collapse into two straight-line conditional pushes. `diff < 0` selects which child is the
+      // near side; `farWithinRadius` admits the other when the plane is reachable.
+      const bool farWithinRadius = diff * diff <= radius_sq;
+      if (node->m_left != nullptr && (diff < 0 || farWithinRadius)) {
+        stack.push_back(node->m_left);
+      }
+      if (node->m_right != nullptr && (diff >= 0 || farWithinRadius)) {
+        stack.push_back(node->m_right);
       }
     }
   }
