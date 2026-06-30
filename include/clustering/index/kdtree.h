@@ -195,11 +195,12 @@ public:
       // grows past its initial capacity; clearing keeps the allocation alive between queries.
       std::vector<KDTreeNode *> stack;
       stack.reserve(kDefaultStackReserve);
-      const T *sourceData = m_points.data();
-      for (std::size_t i = lo; i < hi; ++i) {
-        // @p i iterates the source ordering; @c sourceData + i*m_dim is the caller's row.
-        const T *qp = sourceData + (i * m_dim);
-        queryImpl(m_root, qp, radius_sq, adj[i], stack, /*limit=*/-1);
+      const T *reordered = m_points_reordered.data();
+      for (std::size_t k = lo; k < hi; ++k) {
+        // Walk in tree-build order so consecutive queries share tree paths and keep the visited
+        // nodes warm in cache; m_indices[k] maps the reordered row back to its original slot.
+        const T *qp = reordered + (k * m_dim);
+        queryImpl(m_root, qp, radius_sq, adj[m_indices[k]], stack, /*limit=*/-1);
       }
     };
 
