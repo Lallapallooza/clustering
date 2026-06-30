@@ -828,10 +828,10 @@ private:
   /// typical eps-neighbourhood so early survivors skip the vector-doubling reallocation cascade.
   static constexpr std::size_t kAdjReserveFloor = 8;
 
-  /// Feature-count floor at or above which the leaf scan uses the SoA copy. One AVX2 f32 lane
-  /// width: below it a feature does not fill a vector and the AoS `d == 2` path already skips the
-  /// horizontal sum, so the transpose would not pay.
-  static constexpr std::size_t kSoaLeafDimFloor = 8;
+  /// Feature-count floor at or above which the leaf scan uses the SoA copy. At `d=1` there is one
+  /// feature and the scalar scan already does no horizontal work; from `d=2` the feature-major
+  /// scan accumulates eight points in lanes and outruns the AoS scan, so the transpose pays.
+  static constexpr std::size_t kSoaLeafDimFloor = 2;
 
   AllocT m_allocator; ///< Bump-allocator for @ref KDTreeNode instances owned by the tree.
 
