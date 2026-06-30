@@ -509,15 +509,23 @@ private:
         const std::size_t count = node->m_dim;
         const T *leafPts = reorderedBase + (base * m_dim);
         const bool isBounded = (limit != -1);
-        const std::size_t cap =
-            isBounded ? static_cast<std::size_t>(limit) : std::numeric_limits<std::size_t>::max();
+        if (!isBounded) {
+          // Unbounded radius query (the DBSCAN adjacency sweep): every survivor is kept, so the
+          // leaf-scan emit skips the per-point capacity test the bounded path needs.
+          math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq,
+                                   [&](std::size_t i) noexcept {
+                                     indices.push_back(static_cast<OutIdx>(m_indices[base + i]));
+                                   });
+          continue;
+        }
+        const auto cap = static_cast<std::size_t>(limit);
         math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, [&](std::size_t i) noexcept {
           if (indices.size() >= cap) {
             return;
           }
           indices.push_back(static_cast<OutIdx>(m_indices[base + i]));
         });
-        if (isBounded && indices.size() >= cap) {
+        if (indices.size() >= cap) {
           break;
         }
         continue;
