@@ -39,11 +39,16 @@ enum class PairwisePath : std::uint8_t { Simd, Gemm };
 #ifdef CLUSTERING_USE_AVX2
 
 inline float horizontalSumAvx2(__m256 v) noexcept {
-  const __m256 permute = _mm256_permute2f128_ps(v, v, 1);
-  const __m256 s1 = _mm256_add_ps(v, permute);
-  const __m256 s2 = _mm256_hadd_ps(s1, s1);
-  const __m256 s3 = _mm256_hadd_ps(s2, s2);
-  return _mm_cvtss_f32(_mm256_castps256_ps128(s3));
+  // Fold the 256-bit accumulator to a scalar with shuffles plus adds rather than `vhaddps`, which
+  // is two micro-ops on Zen and saturates the shuffle port. The lane reduction is the same eight
+  // sums in a different association; the final bit can differ but the clustering is invariant to
+  // that last-bit jitter.
+  const __m128 lo = _mm256_castps256_ps128(v);
+  const __m128 hi = _mm256_extractf128_ps(v, 1);
+  __m128 s = _mm_add_ps(lo, hi);
+  s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+  s = _mm_add_ss(s, _mm_movehdup_ps(s));
+  return _mm_cvtss_f32(s);
 }
 
 inline double horizontalSumAvx2(__m256d v) noexcept {
