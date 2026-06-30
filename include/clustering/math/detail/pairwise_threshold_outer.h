@@ -264,12 +264,18 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
 
   const auto yTransposed = X.t();
   const auto yDesc = ::clustering::detail::describeMatrix(yTransposed);
-  for (std::size_t p = 0; p < nPanels; ++p) {
-    const std::size_t jBase = p * kNr;
-    const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
-    float *panelOut = bpackedStorage.data() + (p * bpanelSize);
-    packB<float>(yDesc, 0, d, jBase, nc, panelOut);
-  }
+  // Panels pack independently into disjoint slices of the shared buffer. Done serially this is an
+  // Amdahl tail that idles every worker but one while it runs, which dominates the small-n sweep
+  // where the packed setup rivals the kernel. Fan it out so the pack scales with the kernel.
+  const auto packPanels = [&](std::size_t lo, std::size_t hi) {
+    for (std::size_t p = lo; p < hi; ++p) {
+      const std::size_t jBase = p * kNr;
+      const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
+      float *panelOut = bpackedStorage.data() + (p * bpanelSize);
+      packB<float>(yDesc, 0, d, jBase, nc, panelOut);
+    }
+  };
+  pool.parallelForBlocks(std::size_t{0}, nPanels, std::size_t{0}, packPanels);
   packYColNormsSq<float>(xRowNormsSq.data(), n, yNormsPackedStorage.data());
 
   const std::size_t chunkCount = (n + kThresholdChunkRows - 1) / kThresholdChunkRows;
