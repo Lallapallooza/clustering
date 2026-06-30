@@ -156,6 +156,7 @@ public:
                                  std::int64_t limit = -1) const {
     std::vector<std::size_t> indices;
     const T radius_sq = radius * radius;
+    ensureLeafSoa();
     std::vector<KDTreeNode *> stack;
     stack.reserve(kDefaultStackReserve);
     // Copy the borrowed row into a scratch buffer so the core walker can assume a contiguous
@@ -188,6 +189,7 @@ public:
     }
 
     const T radius_sq = radius * radius;
+    ensureLeafSoa();
 
     auto runRange = [&](std::size_t lo, std::size_t hi) {
       // Reuse the traversal stack across every query in this chunk. Tree depth stays below
@@ -508,23 +510,37 @@ private:
         const std::size_t base = node->m_index;
         const std::size_t count = node->m_dim;
         const T *leafPts = reorderedBase + (base * m_dim);
+        // The SoA leaf copy exists only when @c d clears @ref kSoaLeafDimFloor; it is built lazily
+        // on the first radius query, and when present scans without a horizontal sum; otherwise the
+        // AoS scan runs.
+        const bool useSoa = !m_leafSoa.empty();
+        const T *leafSoa = useSoa ? m_leafSoa.data() + (base * m_dim) : nullptr;
         const bool isBounded = (limit != -1);
         if (!isBounded) {
           // Unbounded radius query (the DBSCAN adjacency sweep): every survivor is kept, so the
           // leaf-scan emit skips the per-point capacity test the bounded path needs.
-          math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq,
-                                   [&](std::size_t i) noexcept {
-                                     indices.push_back(static_cast<OutIdx>(m_indices[base + i]));
-                                   });
+          auto emit = [&](std::size_t i) noexcept {
+            indices.push_back(static_cast<OutIdx>(m_indices[base + i]));
+          };
+          if (useSoa) {
+            math::detail::radiusScanSoa(qp, leafSoa, count, m_dim, radius_sq, emit);
+          } else {
+            math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, emit);
+          }
           continue;
         }
         const auto cap = static_cast<std::size_t>(limit);
-        math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, [&](std::size_t i) noexcept {
+        auto emit = [&](std::size_t i) noexcept {
           if (indices.size() >= cap) {
             return;
           }
           indices.push_back(static_cast<OutIdx>(m_indices[base + i]));
-        });
+        };
+        if (useSoa) {
+          math::detail::radiusScanSoa(qp, leafSoa, count, m_dim, radius_sq, emit);
+        } else {
+          math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, emit);
+        }
         if (indices.size() >= cap) {
           break;
         }
@@ -686,6 +702,40 @@ private:
     }
   }
 
+  /// Build the feature-major leaf copy on first use; a no-op when @c d is below the floor or the
+  /// copy already exists. Called single-threaded at a radius query's entry, before any fan-out.
+  void ensureLeafSoa() const {
+    if (m_dim < kSoaLeafDimFloor || m_root == nullptr || !m_leafSoa.empty()) {
+      return;
+    }
+    m_leafSoa.resize(m_points_reordered.size());
+    populateLeafSoa(m_root);
+  }
+
+  /// Transpose every leaf's contiguous AoS rows into the feature-major @ref m_leafSoa block at
+  /// the same base offset, so the SoA radius scan reads a feature's value for the leaf's points
+  /// from one contiguous span.
+  void populateLeafSoa(KDTreeNode *node) const noexcept {
+    if (node->m_left == nullptr && node->m_right == nullptr) {
+      const std::size_t base = node->m_index;
+      const std::size_t count = node->m_dim;
+      const T *aos = m_points_reordered.data() + (base * m_dim);
+      T *soa = m_leafSoa.data() + (base * m_dim);
+      for (std::size_t p = 0; p < count; ++p) {
+        for (std::size_t f = 0; f < m_dim; ++f) {
+          soa[(f * count) + p] = aos[(p * m_dim) + f];
+        }
+      }
+      return;
+    }
+    if (node->m_left != nullptr) {
+      populateLeafSoa(node->m_left);
+    }
+    if (node->m_right != nullptr) {
+      populateLeafSoa(node->m_right);
+    }
+  }
+
   /**
    * @brief Post-order walk that fills @ref m_nodeBounds for every node in @p node's subtree.
    *
@@ -778,6 +828,11 @@ private:
   /// typical eps-neighbourhood so early survivors skip the vector-doubling reallocation cascade.
   static constexpr std::size_t kAdjReserveFloor = 8;
 
+  /// Feature-count floor at or above which the leaf scan uses the SoA copy. One AVX2 f32 lane
+  /// width: below it a feature does not fill a vector and the AoS `d == 2` path already skips the
+  /// horizontal sum, so the transpose would not pay.
+  static constexpr std::size_t kSoaLeafDimFloor = 8;
+
   AllocT m_allocator; ///< Bump-allocator for @ref KDTreeNode instances owned by the tree.
 
   KDTreeNode *m_root = nullptr;       ///< Root of the tree; @c nullptr for an empty point set.
@@ -788,6 +843,10 @@ private:
   std::vector<T> m_points_reordered;  ///< Points in tree-build order; row @c k is
                                       ///< `m_points[m_indices[k]`]. Makes each leaf's
                                       ///< coordinates a contiguous @c count x d block.
+  /// Feature-major copy of each leaf's points; the block at base @c b holds feature @c f for the
+  /// leaf's point @c p at `b * d + f * count + p`. Built lazily by @ref ensureLeafSoa on the first
+  /// radius query so a kNN-only tree never pays for it; empty below @ref kSoaLeafDimFloor.
+  mutable std::vector<T> m_leafSoa;
   /// Monotonic node identifier assigned at @ref build; equals the final node count once the
   /// tree is fully constructed. Keys into @ref m_nodeBounds.
   std::uint32_t m_nextNodeId = 0;

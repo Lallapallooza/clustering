@@ -114,4 +114,95 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
   }
 }
 
+/**
+ * @brief Range scan over a leaf laid out feature-major (SoA): @p leaf_soa holds feature @c f for
+ *        every point at `leaf_soa[f * count + p]`.
+ *
+ * The SoA layout puts each feature's value for eight points in one contiguous vector, so the
+ * squared distance accumulates straight down the feature axis with the eight points held in lanes
+ * and never needs a horizontal sum. That trades the AoS block kernel's shuffle-port-bound hsum
+ * tree for a load-and-FMA loop, which is the dominant cost of the low-dimension range query.
+ *
+ * @tparam T      Element type (@c float fast path; scalar otherwise).
+ * @tparam EmitFn Functor invoked with an in-leaf point index for each match.
+ * @param qp        Query point; @p d contiguous elements.
+ * @param leaf_soa  Feature-major leaf block; `d * count` contiguous elements.
+ * @param count     Point count in the leaf.
+ * @param d         Feature count.
+ * @param radius_sq Squared radius; comparison is inclusive.
+ * @param emit      Callback invoked with `(std::size_t p)` for each matching point.
+ */
+template <class T, class EmitFn>
+inline void radiusScanSoa(const T *qp, const T *leaf_soa, std::size_t count, std::size_t d,
+                          T radius_sq, EmitFn &&emit) noexcept {
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float>) {
+    const __m256 rsq = _mm256_set1_ps(radius_sq);
+    std::size_t p = 0;
+    const auto emitGroup = [&](__m256 acc, std::size_t outBase) noexcept {
+      auto m = static_cast<unsigned>(_mm256_movemask_ps(_mm256_cmp_ps(acc, rsq, _CMP_LE_OS)));
+      while (m != 0) {
+        emit(outBase + static_cast<std::size_t>(__builtin_ctz(m)));
+        m &= m - 1;
+      }
+    };
+    // Four point-groups in flight: the feature-axis FMA chains overlap to hide multiply-add
+    // latency, and the one q broadcast per feature amortises across thirty-two distances, which
+    // keeps the loop load bound rather than stalled on the chain or starved on the broadcast.
+    for (; p + 32 <= count; p += 32) {
+      __m256 acc0 = _mm256_setzero_ps();
+      __m256 acc1 = _mm256_setzero_ps();
+      __m256 acc2 = _mm256_setzero_ps();
+      __m256 acc3 = _mm256_setzero_ps();
+      for (std::size_t f = 0; f < d; ++f) {
+        const __m256 q = _mm256_broadcast_ss(qp + f);
+        const float *col = leaf_soa + (f * count) + p;
+        const __m256 e0 = _mm256_sub_ps(_mm256_loadu_ps(col), q);
+        const __m256 e1 = _mm256_sub_ps(_mm256_loadu_ps(col + 8), q);
+        const __m256 e2 = _mm256_sub_ps(_mm256_loadu_ps(col + 16), q);
+        const __m256 e3 = _mm256_sub_ps(_mm256_loadu_ps(col + 24), q);
+        acc0 = _mm256_fmadd_ps(e0, e0, acc0);
+        acc1 = _mm256_fmadd_ps(e1, e1, acc1);
+        acc2 = _mm256_fmadd_ps(e2, e2, acc2);
+        acc3 = _mm256_fmadd_ps(e3, e3, acc3);
+      }
+      emitGroup(acc0, p);
+      emitGroup(acc1, p + 8);
+      emitGroup(acc2, p + 16);
+      emitGroup(acc3, p + 24);
+    }
+    for (; p + 8 <= count; p += 8) {
+      __m256 acc = _mm256_setzero_ps();
+      for (std::size_t f = 0; f < d; ++f) {
+        const __m256 q = _mm256_broadcast_ss(qp + f);
+        const __m256 e = _mm256_sub_ps(_mm256_loadu_ps(leaf_soa + (f * count) + p), q);
+        acc = _mm256_fmadd_ps(e, e, acc);
+      }
+      emitGroup(acc, p);
+    }
+    for (; p < count; ++p) {
+      T s = T{0};
+      for (std::size_t f = 0; f < d; ++f) {
+        const T diff = leaf_soa[(f * count) + p] - qp[f];
+        s += diff * diff;
+      }
+      if (s <= radius_sq) {
+        emit(p);
+      }
+    }
+    return;
+  }
+#endif
+  for (std::size_t p = 0; p < count; ++p) {
+    T s = T{0};
+    for (std::size_t f = 0; f < d; ++f) {
+      const T diff = leaf_soa[(f * count) + p] - qp[f];
+      s += diff * diff;
+    }
+    if (s <= radius_sq) {
+      emit(p);
+    }
+  }
+}
+
 } // namespace clustering::math::detail
