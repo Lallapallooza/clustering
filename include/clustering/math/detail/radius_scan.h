@@ -1,9 +1,11 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <type_traits>
 
 #include "clustering/math/detail/avx2_helpers.h"
+#include "clustering/math/detail/sq_distances_block.h"
 
 #ifdef CLUSTERING_USE_AVX2
 #include <immintrin.h>
@@ -17,10 +19,10 @@ namespace clustering::math::detail {
  *        at most @p radius_sq.
  *
  * Dispatches to SIMD-specialized inner kernels when the build is AVX2-enabled and @p d clears
- * a width the kernel can exploit. Today the batched kernel exists for @c f32 at `d == 2`
- * (4 pairs per iteration via shuffle); every other `(T, d)` combination falls through to the
- * scalar-per-row loop driven by @ref sqEuclideanRowPtr. Keeping the fallback in the same header
- * lets downstream kernels take the shortcut without re-implementing the scalar baseline.
+ * a width the kernel can exploit. For @c f32 the `d == 2` path packs 4 pairs per iteration via
+ * shuffle, and `d >= 8` routes through @ref sqDistancesAosBlock so one horizontal-sum tree is
+ * amortised across four neighbours instead of one per row; the remaining `(T, d)` pairs fall
+ * through to the scalar-per-row loop driven by @ref sqEuclideanRowPtr.
  *
  * Intended consumer: @c KDTree leaf brute force, where @p pts_aos points at the leaf's slice of
  * the tree-reordered point buffer so the row-major iteration lands on sequential cache lines.
@@ -43,7 +45,7 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
   if constexpr (std::is_same_v<T, float>) {
     if (d == 2) {
       // 4-wide AVX2 f32: load two xmm pairs of AoS x/y, shuffle to SoA, FMA to dsq, mask-compare,
-      // emit set lanes. The shuffle epilogue amortizes the load so the inner loop runs at
+      // emit set lanes. The shuffle epilogue amortises the load so the inner loop runs at
       // 4 distances / ~5 cycles on Zen 4 / Ice Lake-class cores.
       const __m128 qx = _mm_set1_ps(qp[0]);
       const __m128 qy = _mm_set1_ps(qp[1]);
@@ -79,6 +81,23 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
         const float sq = (ex * ex) + (ey * ey);
         if (sq <= radius_sq) {
           emit(i);
+        }
+      }
+      return;
+    }
+    if (d >= kAvx2Lanes<T>) {
+      // For d >= 8 the per-point horizontal-sum epilogue dominates the scan. Route the leaf
+      // through the block kernel, which amortises one hsum tree across four neighbours, then
+      // threshold the buffered distances. Chunked so the scratch stays one cache line.
+      constexpr std::size_t kBlk = 16;
+      alignas(32) std::array<T, kBlk> dsq;
+      for (std::size_t base = 0; base < count; base += kBlk) {
+        const std::size_t m = count - base < kBlk ? count - base : kBlk;
+        sqDistancesAosBlock<T>(qp, pts_aos + (base * d), m, d, dsq.data());
+        for (std::size_t j = 0; j < m; ++j) {
+          if (dsq[j] <= radius_sq) {
+            emit(base + j);
+          }
         }
       }
       return;
