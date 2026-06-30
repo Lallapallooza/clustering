@@ -60,18 +60,13 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
         const __m128 dy = _mm_sub_ps(ys, qy);
         const __m128 sq = _mm_fmadd_ps(dy, dy, _mm_mul_ps(dx, dx));
         const __m128 cmp = _mm_cmp_ps(sq, rsq, _CMP_LE_OS);
-        const int mask = _mm_movemask_ps(cmp);
-        if ((mask & 1) != 0) {
-          emit(i);
-        }
-        if ((mask & 2) != 0) {
-          emit(i + 1);
-        }
-        if ((mask & 4) != 0) {
-          emit(i + 2);
-        }
-        if ((mask & 8) != 0) {
-          emit(i + 3);
+        // Walk the 4-lane survivor mask one set bit at a time. The common cluster-interior block
+        // has no survivors, so the single mask-empty test replaces four per-lane branches that
+        // each mispredict on a cluster edge.
+        auto m = static_cast<unsigned>(_mm_movemask_ps(cmp));
+        while (m != 0) {
+          emit(i + static_cast<std::size_t>(__builtin_ctz(m)));
+          m &= m - 1;
         }
       }
       // Scalar tail for the last 0-3 rows.
