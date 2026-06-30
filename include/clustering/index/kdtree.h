@@ -205,8 +205,12 @@ public:
     };
 
     if (pool.shouldParallelize(n, 4, 2)) {
+      // Oversubscribe blocks so dynamic stealing balances the skewed per-query degree; one block
+      // per worker lets a dense-neighbourhood region gate the join while the rest idle. Each query
+      // is a full tree walk, so the block floor is finer than the row-light default to keep enough
+      // blocks per worker at small n.
       pool.parallelForBlocks<citor::HintsDefaults>(
-          std::size_t{0}, n, std::size_t{0},
+          std::size_t{0}, n, pool.stealBlocks(n, 64),
           [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); });
     } else {
       runRange(0, n);
