@@ -56,7 +56,7 @@ public:
   }
 
 private:
-  using Tree = KDTree<T, KDTreeDistanceType::kEucledian>;
+  using Tree = KDTree<T, KDTreeDistanceType::kEucledian, 64>;
   using Brute = BruteForcePairwise<T>;
   using Held = std::variant<Tree, Brute>;
 
