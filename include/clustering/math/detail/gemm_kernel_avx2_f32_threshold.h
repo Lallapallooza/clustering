@@ -173,6 +173,90 @@ gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::s
   }
 }
 
+/**
+ * @brief Fused 8x12 AVX2 f32 threshold microkernel.
+ *
+ * Same contract as @ref gemmKernel8x6Avx2F32Threshold but twelve output columns per tile. The
+ * per-pair kernel is load bound: every multiply-add wants its own broadcast of a B value, so the
+ * lone A-panel load per K step is the slack to amortise. Twelve single-chain accumulators spread
+ * that A-load across more multiply-adds while still covering the multiply-add latency and fitting
+ * the register file, which the six-column kernel could not do without splitting into even / odd
+ * chains. The wider tile also amortises the per-tile norm epilogue over more columns.
+ */
+template <class Emit>
+[[gnu::always_inline]] inline void
+gemmKernel8x12Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::size_t kc,
+                               const float *aRowNormsSq, const float *bColNormsSq,
+                               std::size_t rowBase, std::size_t colBase, std::size_t validRows,
+                               std::size_t validCols, float radiusSq, Emit &&emit) {
+  constexpr std::size_t kMr = 8;
+  constexpr std::size_t kNr12 = 12;
+
+  const float *__restrict__ apLocal = apPanel;
+  const float *__restrict__ bpLocal = bpPanel;
+  const std::size_t kcLocal = kc;
+
+  __m256 c0 = _mm256_setzero_ps();
+  __m256 c1 = _mm256_setzero_ps();
+  __m256 c2 = _mm256_setzero_ps();
+  __m256 c3 = _mm256_setzero_ps();
+  __m256 c4 = _mm256_setzero_ps();
+  __m256 c5 = _mm256_setzero_ps();
+  __m256 c6 = _mm256_setzero_ps();
+  __m256 c7 = _mm256_setzero_ps();
+  __m256 c8 = _mm256_setzero_ps();
+  __m256 c9 = _mm256_setzero_ps();
+  __m256 c10 = _mm256_setzero_ps();
+  __m256 c11 = _mm256_setzero_ps();
+
+  for (std::size_t k = 0; k < kcLocal; ++k) {
+    const __m256 a = _mm256_load_ps(apLocal + (k * kMr));
+    const float *bRow = bpLocal + (k * kNr12);
+    c0 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 0), c0);
+    c1 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 1), c1);
+    c2 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 2), c2);
+    c3 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 3), c3);
+    c4 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 4), c4);
+    c5 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 5), c5);
+    c6 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 6), c6);
+    c7 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 7), c7);
+    c8 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 8), c8);
+    c9 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 9), c9);
+    c10 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 10), c10);
+    c11 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 11), c11);
+  }
+
+  const __m256 xNorms = _mm256_load_ps(aRowNormsSq);
+  const __m256 neg2 = _mm256_set1_ps(-2.0F);
+  const __m256 zero = _mm256_setzero_ps();
+  const __m256 radiusVec = _mm256_set1_ps(radiusSq);
+
+  auto foldAndMask = [&](__m256 acc, std::size_t colOffset) noexcept -> std::uint8_t {
+    const __m256 yNorm = _mm256_set1_ps(bColNormsSq[colOffset]);
+    __m256 dist = _mm256_fmadd_ps(acc, neg2, _mm256_add_ps(xNorms, yNorm));
+    dist = _mm256_max_ps(dist, zero);
+    const __m256 survive = _mm256_cmp_ps(dist, radiusVec, _CMP_LE_OQ);
+    return static_cast<std::uint8_t>(_mm256_movemask_ps(survive));
+  };
+
+  std::array<std::uint8_t, kNr12> masks{};
+  const std::array<__m256, kNr12> accs = {c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11};
+  for (std::size_t c = 0; c < validCols; ++c) {
+    masks[c] = foldAndMask(accs[c], c);
+  }
+
+  const auto rowMask =
+      (validRows >= kMr) ? std::uint8_t{0xFF} : static_cast<std::uint8_t>((1U << validRows) - 1U);
+  for (std::size_t c = 0; c < validCols; ++c) {
+    auto m = static_cast<std::uint8_t>(masks[c] & rowMask);
+    while (m != 0) {
+      const int bit = __builtin_ctz(static_cast<unsigned>(m));
+      emit(rowBase + static_cast<std::size_t>(bit), colBase + c);
+      m = static_cast<std::uint8_t>(m & (m - 1));
+    }
+  }
+}
+
 #endif // CLUSTERING_USE_AVX2
 
 } // namespace clustering::math::detail

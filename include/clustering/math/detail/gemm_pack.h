@@ -185,10 +185,10 @@ void packA(const ::clustering::detail::MatrixDescC<T> &Ad, std::size_t ic, std::
  * @param nc  Column count of the block (last panel zero-pads if @c nc % Nr != 0).
  * @param bpOut Destination buffer of capacity `ceil(nc/Nr)` * kc * Nr, 32-byte aligned.
  */
-template <class T>
+template <class T, std::size_t PanelNr = kKernelNr<T>>
 void packB(const ::clustering::detail::MatrixDescC<T> &Bd, std::size_t pc, std::size_t kc,
            std::size_t jc, std::size_t nc, T *bpOut) noexcept {
-  constexpr std::size_t kNr = kKernelNr<T>;
+  constexpr std::size_t kNr = PanelNr;
 
   const std::ptrdiff_t bRowStride = Bd.rowStride;
   const std::ptrdiff_t bColStride = Bd.colStride;

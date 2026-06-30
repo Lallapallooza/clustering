@@ -34,9 +34,9 @@ namespace clustering::math::detail {
  * @param m           Number of points in @c Y.
  * @param out         Destination buffer of capacity `ceil(m / Nr)` * Nr, 32-byte aligned.
  */
-template <class T>
+template <class T, std::size_t PanelNr = kKernelNr<T>>
 inline void packYColNormsSq(const T *yRowNormsSq, std::size_t m, T *out) noexcept {
-  constexpr std::size_t kNr = kKernelNr<T>;
+  constexpr std::size_t kNr = PanelNr;
   const std::size_t panels = (m + kNr - 1) / kNr;
   for (std::size_t p = 0; p < panels; ++p) {
     const std::size_t cBase = p * kNr;
@@ -242,7 +242,11 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
                                                    const NDArray<float, 1> &xRowNormsSq,
                                                    float radiusSq, Pool pool, Emit &&emit) {
   constexpr std::size_t kMr = kKernelMr<float>;
-  constexpr std::size_t kNr = kKernelNr<float>;
+  // The symmetric eps-graph sweep packs twelve-wide B panels and drives the 8x12 threshold
+  // kernel: twelve single-chain accumulators spread the lone per-step A-load across more
+  // multiply-adds on the load-bound kernel while still covering the multiply-add latency, which
+  // the six-column kernel could not do without its even / odd chain split.
+  constexpr std::size_t kNr = 12;
 
   const std::size_t n = X.dim(0);
   const std::size_t d = X.dim(1);
@@ -272,11 +276,11 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
       const std::size_t jBase = p * kNr;
       const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
       float *panelOut = bpackedStorage.data() + (p * bpanelSize);
-      packB<float>(yDesc, 0, d, jBase, nc, panelOut);
+      packB<float, kNr>(yDesc, 0, d, jBase, nc, panelOut);
     }
   };
   pool.parallelForBlocks(std::size_t{0}, nPanels, std::size_t{0}, packPanels);
-  packYColNormsSq<float>(xRowNormsSq.data(), n, yNormsPackedStorage.data());
+  packYColNormsSq<float, kNr>(xRowNormsSq.data(), n, yNormsPackedStorage.data());
 
   const std::size_t chunkCount = (n + kThresholdChunkRows - 1) / kThresholdChunkRows;
 
@@ -351,16 +355,16 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
           const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
           const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
           const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
-          gemmKernel8x6Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
-                                        nc, radiusSq, filteredEmit);
+          gemmKernel8x12Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
+                                         nc, radiusSq, filteredEmit);
         }
         for (std::size_t p = pDiagEnd; p < panelEnd; ++p) {
           const std::size_t jBase = p * kNr;
           const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
           const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
           const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
-          gemmKernel8x6Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
-                                        nc, radiusSq, emit);
+          gemmKernel8x12Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
+                                         nc, radiusSq, emit);
         }
       }
     }
