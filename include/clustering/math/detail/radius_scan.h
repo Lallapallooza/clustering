@@ -91,13 +91,20 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
       // threshold the buffered distances. Chunked so the scratch stays one cache line.
       constexpr std::size_t kBlk = 16;
       alignas(32) std::array<T, kBlk> dsq;
+      std::array<std::size_t, kBlk> hits;
       for (std::size_t base = 0; base < count; base += kBlk) {
         const std::size_t m = count - base < kBlk ? count - base : kBlk;
         sqDistancesAosBlock<T>(qp, pts_aos + (base * d), m, d, dsq.data());
+        // Branchless survivor compaction: the per-point threshold is data-dependent and
+        // mispredicts on cluster-edge leaves. Advance the write cursor by the comparison result
+        // so only the predictable emit loop over the survivor count carries a branch.
+        std::size_t h = 0;
         for (std::size_t j = 0; j < m; ++j) {
-          if (dsq[j] <= radius_sq) {
-            emit(base + j);
-          }
+          hits[h] = base + j;
+          h += static_cast<std::size_t>(dsq[j] <= radius_sq);
+        }
+        for (std::size_t t = 0; t < h; ++t) {
+          emit(hits[t]);
         }
       }
       return;
