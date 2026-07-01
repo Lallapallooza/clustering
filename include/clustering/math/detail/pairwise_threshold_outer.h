@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <type_traits>
 #include <vector>
 
@@ -77,6 +78,21 @@ inline constexpr std::size_t kThresholdChunkRows = 256;
  * A group of 32 panels at @c Nr=6 and @c d=64 is 48 KiB -- roughly one Zen L1d.
  */
 inline constexpr std::size_t kThresholdPanelGroup = 32;
+
+struct AlignedFloatScratchDeleter {
+  std::size_t n = 0;
+
+  void operator()(float *ptr) const noexcept {
+    ::clustering::detail::AlignedAllocator<float, 32>{}.deallocate(ptr, n);
+  }
+};
+
+using AlignedFloatScratch = std::unique_ptr<float, AlignedFloatScratchDeleter>;
+
+inline AlignedFloatScratch makeAlignedFloatScratch(std::size_t n) {
+  ::clustering::detail::AlignedAllocator<float, 32> alloc;
+  return AlignedFloatScratch{alloc.allocate(n), AlignedFloatScratchDeleter{n}};
+}
 
 /**
  * @brief AVX2 f32 specialization of the fused threshold outer driver.
@@ -160,17 +176,17 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
     // loop nest so panels walk the inner axis while every M-tile sweeps the same panel group.
     // A panel group ~= 48 KiB stays L1-resident across the M-tile inner sweep, so the B bytes
     // we re-read go to L1 instead of L3 / cross-CCD fabric. The packed scratch is heap-backed
-    // so the chunk body fits inside small worker stacks (citor's worker pthreads run with a
-    // 256 KiB stack, well under @c kThresholdChunkRows * @c kThresholdMaxD * `sizeof(float)`).
-    std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> apPacked(
-        kThresholdChunkRows * kThresholdMaxD);
+    // so the chunk body fits inside small worker stacks. The arena is filled completely by
+    // @c packA, including tail-row padding, so it does not need a pre-zero pass.
+    auto apPacked = makeAlignedFloatScratch(kThresholdChunkRows * d);
+    float *apPackedData = apPacked.get();
     std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> xNormsPacked(
         kThresholdChunkRows);
     for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
       const std::size_t iBase = iChunkBase + (tileIdx * kMr);
       const std::size_t mc =
           (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
-      float *tileSlot = apPacked.data() + (tileIdx * kMr * d);
+      float *tileSlot = apPackedData + (tileIdx * kMr * d);
       packA<float>(xDesc, iBase, mc, 0, d, tileSlot);
       for (std::size_t r = 0; r < mc; ++r) {
         xNormsPacked[(tileIdx * kMr) + r] = xRowNormsSq(iBase + r);
@@ -186,7 +202,7 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
         const std::size_t iBase = iChunkBase + (tileIdx * kMr);
         const std::size_t mc =
             (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
-        const float *tileA = apPacked.data() + (tileIdx * kMr * d);
+        const float *tileA = apPackedData + (tileIdx * kMr * d);
         const float *tileNorms = xNormsPacked.data() + (tileIdx * kMr);
 
         for (std::size_t p = panelBase; p < panelEnd; ++p) {
@@ -292,16 +308,17 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
 
     const auto xDesc = ::clustering::detail::describeMatrix(X);
 
-    // Heap-backed scratch so the chunk body fits inside small worker stacks.
-    std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> apPacked(
-        kThresholdChunkRows * kThresholdMaxD);
+    // Heap-backed scratch so the chunk body fits inside small worker stacks. @c packA writes
+    // every consumed element, including tail-row padding, so skip vector value-initialization.
+    auto apPacked = makeAlignedFloatScratch(kThresholdChunkRows * d);
+    float *apPackedData = apPacked.get();
     std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> xNormsPacked(
         kThresholdChunkRows);
     for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
       const std::size_t iBase = iChunkBase + (tileIdx * kMr);
       const std::size_t mc =
           (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
-      float *tileSlot = apPacked.data() + (tileIdx * kMr * d);
+      float *tileSlot = apPackedData + (tileIdx * kMr * d);
       packA<float>(xDesc, iBase, mc, 0, d, tileSlot);
       for (std::size_t r = 0; r < mc; ++r) {
         xNormsPacked[(tileIdx * kMr) + r] = xRowNormsSq(iBase + r);
@@ -317,7 +334,7 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
         const std::size_t iBase = iChunkBase + (tileIdx * kMr);
         const std::size_t mc =
             (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
-        const float *tileA = apPacked.data() + (tileIdx * kMr * d);
+        const float *tileA = apPackedData + (tileIdx * kMr * d);
         const float *tileNorms = xNormsPacked.data() + (tileIdx * kMr);
 
         // Strictly-below-diagonal panels (entire panel column-range ends at or before the
