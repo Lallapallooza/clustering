@@ -56,7 +56,12 @@ public:
     }
 
     const std::size_t d = m_points.dim(1);
-    const std::size_t adjReserveFloor = (d == 32) ? std::size_t{24} : std::size_t{16};
+    std::size_t adjReserveFloor = 16;
+    if (d == 32) {
+      adjReserveFloor = 24;
+    } else if (d == 64) {
+      adjReserveFloor = 20;
+    }
     // Reserve a small floor per row so the first push_backs do not trigger the vector-doubling
     // reallocation cascade that otherwise dominates adjacency construction on dense fixtures.
     for (auto &v : adj) {
