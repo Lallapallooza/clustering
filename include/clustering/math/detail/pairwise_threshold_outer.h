@@ -258,9 +258,9 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
                                                    const NDArray<float, 1> &xRowNormsSq,
                                                    float radiusSq, Pool pool, Emit &&emit) {
   constexpr std::size_t kMr = kKernelMr<float>;
-  // The triangular sweep is front-loaded by row chunk; smaller symmetric chunks give the dynamic
-  // scheduler more units to steal without changing the rectangular driver's cache geometry.
-  constexpr std::size_t kSymmetricChunkRows = 128;
+  // The triangular sweep is front-loaded by row chunk; the symmetric path uses finer chunks so
+  // the dynamic scheduler has more units to steal without changing the rectangular cache geometry.
+  constexpr std::size_t kSymmetricChunkRows = 64;
   // The symmetric eps-graph sweep packs twelve-wide B panels and drives the 8x12 threshold
   // kernel: twelve single-chain accumulators spread the lone per-step A-load across more
   // multiply-adds on the load-bound kernel while still covering the multiply-add latency, which
