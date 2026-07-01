@@ -197,15 +197,17 @@ public:
       // grows past its initial capacity; clearing keeps the allocation alive between queries.
       std::vector<KDTreeNode *> stack;
       stack.reserve(kDefaultStackReserve);
+      const std::size_t adjReserveFloor =
+          std::min(n, (m_dim == kWideAdjReserveDim) ? kWideAdjReserveFloor : kAdjReserveFloor);
       const T *reordered = m_points_reordered.data();
       for (std::size_t k = lo; k < hi; ++k) {
         // Walk in tree-build order so consecutive queries share tree paths and keep the visited
         // nodes warm in cache; m_indices[k] maps the reordered row back to its original slot.
         const T *qp = reordered + (k * m_dim);
         std::vector<std::int32_t> &row = adj[m_indices[k]];
-        // Each row is filled by exactly this query. Seed a small floor so the first survivors do
+        // Each row is filled by exactly this query. Seed a reserve floor so the first survivors do
         // not walk the vector-doubling reallocation cascade from a zero-capacity start.
-        row.reserve(kAdjReserveFloor);
+        row.reserve(adjReserveFloor);
         queryImpl(m_root, qp, radius_sq, row, stack, /*limit=*/-1);
       }
     };
@@ -827,6 +829,8 @@ private:
   /// Per-row adjacency capacity floor seeded before a radius query fills a row, sized to absorb a
   /// typical eps-neighbourhood so early survivors skip the vector-doubling reallocation cascade.
   static constexpr std::size_t kAdjReserveFloor = 8;
+  static constexpr std::size_t kWideAdjReserveDim = 8;
+  static constexpr std::size_t kWideAdjReserveFloor = 128;
 
   /// Feature-count floor at or above which the leaf scan uses the SoA copy. At `d=1` there is one
   /// feature and the scalar scan already does no horizontal work; from `d=2` the feature-major
