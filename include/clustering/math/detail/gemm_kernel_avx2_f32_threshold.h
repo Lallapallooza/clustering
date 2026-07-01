@@ -240,9 +240,53 @@ gemmKernel8x12Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::
   };
 
   std::array<std::uint8_t, kNr12> masks{};
-  const std::array<__m256, kNr12> accs = {c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11};
-  for (std::size_t c = 0; c < validCols; ++c) {
-    masks[c] = foldAndMask(accs[c], c);
+  if (validCols == kNr12) {
+    masks[0] = foldAndMask(c0, 0);
+    masks[1] = foldAndMask(c1, 1);
+    masks[2] = foldAndMask(c2, 2);
+    masks[3] = foldAndMask(c3, 3);
+    masks[4] = foldAndMask(c4, 4);
+    masks[5] = foldAndMask(c5, 5);
+    masks[6] = foldAndMask(c6, 6);
+    masks[7] = foldAndMask(c7, 7);
+    masks[8] = foldAndMask(c8, 8);
+    masks[9] = foldAndMask(c9, 9);
+    masks[10] = foldAndMask(c10, 10);
+    masks[11] = foldAndMask(c11, 11);
+  } else {
+    if (validCols > 0) {
+      masks[0] = foldAndMask(c0, 0);
+    }
+    if (validCols > 1) {
+      masks[1] = foldAndMask(c1, 1);
+    }
+    if (validCols > 2) {
+      masks[2] = foldAndMask(c2, 2);
+    }
+    if (validCols > 3) {
+      masks[3] = foldAndMask(c3, 3);
+    }
+    if (validCols > 4) {
+      masks[4] = foldAndMask(c4, 4);
+    }
+    if (validCols > 5) {
+      masks[5] = foldAndMask(c5, 5);
+    }
+    if (validCols > 6) {
+      masks[6] = foldAndMask(c6, 6);
+    }
+    if (validCols > 7) {
+      masks[7] = foldAndMask(c7, 7);
+    }
+    if (validCols > 8) {
+      masks[8] = foldAndMask(c8, 8);
+    }
+    if (validCols > 9) {
+      masks[9] = foldAndMask(c9, 9);
+    }
+    if (validCols > 10) {
+      masks[10] = foldAndMask(c10, 10);
+    }
   }
 
   const auto rowMask =
