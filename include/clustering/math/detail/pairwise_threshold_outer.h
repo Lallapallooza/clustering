@@ -258,6 +258,9 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
                                                    const NDArray<float, 1> &xRowNormsSq,
                                                    float radiusSq, Pool pool, Emit &&emit) {
   constexpr std::size_t kMr = kKernelMr<float>;
+  // The triangular sweep is front-loaded by row chunk; smaller symmetric chunks give the dynamic
+  // scheduler more units to steal without changing the rectangular driver's cache geometry.
+  constexpr std::size_t kSymmetricChunkRows = 128;
   // The symmetric eps-graph sweep packs twelve-wide B panels and drives the 8x12 threshold
   // kernel: twelve single-chain accumulators spread the lone per-step A-load across more
   // multiply-adds on the load-bound kernel while still covering the multiply-add latency, which
@@ -298,22 +301,22 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
   pool.parallelForBlocks(std::size_t{0}, nPanels, std::size_t{0}, packPanels);
   packYColNormsSq<float, kNr>(xRowNormsSq.data(), n, yNormsPackedStorage.data());
 
-  const std::size_t chunkCount = (n + kThresholdChunkRows - 1) / kThresholdChunkRows;
+  const std::size_t chunkCount = (n + kSymmetricChunkRows - 1) / kSymmetricChunkRows;
 
   auto runOneChunk = [&](std::size_t chunkIdx) {
-    const std::size_t iChunkBase = chunkIdx * kThresholdChunkRows;
+    const std::size_t iChunkBase = chunkIdx * kSymmetricChunkRows;
     const std::size_t chunkRows =
-        (iChunkBase + kThresholdChunkRows <= n) ? kThresholdChunkRows : (n - iChunkBase);
+        (iChunkBase + kSymmetricChunkRows <= n) ? kSymmetricChunkRows : (n - iChunkBase);
     const std::size_t mTilesInChunk = (chunkRows + kMr - 1) / kMr;
 
     const auto xDesc = ::clustering::detail::describeMatrix(X);
 
     // Heap-backed scratch so the chunk body fits inside small worker stacks. @c packA writes
     // every consumed element, including tail-row padding, so skip vector value-initialization.
-    auto apPacked = makeAlignedFloatScratch(kThresholdChunkRows * d);
+    auto apPacked = makeAlignedFloatScratch(kSymmetricChunkRows * d);
     float *apPackedData = apPacked.get();
     std::vector<float, ::clustering::detail::AlignedAllocator<float, 32>> xNormsPacked(
-        kThresholdChunkRows);
+        kSymmetricChunkRows);
     for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
       const std::size_t iBase = iChunkBase + (tileIdx * kMr);
       const std::size_t mc =
