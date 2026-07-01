@@ -174,23 +174,23 @@ gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::s
 }
 
 /**
- * @brief Fused 8x12 AVX2 f32 threshold microkernel.
+ * @brief Fused 8x13 AVX2 f32 threshold microkernel.
  *
- * Same contract as @ref gemmKernel8x6Avx2F32Threshold but twelve output columns per tile. The
+ * Same contract as @ref gemmKernel8x6Avx2F32Threshold but thirteen output columns per tile. The
  * per-pair kernel is load bound: every multiply-add wants its own broadcast of a B value, so the
- * lone A-panel load per K step is the slack to amortise. Twelve single-chain accumulators spread
+ * lone A-panel load per K step is the slack to amortise. Thirteen single-chain accumulators spread
  * that A-load across more multiply-adds while still covering the multiply-add latency and fitting
  * the register file, which the six-column kernel could not do without splitting into even / odd
  * chains. The wider tile also amortises the per-tile norm epilogue over more columns.
  */
 template <class Emit>
 [[gnu::always_inline]] inline void
-gemmKernel8x12Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::size_t kc,
+gemmKernel8x13Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::size_t kc,
                                const float *aRowNormsSq, const float *bColNormsSq,
                                std::size_t rowBase, std::size_t colBase, std::size_t validRows,
                                std::size_t validCols, float radiusSq, Emit &&emit) {
   constexpr std::size_t kMr = 8;
-  constexpr std::size_t kNr12 = 12;
+  constexpr std::size_t kNr13 = 13;
 
   const float *__restrict__ apLocal = apPanel;
   const float *__restrict__ bpLocal = bpPanel;
@@ -208,10 +208,11 @@ gemmKernel8x12Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::
   __m256 c9 = _mm256_setzero_ps();
   __m256 c10 = _mm256_setzero_ps();
   __m256 c11 = _mm256_setzero_ps();
+  __m256 c12 = _mm256_setzero_ps();
 
   for (std::size_t k = 0; k < kcLocal; ++k) {
     const __m256 a = _mm256_load_ps(apLocal + (k * kMr));
-    const float *bRow = bpLocal + (k * kNr12);
+    const float *bRow = bpLocal + (k * kNr13);
     c0 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 0), c0);
     c1 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 1), c1);
     c2 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 2), c2);
@@ -224,6 +225,7 @@ gemmKernel8x12Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::
     c9 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 9), c9);
     c10 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 10), c10);
     c11 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 11), c11);
+    c12 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 12), c12);
   }
 
   const __m256 xNorms = _mm256_load_ps(aRowNormsSq);
@@ -239,8 +241,8 @@ gemmKernel8x12Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::
     return static_cast<std::uint8_t>(_mm256_movemask_ps(survive));
   };
 
-  std::array<std::uint8_t, kNr12> masks{};
-  if (validCols == kNr12) {
+  std::array<std::uint8_t, kNr13> masks{};
+  if (validCols == kNr13) {
     masks[0] = foldAndMask(c0, 0);
     masks[1] = foldAndMask(c1, 1);
     masks[2] = foldAndMask(c2, 2);
@@ -253,6 +255,7 @@ gemmKernel8x12Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::
     masks[9] = foldAndMask(c9, 9);
     masks[10] = foldAndMask(c10, 10);
     masks[11] = foldAndMask(c11, 11);
+    masks[12] = foldAndMask(c12, 12);
   } else {
     if (validCols > 0) {
       masks[0] = foldAndMask(c0, 0);
@@ -286,6 +289,9 @@ gemmKernel8x12Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::
     }
     if (validCols > 10) {
       masks[10] = foldAndMask(c10, 10);
+    }
+    if (validCols > 11) {
+      masks[11] = foldAndMask(c11, 11);
     }
   }
 

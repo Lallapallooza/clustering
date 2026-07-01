@@ -267,11 +267,11 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
   // The triangular sweep is front-loaded by row chunk; the symmetric path uses finer chunks so
   // the dynamic scheduler has more units to steal without changing the rectangular cache geometry.
   constexpr std::size_t kSymmetricChunkRows = 64;
-  // The symmetric eps-graph sweep packs twelve-wide B panels and drives the 8x12 threshold
-  // kernel: twelve single-chain accumulators spread the lone per-step A-load across more
+  // The symmetric eps-graph sweep packs thirteen-wide B panels and drives the 8x13 threshold
+  // kernel: thirteen single-chain accumulators spread the lone per-step A-load across more
   // multiply-adds on the load-bound kernel while still covering the multiply-add latency, which
   // the six-column kernel could not do without its even / odd chain split.
-  constexpr std::size_t kNr = 12;
+  constexpr std::size_t kNr = 13;
 
   const std::size_t n = X.dim(0);
   const std::size_t d = X.dim(1);
@@ -382,7 +382,7 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
           const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
           const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
           const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
-          gemmKernel8x12Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
+          gemmKernel8x13Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
                                          nc, radiusSq, filteredEmit);
         }
         for (std::size_t p = pDiagEnd; p < panelEnd; ++p) {
@@ -390,7 +390,7 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
           const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
           const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
           const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
-          gemmKernel8x12Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
+          gemmKernel8x13Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
                                          nc, radiusSq, emit);
         }
       }
