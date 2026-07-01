@@ -79,6 +79,12 @@ inline constexpr std::size_t kThresholdChunkRows = 256;
  */
 inline constexpr std::size_t kThresholdPanelGroup = 32;
 
+struct ThresholdChunkHints : citor::HintsDefaults {
+  // citor's default dynamic shape coalesces the range into 2 * workers blocks; the symmetric
+  // triangular sweep needs one backend block per row chunk so the atomic tail can steal them.
+  static constexpr std::size_t chunk = 1;
+};
+
 struct AlignedFloatScratchDeleter {
   std::size_t n = 0;
 
@@ -396,7 +402,7 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
   // chunk so the pool's queue naturally work-steals the triangle -- worker imbalance collapses
   // to the chunk-granularity floor.
   if (pool.shouldParallelize(n * n / 2, 64, 2)) {
-    pool.parallelForChunks(chunkCount, [&](std::size_t c) { runOneChunk(c); });
+    pool.parallelForChunks<ThresholdChunkHints>(chunkCount, [&](std::size_t c) { runOneChunk(c); });
   } else {
     for (std::size_t c = 0; c < chunkCount; ++c) {
       runOneChunk(c);
