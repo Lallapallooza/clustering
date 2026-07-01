@@ -267,11 +267,11 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
   // The triangular sweep is front-loaded by row chunk; the symmetric path uses finer chunks so
   // the dynamic scheduler has more units to steal without changing the rectangular cache geometry.
   constexpr std::size_t kSymmetricChunkRows = 64;
-  // The symmetric eps-graph sweep packs thirteen-wide B panels and drives the 8x13 threshold
-  // kernel: thirteen single-chain accumulators spread the lone per-step A-load across more
-  // multiply-adds on the load-bound kernel while still covering the multiply-add latency, which
-  // the six-column kernel could not do without its even / odd chain split.
-  constexpr std::size_t kNr = 13;
+  // The symmetric eps-graph sweep pairs consecutive 8-row A panels and drives the 16x6 threshold
+  // kernel: the two load ports cap a single-row-panel kernel at one multiply-add per broadcast,
+  // while the stacked pair amortises each broadcast across two row vectors and shifts the
+  // binding resource to the multiply-add ports.
+  constexpr std::size_t kNr = kKernelNr<float>;
 
   const std::size_t n = X.dim(0);
   const std::size_t d = X.dim(1);
@@ -337,13 +337,15 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
       }
     }
 
-    const std::size_t panelGroup = (d >= 128) ? std::size_t{8} : kThresholdPanelGroup;
+    const std::size_t panelGroup = (d >= 128) ? std::size_t{16} : kThresholdPanelGroup;
     for (std::size_t panelBase = 0; panelBase < nPanels; panelBase += panelGroup) {
       const std::size_t panelEnd = std::min(panelBase + panelGroup, nPanels);
-      for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
+      for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; tileIdx += 2) {
         const std::size_t iBase = iChunkBase + (tileIdx * kMr);
-        const std::size_t mc =
-            (iBase + kMr <= iChunkBase + chunkRows) ? kMr : (iChunkBase + chunkRows - iBase);
+        const std::size_t tileRows = (tileIdx + 1 < mTilesInChunk) ? 2 * kMr : kMr;
+        const std::size_t mc = (iBase + tileRows <= iChunkBase + chunkRows)
+                                   ? tileRows
+                                   : (iChunkBase + chunkRows - iBase);
         const float *tileA = apPackedData + (tileIdx * kMr * d);
         const float *tileNorms = xNormsPacked.data() + (tileIdx * kMr);
 
@@ -377,21 +379,32 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
         // diagonal -- the M-tile's diagonal-straddling band ended in an earlier group. Clamp
         // both loops to start at pStart so we never traverse pruned panels.
         const std::size_t pDiagEnd = std::clamp(pStrictUpper, pStart, panelEnd);
+        const float *tileAHi = tileA + (kMr * d);
         for (std::size_t p = pStart; p < pDiagEnd; ++p) {
           const std::size_t jBase = p * kNr;
           const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
           const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
           const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
-          gemmKernel8x13Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
-                                         nc, radiusSq, filteredEmit);
+          if (tileRows == 2 * kMr) {
+            gemmKernel16x6Avx2F32Threshold(tileA, tileAHi, bpPanel, d, tileNorms, normsPanel, iBase,
+                                           jBase, mc, nc, radiusSq, filteredEmit);
+          } else {
+            gemmKernel8x6Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase,
+                                          mc, nc, radiusSq, filteredEmit);
+          }
         }
         for (std::size_t p = pDiagEnd; p < panelEnd; ++p) {
           const std::size_t jBase = p * kNr;
           const std::size_t nc = (jBase + kNr <= n) ? kNr : (n - jBase);
           const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
           const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
-          gemmKernel8x13Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
-                                         nc, radiusSq, emit);
+          if (tileRows == 2 * kMr) {
+            gemmKernel16x6Avx2F32Threshold(tileA, tileAHi, bpPanel, d, tileNorms, normsPanel, iBase,
+                                           jBase, mc, nc, radiusSq, emit);
+          } else {
+            gemmKernel8x6Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase,
+                                          mc, nc, radiusSq, emit);
+          }
         }
       }
     }

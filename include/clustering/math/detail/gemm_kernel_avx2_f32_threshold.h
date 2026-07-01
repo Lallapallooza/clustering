@@ -174,135 +174,119 @@ gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::s
 }
 
 /**
- * @brief Fused 8x13 AVX2 f32 threshold microkernel.
+ * @brief Fused 16x6 AVX2 f32 threshold microkernel over a pair of stacked 8-row A panels.
  *
- * Same contract as @ref gemmKernel8x6Avx2F32Threshold but thirteen output columns per tile. The
- * per-pair kernel is load bound: every multiply-add wants its own broadcast of a B value, so the
- * lone A-panel load per K step is the slack to amortise. Thirteen single-chain accumulators spread
- * that A-load across more multiply-adds while still covering the multiply-add latency and fitting
- * the register file, which the six-column kernel could not do without splitting into even / odd
- * chains. The wider tile also amortises the per-tile norm epilogue over more columns.
+ * Same contract as @ref gemmKernel8x6Avx2F32Threshold but sixteen output rows per tile, fed by
+ * two consecutive @c packA panels. The per-pair kernel is bounded by the two load ports: a
+ * broadcast per B column plus one A load per accumulator row-half. Doubling the row count
+ * amortises the six broadcasts across two row vectors, so each K step issues eight loads for
+ * twelve multiply-adds and the multiply-add ports become the binding resource. Twelve
+ * independent accumulator chains cover the multiply-add latency at two issues per cycle.
+ *
+ * @param apPanelLo Packed A panel holding tile rows `[0, 8)` (32-byte aligned).
+ * @param apPanelHi Packed A panel holding tile rows `[8, 16)` (32-byte aligned).
+ * @param aRowNormsSq Per-row squared norms for the 16 rows of this tile, 32-byte aligned.
  */
 template <class Emit>
 [[gnu::always_inline]] inline void
-gemmKernel8x13Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::size_t kc,
-                               const float *aRowNormsSq, const float *bColNormsSq,
+gemmKernel16x6Avx2F32Threshold(const float *apPanelLo, const float *apPanelHi, const float *bpPanel,
+                               std::size_t kc, const float *aRowNormsSq, const float *bColNormsSq,
                                std::size_t rowBase, std::size_t colBase, std::size_t validRows,
                                std::size_t validCols, float radiusSq, Emit &&emit) {
   constexpr std::size_t kMr = 8;
-  constexpr std::size_t kNr13 = 13;
+  constexpr std::size_t kNr = kKernelNr<float>;
+  constexpr std::size_t kRows16 = 16;
 
-  const float *__restrict__ apLocal = apPanel;
+  const float *__restrict__ apLo = apPanelLo;
+  const float *__restrict__ apHi = apPanelHi;
   const float *__restrict__ bpLocal = bpPanel;
   const std::size_t kcLocal = kc;
 
-  __m256 c0 = _mm256_setzero_ps();
-  __m256 c1 = _mm256_setzero_ps();
-  __m256 c2 = _mm256_setzero_ps();
-  __m256 c3 = _mm256_setzero_ps();
-  __m256 c4 = _mm256_setzero_ps();
-  __m256 c5 = _mm256_setzero_ps();
-  __m256 c6 = _mm256_setzero_ps();
-  __m256 c7 = _mm256_setzero_ps();
-  __m256 c8 = _mm256_setzero_ps();
-  __m256 c9 = _mm256_setzero_ps();
-  __m256 c10 = _mm256_setzero_ps();
-  __m256 c11 = _mm256_setzero_ps();
-  __m256 c12 = _mm256_setzero_ps();
+  __m256 c0lo = _mm256_setzero_ps();
+  __m256 c0hi = _mm256_setzero_ps();
+  __m256 c1lo = _mm256_setzero_ps();
+  __m256 c1hi = _mm256_setzero_ps();
+  __m256 c2lo = _mm256_setzero_ps();
+  __m256 c2hi = _mm256_setzero_ps();
+  __m256 c3lo = _mm256_setzero_ps();
+  __m256 c3hi = _mm256_setzero_ps();
+  __m256 c4lo = _mm256_setzero_ps();
+  __m256 c4hi = _mm256_setzero_ps();
+  __m256 c5lo = _mm256_setzero_ps();
+  __m256 c5hi = _mm256_setzero_ps();
 
   for (std::size_t k = 0; k < kcLocal; ++k) {
-    const __m256 a = _mm256_load_ps(apLocal + (k * kMr));
-    const float *bRow = bpLocal + (k * kNr13);
-    c0 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 0), c0);
-    c1 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 1), c1);
-    c2 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 2), c2);
-    c3 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 3), c3);
-    c4 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 4), c4);
-    c5 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 5), c5);
-    c6 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 6), c6);
-    c7 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 7), c7);
-    c8 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 8), c8);
-    c9 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 9), c9);
-    c10 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 10), c10);
-    c11 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 11), c11);
-    c12 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 12), c12);
+    const __m256 aLo = _mm256_load_ps(apLo + (k * kMr));
+    const __m256 aHi = _mm256_load_ps(apHi + (k * kMr));
+    const float *bRow = bpLocal + (k * kNr);
+    const __m256 b0 = _mm256_broadcast_ss(bRow + 0);
+    c0lo = _mm256_fmadd_ps(aLo, b0, c0lo);
+    c0hi = _mm256_fmadd_ps(aHi, b0, c0hi);
+    const __m256 b1 = _mm256_broadcast_ss(bRow + 1);
+    c1lo = _mm256_fmadd_ps(aLo, b1, c1lo);
+    c1hi = _mm256_fmadd_ps(aHi, b1, c1hi);
+    const __m256 b2 = _mm256_broadcast_ss(bRow + 2);
+    c2lo = _mm256_fmadd_ps(aLo, b2, c2lo);
+    c2hi = _mm256_fmadd_ps(aHi, b2, c2hi);
+    const __m256 b3 = _mm256_broadcast_ss(bRow + 3);
+    c3lo = _mm256_fmadd_ps(aLo, b3, c3lo);
+    c3hi = _mm256_fmadd_ps(aHi, b3, c3hi);
+    const __m256 b4 = _mm256_broadcast_ss(bRow + 4);
+    c4lo = _mm256_fmadd_ps(aLo, b4, c4lo);
+    c4hi = _mm256_fmadd_ps(aHi, b4, c4hi);
+    const __m256 b5 = _mm256_broadcast_ss(bRow + 5);
+    c5lo = _mm256_fmadd_ps(aLo, b5, c5lo);
+    c5hi = _mm256_fmadd_ps(aHi, b5, c5hi);
   }
 
-  const __m256 xNorms = _mm256_load_ps(aRowNormsSq);
+  const __m256 xNormsLo = _mm256_load_ps(aRowNormsSq);
+  const __m256 xNormsHi = _mm256_load_ps(aRowNormsSq + kMr);
   const __m256 neg2 = _mm256_set1_ps(-2.0F);
   const __m256 zero = _mm256_setzero_ps();
   const __m256 radiusVec = _mm256_set1_ps(radiusSq);
 
-  auto foldAndMask = [&](__m256 acc, std::size_t colOffset) noexcept -> std::uint8_t {
+  auto foldAndMask16 = [&](__m256 accLo, __m256 accHi,
+                           std::size_t colOffset) noexcept -> std::uint16_t {
     const __m256 yNorm = _mm256_set1_ps(bColNormsSq[colOffset]);
-    __m256 dist = _mm256_fmadd_ps(acc, neg2, _mm256_add_ps(xNorms, yNorm));
-    dist = _mm256_max_ps(dist, zero);
-    const __m256 survive = _mm256_cmp_ps(dist, radiusVec, _CMP_LE_OQ);
-    return static_cast<std::uint8_t>(_mm256_movemask_ps(survive));
+    __m256 distLo = _mm256_fmadd_ps(accLo, neg2, _mm256_add_ps(xNormsLo, yNorm));
+    __m256 distHi = _mm256_fmadd_ps(accHi, neg2, _mm256_add_ps(xNormsHi, yNorm));
+    distLo = _mm256_max_ps(distLo, zero);
+    distHi = _mm256_max_ps(distHi, zero);
+    const auto maskLo =
+        static_cast<unsigned>(_mm256_movemask_ps(_mm256_cmp_ps(distLo, radiusVec, _CMP_LE_OQ)));
+    const auto maskHi =
+        static_cast<unsigned>(_mm256_movemask_ps(_mm256_cmp_ps(distHi, radiusVec, _CMP_LE_OQ)));
+    return static_cast<std::uint16_t>(maskLo | (maskHi << kMr));
   };
 
-  std::array<std::uint8_t, kNr13> masks{};
-  if (validCols == kNr13) {
-    masks[0] = foldAndMask(c0, 0);
-    masks[1] = foldAndMask(c1, 1);
-    masks[2] = foldAndMask(c2, 2);
-    masks[3] = foldAndMask(c3, 3);
-    masks[4] = foldAndMask(c4, 4);
-    masks[5] = foldAndMask(c5, 5);
-    masks[6] = foldAndMask(c6, 6);
-    masks[7] = foldAndMask(c7, 7);
-    masks[8] = foldAndMask(c8, 8);
-    masks[9] = foldAndMask(c9, 9);
-    masks[10] = foldAndMask(c10, 10);
-    masks[11] = foldAndMask(c11, 11);
-    masks[12] = foldAndMask(c12, 12);
-  } else {
-    if (validCols > 0) {
-      masks[0] = foldAndMask(c0, 0);
-    }
-    if (validCols > 1) {
-      masks[1] = foldAndMask(c1, 1);
-    }
-    if (validCols > 2) {
-      masks[2] = foldAndMask(c2, 2);
-    }
-    if (validCols > 3) {
-      masks[3] = foldAndMask(c3, 3);
-    }
-    if (validCols > 4) {
-      masks[4] = foldAndMask(c4, 4);
-    }
-    if (validCols > 5) {
-      masks[5] = foldAndMask(c5, 5);
-    }
-    if (validCols > 6) {
-      masks[6] = foldAndMask(c6, 6);
-    }
-    if (validCols > 7) {
-      masks[7] = foldAndMask(c7, 7);
-    }
-    if (validCols > 8) {
-      masks[8] = foldAndMask(c8, 8);
-    }
-    if (validCols > 9) {
-      masks[9] = foldAndMask(c9, 9);
-    }
-    if (validCols > 10) {
-      masks[10] = foldAndMask(c10, 10);
-    }
-    if (validCols > 11) {
-      masks[11] = foldAndMask(c11, 11);
-    }
+  std::array<std::uint16_t, kNr> masks{};
+  if (validCols > 0) {
+    masks[0] = foldAndMask16(c0lo, c0hi, 0);
+  }
+  if (validCols > 1) {
+    masks[1] = foldAndMask16(c1lo, c1hi, 1);
+  }
+  if (validCols > 2) {
+    masks[2] = foldAndMask16(c2lo, c2hi, 2);
+  }
+  if (validCols > 3) {
+    masks[3] = foldAndMask16(c3lo, c3hi, 3);
+  }
+  if (validCols > 4) {
+    masks[4] = foldAndMask16(c4lo, c4hi, 4);
+  }
+  if (validCols > 5) {
+    masks[5] = foldAndMask16(c5lo, c5hi, 5);
   }
 
-  const auto rowMask =
-      (validRows >= kMr) ? std::uint8_t{0xFF} : static_cast<std::uint8_t>((1U << validRows) - 1U);
+  const auto rowMask = (validRows >= kRows16) ? std::uint16_t{0xFFFF}
+                                              : static_cast<std::uint16_t>((1U << validRows) - 1U);
   for (std::size_t c = 0; c < validCols; ++c) {
-    auto m = static_cast<std::uint8_t>(masks[c] & rowMask);
+    auto m = static_cast<std::uint16_t>(masks[c] & rowMask);
     while (m != 0) {
       const int bit = __builtin_ctz(static_cast<unsigned>(m));
       emit(rowBase + static_cast<std::size_t>(bit), colBase + c);
-      m = static_cast<std::uint8_t>(m & (m - 1));
+      m = static_cast<std::uint16_t>(m & (m - 1));
     }
   }
 }
