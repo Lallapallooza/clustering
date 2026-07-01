@@ -84,6 +84,21 @@ TEST(DBSCAN, MarksIsolatedPointsAsNoise) {
   EXPECT_EQ(dbscan.labels().flatIndex(5), DBSCAN<float>::NOISY);
 }
 
+TEST(DBSCAN, SmallLowDimHighThreadCountMatchesSerial) {
+  const auto points = makeThreeBlobs(64, 2, /*seed=*/0xDB5CA);
+
+  DBSCAN<float> serial(1.0f, 5, 1);
+  serial.run(points);
+
+  DBSCAN<float> parallel(1.0f, 5, 16);
+  parallel.run(points);
+
+  ASSERT_EQ(parallel.nClusters(), serial.nClusters());
+  for (std::size_t i = 0; i < points.dim(0); ++i) {
+    EXPECT_EQ(parallel.labels().flatIndex(i), serial.labels().flatIndex(i)) << "i=" << i;
+  }
+}
+
 // A border point reachable from two separate clusters must land in the lower of the two cluster
 // ids; the tie-break is deterministic so both adjacency producers agree on the partition, which
 // keeps the result ARI-stable.

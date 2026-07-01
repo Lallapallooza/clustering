@@ -45,9 +45,9 @@ public:
    *
    * @param eps    Radius of the density neighbourhood used to test reachability.
    * @param minPts Minimum neighbour count (including self) that marks a core point.
-   * @param nJobs  Worker count for the range-index backend. A value of @c 0 is clamped upward
-   *               to @c std::thread::hardware_concurrency() so the pool is always usable by the
-   *               @ref math::Pool helpers.
+   * @param nJobs  Worker-count upper bound for the range-index backend. A value of @c 0 is
+   *               clamped upward to @c std::thread::hardware_concurrency() so the pool is always
+   *               usable by the @ref math::Pool helpers.
    */
   explicit DBSCAN(T eps, std::size_t minPts, std::size_t nJobs = 0)
       : m_eps(eps), m_minPts(minPts), m_nJobs(math::clampedJobCount(nJobs)), m_labels({0}) {
@@ -92,8 +92,9 @@ public:
     // under-estimate DBSCAN work -- the backend does per-query tree walks that are much heavier
     // than @c d ops -- and caused @c n_jobs=16 at low @c d to fall back to serial here while
     // every worker-side kernel would have cleared its own gate.
-    const math::Pool pool{math::shouldSpawnPool(n, m_nJobs, /*minOpsPerWorker=*/16)
-                              ? &math::sharedPool(m_nJobs)
+    const std::size_t poolJobs = effectiveWorkerCount(n, X.dim(1), m_nJobs);
+    const math::Pool pool{math::shouldSpawnPool(n, poolJobs, /*minOpsPerWorker=*/16)
+                              ? &math::sharedPool(poolJobs)
                               : nullptr};
 
     QueryModel queryModel(X);
@@ -148,6 +149,17 @@ private:
     if (m_labels.dim(0) != n) {
       m_labels = NDArray<std::int32_t, 1>({n});
     }
+  }
+
+  static constexpr std::size_t kSmall2dMaxParallelN = 50'000;
+  static constexpr std::size_t kSmall2dWorkerCap = 8;
+
+  [[nodiscard]] static std::size_t effectiveWorkerCount(std::size_t n, std::size_t d,
+                                                        std::size_t requested) noexcept {
+    if (d <= 2 && n <= kSmall2dMaxParallelN && requested > kSmall2dWorkerCap) {
+      return kSmall2dWorkerCap;
+    }
+    return requested;
   }
 
   /**
@@ -252,9 +264,9 @@ private:
     }
   }
 
-  T m_eps;              ///< Density-neighbourhood radius.
-  std::size_t m_minPts; ///< Minimum neighbour count for a core point.
-  std::size_t m_nJobs;  ///< Worker count clamped at construction via @ref math::clampedJobCount.
+  T m_eps;                     ///< Density-neighbourhood radius.
+  std::size_t m_minPts;        ///< Minimum neighbour count for a core point.
+  std::size_t m_nJobs;         ///< Worker-count upper bound from @ref math::clampedJobCount.
   std::size_t m_clusterId = 0; ///< Next cluster id to assign; also the final cluster count.
   /// Dense label buffer. Reallocated inside @ref run only when @c n differs from the previous
   /// call's size; every entry in `[0, n)` is rewritten each run with a cluster id (cores and
