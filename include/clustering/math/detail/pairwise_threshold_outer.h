@@ -337,8 +337,9 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
       }
     }
 
-    for (std::size_t panelBase = 0; panelBase < nPanels; panelBase += kThresholdPanelGroup) {
-      const std::size_t panelEnd = std::min(panelBase + kThresholdPanelGroup, nPanels);
+    const std::size_t panelGroup = (d >= 128) ? std::size_t{8} : kThresholdPanelGroup;
+    for (std::size_t panelBase = 0; panelBase < nPanels; panelBase += panelGroup) {
+      const std::size_t panelEnd = std::min(panelBase + panelGroup, nPanels);
       for (std::size_t tileIdx = 0; tileIdx < mTilesInChunk; ++tileIdx) {
         const std::size_t iBase = iChunkBase + (tileIdx * kMr);
         const std::size_t mc =
