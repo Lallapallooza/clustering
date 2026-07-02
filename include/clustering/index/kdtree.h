@@ -230,6 +230,15 @@ public:
     const T radius_sq = radius * radius;
     ensureLeafSoa(pool);
 
+    // Above the dim floor, one box-pruned walk per leaf replaces one walk per point: the
+    // visited-node count collapses by the leaf occupancy while the pair tests grow only by the
+    // box inflation, which the higher per-pair cost at larger d amortizes. Below the floor the
+    // per-pair scan is a few ops and the inflation dominates, so points walk individually.
+    if (m_dim >= kBlockQueryDimFloor && m_root != nullptr) {
+      blockQuery(radius_sq, minPts, pool, out);
+      return out;
+    }
+
     auto runRange = [&](std::size_t lo, std::size_t hi) {
       // Reuse the traversal stack across every query in this chunk. Tree depth stays below
       // log2(n / LeafSize) + a few for spilled internal pushes, so kDefaultStackReserve rarely
@@ -541,6 +550,132 @@ private:
               .m_id = idBase + static_cast<std::uint32_t>(nLeft + nRight)};
 
     return arena;
+  }
+
+  /// Dimension at or below which the radius sweep keeps one walk per point; from here up a
+  /// leaf's points share one box-pruned walk.
+  static constexpr std::size_t kBlockQueryDimFloor = 4;
+
+  /**
+   * @brief Radius sweep that walks the tree once per source leaf instead of once per point.
+   *
+   * For every source leaf, one depth-first walk prunes on the box-to-box gap between the leaf's
+   * bounds and each visited node; surviving target leaves are scanned once per source point and
+   * surviving pivots are distance-tested against the whole source block. Every neighbour of a
+   * source point sits inside some visited node because the box gap lower-bounds the point
+   * distance, so rows come out complete and the core flags fall out of the same pass. Pivot
+   * points are not covered by any leaf's slot range; they keep their per-point walks.
+   *
+   * Rows are owned by their source leaf's walk (pivot rows by the pivot's own walk), so the
+   * fan-out over leaves stays race-free.
+   */
+  void blockQuery(T radius_sq, std::size_t minPts, math::Pool pool,
+                  index::CoreAdjacency &out) const {
+    const std::size_t n = m_points.dim(0);
+    const std::size_t totalNodes = nodeCount();
+    const KDTreeNode *arenaNodes = m_root;
+    std::vector<const KDTreeNode *> leaves;
+    std::vector<const KDTreeNode *> pivots;
+    leaves.reserve(totalNodes);
+    for (std::size_t nodeSlot = 0; nodeSlot < totalNodes; ++nodeSlot) {
+      const KDTreeNode &node = arenaNodes[nodeSlot];
+      if (node.m_left == nullptr && node.m_right == nullptr) {
+        leaves.push_back(&node);
+      } else {
+        pivots.push_back(&node);
+      }
+    }
+
+    const T *reordered = m_points_reordered.data();
+    const std::size_t adjReserveFloor =
+        std::min(n, (m_dim == kWideAdjReserveDim) ? kWideAdjReserveFloor : kAdjReserveFloor);
+    const bool useSoa = !m_leafSoa.empty();
+
+    auto runLeafRange = [&](std::size_t lo, std::size_t hi) {
+      std::vector<const KDTreeNode *> stack;
+      stack.reserve(kDefaultStackReserve);
+      for (std::size_t li = lo; li < hi; ++li) {
+        const KDTreeNode &source = *leaves[li];
+        const std::size_t base = source.m_index;
+        const std::size_t count = source.m_dim;
+        const auto [srcMin, srcMax] = nodeBounds(&source);
+        for (std::size_t i = 0; i < count; ++i) {
+          out.rows[m_indices[base + i]].reserve(adjReserveFloor);
+        }
+
+        stack.clear();
+        stack.push_back(m_root);
+        while (!stack.empty()) {
+          const KDTreeNode *node = stack.back();
+          stack.pop_back();
+          if (node == nullptr) {
+            continue;
+          }
+          const auto [nodeMin, nodeMax] = nodeBounds(node);
+          if (math::aabbAabbGapSq(srcMin, srcMax, nodeMin, nodeMax) > radius_sq) {
+            continue;
+          }
+          if (node->m_left == nullptr && node->m_right == nullptr) {
+            const std::size_t targetBase = node->m_index;
+            const std::size_t targetCount = node->m_dim;
+            const T *targetPts = reordered + (targetBase * m_dim);
+            const T *targetSoa = useSoa ? m_leafSoa.data() + (targetBase * m_dim) : nullptr;
+            for (std::size_t i = 0; i < count; ++i) {
+              const T *qp = reordered + ((base + i) * m_dim);
+              std::vector<std::int32_t> &row = out.rows[m_indices[base + i]];
+              auto emit = [&](std::size_t j) noexcept {
+                row.push_back(static_cast<std::int32_t>(m_indices[targetBase + j]));
+              };
+              if (useSoa) {
+                math::detail::radiusScanSoa(qp, targetSoa, targetCount, m_dim, radius_sq, emit);
+              } else {
+                math::detail::radiusScan(qp, targetPts, targetCount, m_dim, radius_sq, emit);
+              }
+            }
+            continue;
+          }
+          const T *pivotRow = reordered + (node->m_index * m_dim);
+          const auto pivotIdx = static_cast<std::int32_t>(m_indices[node->m_index]);
+          for (std::size_t i = 0; i < count; ++i) {
+            const T *qp = reordered + ((base + i) * m_dim);
+            if (math::detail::sqEuclideanRowPtr(qp, pivotRow, m_dim) <= radius_sq) {
+              out.rows[m_indices[base + i]].push_back(pivotIdx);
+            }
+          }
+          stack.push_back(node->m_left);
+          stack.push_back(node->m_right);
+        }
+
+        for (std::size_t i = 0; i < count; ++i) {
+          const std::size_t rowIdx = m_indices[base + i];
+          out.isCore[rowIdx] =
+              (out.rows[rowIdx].size() >= minPts) ? std::uint8_t{1} : std::uint8_t{0};
+        }
+      }
+    };
+
+    auto runPivotRange = [&](std::size_t lo, std::size_t hi) {
+      std::vector<KDTreeNode *> stack;
+      stack.reserve(kDefaultStackReserve);
+      for (std::size_t pi = lo; pi < hi; ++pi) {
+        const std::size_t slot = pivots[pi]->m_index;
+        const T *qp = reordered + (slot * m_dim);
+        const std::size_t rowIdx = m_indices[slot];
+        std::vector<std::int32_t> &row = out.rows[rowIdx];
+        row.reserve(adjReserveFloor);
+        queryImpl(m_root, qp, radius_sq, row, stack, /*limit=*/-1);
+        out.isCore[rowIdx] = (row.size() >= minPts) ? std::uint8_t{1} : std::uint8_t{0};
+      }
+    };
+
+    if (pool.shouldParallelize(n, 4, 2)) {
+      pool.parallelForBlocks<citor::HintsDefaults>(
+          std::size_t{0}, leaves.size(), pool.stealBlocks(leaves.size(), 1), runLeafRange);
+      pool.parallelForBlocks(std::size_t{0}, pivots.size(), std::size_t{0}, runPivotRange);
+    } else {
+      runLeafRange(0, leaves.size());
+      runPivotRange(0, pivots.size());
+    }
   }
 
   /**

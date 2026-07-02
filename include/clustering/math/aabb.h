@@ -64,4 +64,37 @@ template <class T>
 #endif
 }
 
+/**
+ * @brief Squared gap distance between two axis-aligned bounding boxes.
+ *
+ * Per dimension the gap is the separation between the nearer faces, or zero where the extents
+ * overlap; the sum of squared gaps is a strict lower bound on the squared Euclidean distance
+ * between any point of one box and any point of the other. Used as the prune key when a whole
+ * leaf's point block walks the tree in one pass. Scalar on purpose: box-to-box tests run once
+ * per visited node per source leaf, orders of magnitude rarer than the per-point gap tests.
+ *
+ * @param minA First box minimum coordinates; length defines @c d.
+ * @param maxA First box maximum coordinates.
+ * @param minB Second box minimum coordinates.
+ * @param maxB Second box maximum coordinates.
+ * @return `sum_{j=0..d-1}` max(0, max(minA[j]-maxB[j], minB[j]-maxA[j]))^2.
+ */
+template <class T>
+[[nodiscard]] inline T aabbAabbGapSq(std::span<const T> minA, std::span<const T> maxA,
+                                     std::span<const T> minB, std::span<const T> maxB) noexcept {
+  CLUSTERING_ALWAYS_ASSERT(minA.size() == maxA.size() && minB.size() == maxB.size() &&
+                           minA.size() == minB.size());
+  T sum = T{0};
+  for (std::size_t j = 0; j < minA.size(); ++j) {
+    T gap = T{0};
+    if (minA[j] > maxB[j]) {
+      gap = minA[j] - maxB[j];
+    } else if (minB[j] > maxA[j]) {
+      gap = minB[j] - maxA[j];
+    }
+    sum += gap * gap;
+  }
+  return sum;
+}
+
 } // namespace clustering::math
