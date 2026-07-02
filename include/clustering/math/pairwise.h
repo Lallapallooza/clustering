@@ -9,6 +9,7 @@
 #include "clustering/always_assert.h"
 #include "clustering/math/defaults.h"
 #include "clustering/math/detail/pairwise_threshold_outer.h"
+#include "clustering/math/detail/pairwise_threshold_outer_i16.h"
 #include "clustering/math/gemm.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
@@ -637,6 +638,11 @@ void pairwiseSqEuclideanThresholdedSymmetric(const NDArray<T, 2, LX> &X, T radiu
     if (detail::canUseFusedThreshold(X, X)) {
       NDArray<T, 1> xNorms({n});
       detail::rowNormsSq(X, xNorms, pool);
+      // The quantized filter declines degenerate scales (wide-range data whose quantization
+      // slack would swallow the pruning); the f32 sweep then covers the call.
+      if (detail::pairwiseThresholdOuterAvx2I16FilteredSymmetric(X, xNorms, radiusSq, pool, emit)) {
+        return;
+      }
       detail::pairwiseThresholdOuterAvx2F32Symmetric(X, xNorms, radiusSq, pool, emit);
       return;
     }

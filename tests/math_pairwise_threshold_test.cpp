@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <random>
@@ -192,3 +194,40 @@ TEST(PairwiseThresholdAlloc, FusedKernelEmitIsAllocationFreeOnPreReservedOutput)
   EXPECT_LE(after - before, std::uint64_t{6})
       << "unexpected " << (after - before) << " aligned allocations during emit";
 }
+
+#ifdef CLUSTERING_USE_AVX2
+TEST(PairwiseThresholdSymmetricAgreement, FilteredMatchesF32DriverAcrossEnvelope) {
+  std::mt19937 rng(23);
+  std::uniform_real_distribution<float> dist(-1.0F, 1.0F);
+  for (const std::size_t n : {13UL, 97UL, 300UL}) {
+    for (const std::size_t d : {16UL, 31UL, 32UL, 64UL, 128UL}) {
+      NDArray<float, 2> X({n, d});
+      for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t k = 0; k < d; ++k) {
+          X[i][k] = dist(rng);
+        }
+      }
+      const float radius = 0.35F * std::sqrt(static_cast<float>(d));
+      const float radiusSq = radius * radius;
+
+      NDArray<float, 1> norms({n});
+      clustering::math::detail::rowNormsSq(X, norms, Pool{});
+
+      std::vector<std::pair<std::size_t, std::size_t>> viaFilter;
+      const bool handled = clustering::math::detail::pairwiseThresholdOuterAvx2I16FilteredSymmetric(
+          X, norms, radiusSq, Pool{},
+          [&](std::size_t r, std::size_t c) { viaFilter.emplace_back(r, c); });
+      ASSERT_TRUE(handled) << "n=" << n << " d=" << d;
+
+      std::vector<std::pair<std::size_t, std::size_t>> viaF32;
+      clustering::math::detail::pairwiseThresholdOuterAvx2F32Symmetric(
+          X, norms, radiusSq, Pool{},
+          [&](std::size_t r, std::size_t c) { viaF32.emplace_back(r, c); });
+
+      std::sort(viaFilter.begin(), viaFilter.end());
+      std::sort(viaF32.begin(), viaF32.end());
+      ASSERT_EQ(viaFilter, viaF32) << "edge set diverged at n=" << n << " d=" << d;
+    }
+  }
+}
+#endif // CLUSTERING_USE_AVX2
