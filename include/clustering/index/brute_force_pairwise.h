@@ -64,8 +64,18 @@ public:
     }
     // Reserve a small floor per row so the first push_backs do not trigger the vector-doubling
     // reallocation cascade that otherwise dominates adjacency construction on dense fixtures.
-    for (auto &v : adj) {
-      v.reserve(adjReserveFloor);
+    // Fanning the reserves out matters at high worker counts: the row allocations are a
+    // serial malloc train that idles every worker before the sweep starts, and the allocator's
+    // per-thread arenas let the fan-out scale.
+    const auto reserveRows = [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i) {
+        adj[i].reserve(adjReserveFloor);
+      }
+    };
+    if (pool.shouldParallelize(n, 256, 2)) {
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, reserveRows);
+    } else {
+      reserveRows(0, n);
     }
 
     const T radiusSq = radius * radius;
