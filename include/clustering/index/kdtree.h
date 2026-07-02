@@ -101,18 +101,28 @@ public:
    * This constructor builds the KDTree by sorting the points and constructing nodes accordingly.
    *
    * @param points NDArray of points to build the KDTree.
+   * @param pool   Parallelism injection for the recursive build; median splits above
+   *               @c kParallelBuildFloor fork their subtrees onto the pool. The default
+   *               serial mode produces the same tree, so the parameter only changes wall
+   *               time, never structure.
    *
    * @note The points array must remain valid for the lifetime of the KDTree, as the tree does not
    * manage the array's lifecycle.
    */
-  KDTree(const NDArray<T, 2> &points)
+  KDTree(const NDArray<T, 2> &points, math::Pool pool = {})
       : m_allocator(calculatePoolSize(points.dim(0))), m_points(points), m_dim(points.dim(1)) {
     CLUSTERING_ALWAYS_ASSERT(points.isContiguous());
     const std::size_t n = points.dim(0);
     m_indices.resize(n);
     std::iota(m_indices.begin(), m_indices.end(), 0);
-    m_root = build(0, n, 0);
-    // Materialize points in tree-build order. After @ref build rewrites @c m_indices into a
+    // Subtree node counts are a pure function of range size, so every node's arena slot and
+    // id are known before recursion starts; parallel subtree builds write disjoint slots with
+    // no shared allocation state and reproduce the serial layout exactly.
+    const std::size_t totalNodes = nodeCountFor(n);
+    KDTreeNode *arena = (totalNodes > 0) ? m_allocator.allocate(totalNodes) : nullptr;
+    m_root = (totalNodes > 0) ? buildAt(0, n, 0, arena, 0, pool) : nullptr;
+    m_nextNodeId = static_cast<std::uint32_t>(totalNodes);
+    // Materialize points in tree-build order. After @c buildAt rewrites @c m_indices into a
     // permutation matching the tree layout, a leaf's points live at @c m_points_reordered slots
     // `[leaf.m_index, leaf.m_index + leaf.m_dim)`. Contiguous access there replaces the
     // scatter-indirection `m_points[m_indices[k]`] had, which at low d was the cache-miss
@@ -406,34 +416,63 @@ private:
     delete node;
   }
 
+  /// Subtree size at or below which @c buildAt stops forking and recurses inline. Around
+  /// this size one median split costs about as much as a task spawn plus steal, so finer
+  /// forking only adds queue traffic.
+  static constexpr std::size_t kParallelBuildFloor = 512;
+
   /**
-   * @brief Recursively builds the KDTree from a set of point indices.
+   * @brief Node count of the subtree @c buildAt produces for a range of @p m points.
    *
-   * This method constructs the KDTree by selecting a median point at each level,
-   * partitioning the set of points into two subsets, and then recursively building
-   * left and right subtrees. The dimension for comparison at each level of the tree
-   * is determined by the depth, ensuring that different dimensions are used at each
-   * level of the tree for balancing.
-   *
-   * @param indices Indices of the points to be included in the current subtree.
-   * @param depth Current depth in the tree, used to determine the comparison dimension.
-   * @param node The current node being constructed.
-   * @return A pointer to the constructed KDTreeNode.
+   * Mirrors the split recursion exactly: the pivot leaves `(m - 1) / 2` points on the left
+   * and the remainder on the right. @c buildAt leans on this to pre-partition arena slots
+   * and node ids at every fork.
    */
-  KDTreeNode *build(std::size_t start, std::size_t end, std::size_t depth) {
+  static std::size_t nodeCountFor(std::size_t m) noexcept {
+    if (m == 0) {
+      return 0;
+    }
+    if (m <= LeafSize) {
+      return 1;
+    }
+    const std::size_t mLeft = (m - 1) / 2;
+    return 1 + nodeCountFor(mLeft) + nodeCountFor(m - 1 - mLeft);
+  }
+
+  /**
+   * @brief Recursively builds the KDTree over `m_indices[start, end)` into pre-assigned slots.
+   *
+   * Selects the median along the depth-cycled dimension, partitions the range, and recurses
+   * into both halves. The subtree's nodes occupy the contiguous arena block
+   * `[arena, arena + nodeCountFor(end - start))` with the parent at @c arena in front of the
+   * left then right child blocks, and carry post-order ids from @p idBase up; both follow
+   * from @c nodeCountFor alone, so sibling subtrees touch disjoint arena slots, disjoint
+   * id ranges, and disjoint @c m_indices subranges. Splits above @c kParallelBuildFloor
+   * hand the two halves to `pool.forkJoin2`; the tree is identical either way, and identical
+   * to what the fully serial recursion produced.
+   *
+   * @param start  First index of the range in @c m_indices.
+   * @param end    One past the last index of the range.
+   * @param depth  Current depth; selects the split dimension.
+   * @param arena  First arena slot of this subtree's contiguous node block.
+   * @param idBase First node id of this subtree's id range.
+   * @param pool   Parallelism injection for the fork decision.
+   * @return A pointer to the constructed subtree root, or @c nullptr for an empty range.
+   */
+  KDTreeNode *buildAt(std::size_t start, std::size_t end, std::size_t depth, KDTreeNode *arena,
+                      std::uint32_t idBase, math::Pool pool) {
     if (start >= end) {
       return nullptr;
     }
 
     // Leaf node: store range into m_indices, brute-force at query time
     if (end - start <= LeafSize) {
-      KDTreeNode *node = m_allocator.allocate();
-      *node = {.m_index = start,     // offset into m_indices
-               .m_dim = end - start, // count of points
-               .m_left = nullptr,
-               .m_right = nullptr,
-               .m_id = m_nextNodeId++};
-      return node;
+      *arena = {.m_index = start,     // offset into m_indices
+                .m_dim = end - start, // count of points
+                .m_left = nullptr,
+                .m_right = nullptr,
+                .m_id = idBase};
+      return arena;
     }
 
     // Internal node: split on median
@@ -448,14 +487,29 @@ private:
                        return m_points[lhs][dim] < m_points[rhs][dim];
                      });
 
-    KDTreeNode *node = m_allocator.allocate();
-    *node = {.m_index = median, // reordered slot of the pivot
-             .m_dim = dim,
-             .m_left = build(start, median, depth + 1),
-             .m_right = build(median + 1, end, depth + 1),
-             .m_id = m_nextNodeId++};
+    const std::size_t nLeft = nodeCountFor(median - start);
+    const std::size_t nRight = nodeCountFor(end - median - 1);
+    KDTreeNode *left = nullptr;
+    KDTreeNode *right = nullptr;
+    auto buildLeft = [&] { left = buildAt(start, median, depth + 1, arena + 1, idBase, pool); };
+    auto buildRight = [&] {
+      right = buildAt(median + 1, end, depth + 1, arena + 1 + nLeft,
+                      idBase + static_cast<std::uint32_t>(nLeft), pool);
+    };
+    if (end - start > kParallelBuildFloor && pool.pool != nullptr) {
+      pool.forkJoin2(buildLeft, buildRight);
+    } else {
+      buildLeft();
+      buildRight();
+    }
 
-    return node;
+    *arena = {.m_index = median, // reordered slot of the pivot
+              .m_dim = dim,
+              .m_left = left,
+              .m_right = right,
+              .m_id = idBase + static_cast<std::uint32_t>(nLeft + nRight)};
+
+    return arena;
   }
 
   /**
@@ -851,7 +905,7 @@ private:
   /// leaf's point @c p at `b * d + f * count + p`. Built lazily by @ref ensureLeafSoa on the first
   /// radius query so a kNN-only tree never pays for it; empty below @ref kSoaLeafDimFloor.
   mutable std::vector<T> m_leafSoa;
-  /// Monotonic node identifier assigned at @ref build; equals the final node count once the
+  /// Monotonic node identifier assigned at construction; equals the final node count once the
   /// tree is fully constructed. Keys into @ref m_nodeBounds.
   std::uint32_t m_nextNodeId = 0;
   /// Flat per-node bounds buffer; row @c 2*id holds min-coords, row @c 2*id + 1 holds max-

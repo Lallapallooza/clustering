@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 #include "clustering/always_assert.h"
@@ -97,7 +98,15 @@ public:
                               ? &math::sharedPool(poolJobs)
                               : nullptr};
 
-    QueryModel queryModel(X);
+    // Pool-aware query models parallelize their own construction (the KDTree build forks
+    // subtrees); models without that constructor keep the plain shape contract.
+    QueryModel queryModel = [&] {
+      if constexpr (std::is_constructible_v<QueryModel, const NDArray<T, 2> &, math::Pool>) {
+        return QueryModel(X, pool);
+      } else {
+        return QueryModel(X);
+      }
+    }();
     const auto adj = queryModel.query(m_eps, pool);
 
     // Core flag per point: degree (adjacency size, counts self) at or above minPts. Each entry is

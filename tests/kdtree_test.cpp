@@ -59,3 +59,35 @@ TEST(KDTree, LimitCapsTheReturnedCount) {
   auto neighbors = tree.query(query, 1.0f, 3);
   EXPECT_EQ(neighbors.size(), 3u);
 }
+
+TEST(KDTree, PoolBuiltTreeMatchesSerialBuild) {
+  // Enough points that the build recursion forks above its serial floor.
+  constexpr std::size_t kN = 4096;
+  NDArray<float, 2> points({kN, 3});
+  std::uint64_t state = 42;
+  for (std::size_t i = 0; i < kN; ++i) {
+    for (std::size_t j = 0; j < 3; ++j) {
+      state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+      points[i][j] = static_cast<float>(state >> 40) / 1000.0f;
+    }
+  }
+
+  const KDTree<float> serialTree(points);
+  const clustering::math::Pool pool{&clustering::math::sharedPool(4)};
+  const KDTree<float> poolTree(points, pool);
+
+  ASSERT_EQ(serialTree.nodeCount(), poolTree.nodeCount());
+  const auto serialPerm = serialTree.indexPermutation();
+  const auto poolPerm = poolTree.indexPermutation();
+  ASSERT_EQ(serialPerm.size(), poolPerm.size());
+  for (std::size_t i = 0; i < serialPerm.size(); ++i) {
+    ASSERT_EQ(serialPerm[i], poolPerm[i]) << "permutation diverges at slot " << i;
+  }
+
+  const auto serialAdj = serialTree.query(2.0f, clustering::math::Pool{});
+  const auto poolAdj = poolTree.query(2.0f, pool);
+  ASSERT_EQ(serialAdj.size(), poolAdj.size());
+  for (std::size_t i = 0; i < serialAdj.size(); ++i) {
+    ASSERT_EQ(serialAdj[i], poolAdj[i]) << "adjacency diverges at row " << i;
+  }
+}

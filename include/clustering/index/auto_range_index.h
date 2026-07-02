@@ -40,8 +40,11 @@ public:
    * @brief Constructs the policy, picking the backend once against `points.dim(1)`.
    *
    * @param points Row-major @c n x @c d point matrix. Must outlive the instance.
+   * @param pool   Parallelism injection forwarded to the KDTree backend's build; the
+   *               brute-force backend has no construction work to fan out.
    */
-  explicit AutoRangeIndex(const NDArray<T, 2> &points) : m_held(pick(points)) {}
+  explicit AutoRangeIndex(const NDArray<T, 2> &points, math::Pool pool = {})
+      : m_held(pick(points, pool)) {}
 
   /**
    * @brief Returns the full radius-neighborhood adjacency from the held backend.
@@ -60,11 +63,11 @@ private:
   using Brute = BruteForcePairwise<T>;
   using Held = std::variant<Tree, Brute>;
 
-  static Held pick(const NDArray<T, 2> &points) {
+  static Held pick(const NDArray<T, 2> &points, math::Pool pool) {
     if (points.dim(1) >= bruteForceDimFloor) {
       return Held(std::in_place_type<Brute>, points);
     }
-    return Held(std::in_place_type<Tree>, points);
+    return Held(std::in_place_type<Tree>, points, pool);
   }
 
   Held m_held; ///< Concrete backend picked at construction.

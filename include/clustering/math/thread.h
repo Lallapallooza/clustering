@@ -200,6 +200,25 @@ struct Pool {
   }
 
   /**
+   * @brief Run two independent tasks as a fork-join pair.
+   *
+   * Serial mode (no pool attached) runs @p a then @p b inline on the calling thread. With a
+   * pool attached the pair dispatches through the backend's fork-join path, which supports
+   * nested calls from inside worker bodies; recursive divide-and-conquer callers fan out by
+   * invoking this again from their own task bodies. Synchronous: returns after both tasks
+   * complete, with their writes visible to the caller.
+   */
+  template <class HintsT = citor::HintsDefaults, class FnA, class FnB>
+  void forkJoin2(FnA &&a, FnB &&b) const {
+    if (pool == nullptr) {
+      a();
+      b();
+      return;
+    }
+    pool->template forkJoin<HintsT>(std::forward<FnA>(a), std::forward<FnB>(b));
+  }
+
+  /**
    * @brief Run @p body in parallel over `[first, last)` partitioned into @p numBlocks blocks.
    *
    * The body is invoked once per block as `body(blockFirst, blockAfterLast)`. When @p pool is

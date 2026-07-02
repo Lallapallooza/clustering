@@ -32,6 +32,24 @@ public:
     return result;
   }
 
+  /// Bump-allocates @p count contiguous @c T objects in one step; throws @c std::bad_alloc
+  /// when fewer than @p count slots remain. Requires `count >= 1`.
+  T *allocate(std::size_t count) {
+    const auto used = static_cast<std::size_t>(next - memory);
+    if (count == 0 || (count * sizeof(T)) > (size - used)) {
+      throw std::bad_alloc();
+    }
+
+    // Element-wise placement new sidesteps the implementation-defined cookie that array
+    // placement new may prepend; trivial default construction folds the loop away.
+    T *const result = new (next) T; // NOLINT(misc-const-correctness)
+    for (std::size_t i = 1; i < count; ++i) {
+      new (next + (i * sizeof(T))) T;
+    }
+    next += count * sizeof(T);
+    return result;
+  }
+
   /// No-op: trivial destructibility lets per-element reclamation be skipped.
   void deallocate(T * /*ptr*/) {
     // Do nothing because T is trivially destructible
