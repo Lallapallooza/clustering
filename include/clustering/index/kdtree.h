@@ -128,26 +128,51 @@ public:
     // `[leaf.m_index, leaf.m_index + leaf.m_dim)`. Contiguous access there replaces the
     // scatter-indirection `m_points[m_indices[k]`] had, which at low d was the cache-miss
     // ceiling: every leaf-brute-force iteration landed on a random row of @c m_points.
+    // Rows land in disjoint slots, so the copy fans out over the pool.
     m_points_reordered.resize(n * m_dim);
     const T *src = points.data();
     T *dst = m_points_reordered.data();
-    for (std::size_t k = 0; k < n; ++k) {
-      const std::size_t src_row = m_indices[k];
-      const T *s = src + (src_row * m_dim);
-      T *d = dst + (k * m_dim);
-      for (std::size_t j = 0; j < m_dim; ++j) {
-        d[j] = s[j];
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t k = lo; k < hi; ++k) {
+        const T *s = src + (m_indices[k] * m_dim);
+        T *d = dst + (k * m_dim);
+        for (std::size_t j = 0; j < m_dim; ++j) {
+          d[j] = s[j];
+        }
       }
-    }
+    });
     // Populate per-node axis-aligned bounding boxes once the tree is built and the reordered
     // points buffer is materialized. Layout is `(numNodes * 2 * d)` flat: row @c 2*id holds the
     // min-coords vector, row @c 2*id + 1 holds the max-coords vector. Dual-tree walkers consume
     // this through @ref nodeBounds as a pair of @c std::span views; leaving @ref KDTreeNode's
     // size unchanged past the monotonic @c m_id keeps leaf-scan cache behaviour stable at
     // high @c d.
+    //
+    // Leaf boxes carry the point sweep, so they fan out over the arena; internal boxes are
+    // unions of their children, and the post-order ids let a flat ascending-id pass visit
+    // every child before its parent without recursion.
     m_nodeBounds.assign(static_cast<std::size_t>(m_nextNodeId) * 2 * m_dim, T{});
     if (m_root != nullptr) {
-      populateBounds(m_root);
+      KDTreeNode *arenaNodes = m_root;
+      pool.parallelForBlocks(std::size_t{0}, totalNodes, std::size_t{0},
+                             [&](std::size_t lo, std::size_t hi) {
+                               for (std::size_t s = lo; s < hi; ++s) {
+                                 KDTreeNode &node = arenaNodes[s];
+                                 if (node.m_left == nullptr && node.m_right == nullptr) {
+                                   populateLeafBounds(node);
+                                 }
+                               }
+                             });
+      std::vector<const KDTreeNode *> byId(totalNodes, nullptr);
+      for (std::size_t s = 0; s < totalNodes; ++s) {
+        byId[arenaNodes[s].m_id] = &arenaNodes[s];
+      }
+      for (std::size_t id = 0; id < totalNodes; ++id) {
+        const KDTreeNode &node = *byId[id];
+        if (node.m_left != nullptr || node.m_right != nullptr) {
+          unionChildBounds(node);
+        }
+      }
     }
   }
 
@@ -203,7 +228,7 @@ public:
     }
 
     const T radius_sq = radius * radius;
-    ensureLeafSoa();
+    ensureLeafSoa(pool);
 
     auto runRange = [&](std::size_t lo, std::size_t hi) {
       // Reuse the traversal stack across every query in this chunk. Tree depth stays below
@@ -766,87 +791,71 @@ private:
 
   /// Build the feature-major leaf copy on first use; a no-op when @c d is below the floor or the
   /// copy already exists. Called single-threaded at a radius query's entry, before any fan-out.
-  void ensureLeafSoa() const {
+  void ensureLeafSoa(math::Pool pool = {}) const {
     if (m_dim < kSoaLeafDimFloor || m_root == nullptr || !m_leafSoa.empty()) {
       return;
     }
     m_leafSoa.resize(m_points_reordered.size());
-    populateLeafSoa(m_root);
+    // Leaves transpose disjoint slices, so the pass fans out over the contiguous node arena.
+    const KDTreeNode *arenaNodes = m_root;
+    pool.parallelForBlocks(std::size_t{0}, nodeCount(), std::size_t{0},
+                           [&](std::size_t lo, std::size_t hi) {
+                             for (std::size_t nodeSlot = lo; nodeSlot < hi; ++nodeSlot) {
+                               const KDTreeNode &node = arenaNodes[nodeSlot];
+                               if (node.m_left == nullptr && node.m_right == nullptr) {
+                                 transposeLeafSoa(node);
+                               }
+                             }
+                           });
   }
 
-  /// Transpose every leaf's contiguous AoS rows into the feature-major @ref m_leafSoa block at
+  /// Transpose one leaf's contiguous AoS rows into the feature-major @ref m_leafSoa block at
   /// the same base offset, so the SoA radius scan reads a feature's value for the leaf's points
   /// from one contiguous span.
-  void populateLeafSoa(KDTreeNode *node) const noexcept {
-    if (node->m_left == nullptr && node->m_right == nullptr) {
-      const std::size_t base = node->m_index;
-      const std::size_t count = node->m_dim;
-      const T *aos = m_points_reordered.data() + (base * m_dim);
-      T *soa = m_leafSoa.data() + (base * m_dim);
-      for (std::size_t p = 0; p < count; ++p) {
-        for (std::size_t f = 0; f < m_dim; ++f) {
-          soa[(f * count) + p] = aos[(p * m_dim) + f];
-        }
+  void transposeLeafSoa(const KDTreeNode &leaf) const noexcept {
+    const std::size_t base = leaf.m_index;
+    const std::size_t count = leaf.m_dim;
+    const T *aos = m_points_reordered.data() + (base * m_dim);
+    T *soa = m_leafSoa.data() + (base * m_dim);
+    for (std::size_t p = 0; p < count; ++p) {
+      for (std::size_t f = 0; f < m_dim; ++f) {
+        soa[(f * count) + p] = aos[(p * m_dim) + f];
       }
-      return;
-    }
-    if (node->m_left != nullptr) {
-      populateLeafSoa(node->m_left);
-    }
-    if (node->m_right != nullptr) {
-      populateLeafSoa(node->m_right);
     }
   }
 
-  /**
-   * @brief Post-order walk that fills @ref m_nodeBounds for every node in @p node's subtree.
-   *
-   * Leaves seed their box from the contiguous points they store; internal nodes take the
-   * element-wise min/max of their children's boxes and then union-in the pivot's row so the
-   * reported box truly encloses every point routed through the node (including the pivot at
-   * the internal node's own position).
-   *
-   * @param node Root of the subtree to populate; must be non-null.
-   */
-  void populateBounds(KDTreeNode *node) noexcept {
-    T *minOut = m_nodeBounds.data() + (static_cast<std::size_t>(node->m_id) * 2 * m_dim);
+  /// Leaf box: seed from the first stored row, then fold the remaining rows into min/max.
+  void populateLeafBounds(const KDTreeNode &node) noexcept {
+    T *minOut = m_nodeBounds.data() + (static_cast<std::size_t>(node.m_id) * 2 * m_dim);
     T *maxOut = minOut + m_dim;
-
-    if (node->m_left == nullptr && node->m_right == nullptr) {
-      // Leaf: seed from the first stored row, then fold the remaining rows into min/max.
-      const std::size_t base = node->m_index;
-      const std::size_t count = node->m_dim;
-      const T *leafPts = m_points_reordered.data() + (base * m_dim);
+    const std::size_t base = node.m_index;
+    const std::size_t count = node.m_dim;
+    const T *leafPts = m_points_reordered.data() + (base * m_dim);
+    for (std::size_t j = 0; j < m_dim; ++j) {
+      minOut[j] = leafPts[j];
+      maxOut[j] = leafPts[j];
+    }
+    for (std::size_t i = 1; i < count; ++i) {
+      const T *row = leafPts + (i * m_dim);
       for (std::size_t j = 0; j < m_dim; ++j) {
-        minOut[j] = leafPts[j];
-        maxOut[j] = leafPts[j];
-      }
-      for (std::size_t i = 1; i < count; ++i) {
-        const T *row = leafPts + (i * m_dim);
-        for (std::size_t j = 0; j < m_dim; ++j) {
-          if (row[j] < minOut[j]) {
-            minOut[j] = row[j];
-          }
-          if (row[j] > maxOut[j]) {
-            maxOut[j] = row[j];
-          }
+        if (row[j] < minOut[j]) {
+          minOut[j] = row[j];
+        }
+        if (row[j] > maxOut[j]) {
+          maxOut[j] = row[j];
         }
       }
-      return;
     }
+  }
 
-    // Internal: recurse first so children's bounds are ready, then take their union. The tree
-    // invariant guarantees every internal node has at least one child -- the build routine only
-    // returns @c nullptr when @p start >= @p end, and the internal-node branch is only entered
-    // when the range exceeds @c LeafSize, which is `>= 1`.
-    if (node->m_left != nullptr) {
-      populateBounds(node->m_left);
-    }
-    if (node->m_right != nullptr) {
-      populateBounds(node->m_right);
-    }
+  /// Internal box: union of the children's boxes plus the pivot row. Requires both child
+  /// boxes to be populated already; the ctor's ascending-id pass guarantees it because a
+  /// parent's post-order id exceeds every descendant's.
+  void unionChildBounds(const KDTreeNode &node) noexcept {
+    T *minOut = m_nodeBounds.data() + (static_cast<std::size_t>(node.m_id) * 2 * m_dim);
+    T *maxOut = minOut + m_dim;
 
-    const KDTreeNode *const seed = (node->m_left != nullptr) ? node->m_left : node->m_right;
+    const KDTreeNode *const seed = (node.m_left != nullptr) ? node.m_left : node.m_right;
     const T *seedMin = m_nodeBounds.data() + (static_cast<std::size_t>(seed->m_id) * 2 * m_dim);
     const T *seedMax = seedMin + m_dim;
     for (std::size_t j = 0; j < m_dim; ++j) {
@@ -854,9 +863,9 @@ private:
       maxOut[j] = seedMax[j];
     }
 
-    if (node->m_left != nullptr && node->m_right != nullptr) {
+    if (node.m_left != nullptr && node.m_right != nullptr) {
       const T *otherMin =
-          m_nodeBounds.data() + (static_cast<std::size_t>(node->m_right->m_id) * 2 * m_dim);
+          m_nodeBounds.data() + (static_cast<std::size_t>(node.m_right->m_id) * 2 * m_dim);
       const T *otherMax = otherMin + m_dim;
       for (std::size_t j = 0; j < m_dim; ++j) {
         if (otherMin[j] < minOut[j]) {
@@ -869,7 +878,7 @@ private:
     }
 
     // Union-in the pivot's own row so the internal-node box encloses the pivot point too.
-    const std::size_t pivotSlot = node->m_index;
+    const std::size_t pivotSlot = node.m_index;
     const T *pivotRow = m_points_reordered.data() + (pivotSlot * m_dim);
     for (std::size_t j = 0; j < m_dim; ++j) {
       if (pivotRow[j] < minOut[j]) {
@@ -915,7 +924,8 @@ private:
   /// tree is fully constructed. Keys into @ref m_nodeBounds.
   std::uint32_t m_nextNodeId = 0;
   /// Flat per-node bounds buffer; row @c 2*id holds min-coords, row @c 2*id + 1 holds max-
-  /// coords, each of length @c m_dim. Populated by @ref populateBounds after the tree is built.
+  /// coords, each of length @c m_dim. Populated after the tree is built: leaf boxes fan out
+  /// over the pool; internal boxes union up in ascending-id order.
   std::vector<T> m_nodeBounds;
 };
 
