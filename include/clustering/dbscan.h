@@ -156,7 +156,7 @@ private:
     }
   }
 
-  static constexpr std::size_t kSmall2dMaxParallelN = 50'000;
+  static constexpr std::size_t kSmall2dMaxParallelN = 25'000;
   static constexpr std::size_t kSmall2dWorkerCap = 8;
 
   [[nodiscard]] static std::size_t effectiveWorkerCount(std::size_t n, std::size_t d,
