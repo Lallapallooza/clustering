@@ -239,6 +239,35 @@ public:
       return out;
     }
 
+    // Leaves whose bounding-box diagonal fits inside the radius are cliques: every member is
+    // within eps of every other, and with at least minPts members every member is a core. A
+    // query ball that swallows such a leaf can take one representative edge instead of
+    // materializing the members, so flag them once up front.
+    const std::size_t totalNodes = nodeCount();
+    const KDTreeNode *arenaNodes = m_root;
+    std::vector<std::uint8_t> leafAllCore(totalNodes, 0);
+    pool.parallelForBlocks(
+        std::size_t{0}, totalNodes, std::size_t{0}, [&](std::size_t lo, std::size_t hi) {
+          for (std::size_t nodeSlot = lo; nodeSlot < hi; ++nodeSlot) {
+            const KDTreeNode &node = arenaNodes[nodeSlot];
+            if (node.m_left != nullptr || node.m_right != nullptr || node.m_dim < minPts) {
+              continue;
+            }
+            const auto [bmin, bmax] = nodeBounds(&node);
+            T diagSq = T{0};
+            for (std::size_t j = 0; j < m_dim; ++j) {
+              const T ext = bmax[j] - bmin[j];
+              diagSq += ext * ext;
+            }
+            if (diagSq <= radius_sq) {
+              leafAllCore[node.m_id] = 1;
+            }
+          }
+        });
+
+    const std::size_t workers = pool.workerCount();
+    std::vector<std::vector<std::pair<std::int32_t, std::int32_t>>> workerEdges(workers);
+
     auto runRange = [&](std::size_t lo, std::size_t hi) {
       // Reuse the traversal stack across every query in this chunk. Tree depth stays below
       // log2(n / LeafSize) + a few for spilled internal pushes, so kDefaultStackReserve rarely
@@ -248,6 +277,9 @@ public:
       const std::size_t adjReserveFloor =
           std::min(n, (m_dim == kWideAdjReserveDim) ? kWideAdjReserveFloor : kAdjReserveFloor);
       const T *reordered = m_points_reordered.data();
+      std::vector<std::pair<std::int32_t, std::int32_t>> &edges =
+          workerEdges[math::Pool::workerIndex()];
+      const bool useSoa = !m_leafSoa.empty();
       for (std::size_t k = lo; k < hi; ++k) {
         // Walk in tree-build order so consecutive queries share tree paths and keep the visited
         // nodes warm in cache; m_indices[k] maps the reordered row back to its original slot.
@@ -257,8 +289,60 @@ public:
         // Each row is filled by exactly this query. Seed a reserve floor so the first survivors do
         // not walk the vector-doubling reallocation cascade from a zero-capacity start.
         row.reserve(adjReserveFloor);
-        queryImpl(m_root, qp, radius_sq, row, stack, /*limit=*/-1);
-        out.isCore[rowIdx] = (row.size() >= minPts) ? std::uint8_t{1} : std::uint8_t{0};
+
+        // Clique-leaf shortcut: a swallowed all-core leaf contributes its whole population to
+        // the degree and one representative edge to the component build. Taking the shortcut
+        // proves this point core (its final degree can only exceed the running guard), so the
+        // thinned row stays within the core-row contract; a point that never clears the guard
+        // scans normally and keeps a complete row.
+        std::size_t bulkDegree = 0;
+        stack.clear();
+        stack.push_back(m_root);
+        while (!stack.empty()) {
+          KDTreeNode *node = stack.back();
+          stack.pop_back();
+          if (node == nullptr) {
+            continue;
+          }
+          const auto [bmin, bmax] = nodeBounds(node);
+          if (math::pointAabbGapSq(qp, bmin, bmax) > radius_sq) {
+            continue;
+          }
+          if (node->m_left == nullptr && node->m_right == nullptr) {
+            const std::size_t base = node->m_index;
+            const std::size_t count = node->m_dim;
+            if (leafAllCore[node->m_id] != 0 && row.size() + bulkDegree + count >= minPts &&
+                math::pointAabbFarthestSq(qp, bmin, bmax) <= radius_sq) {
+              bulkDegree += count;
+              const auto rep = static_cast<std::int32_t>(m_indices[base]);
+              const auto self = static_cast<std::int32_t>(rowIdx);
+              if (rep != self) {
+                edges.emplace_back(self, rep);
+              }
+              continue;
+            }
+            const T *leafPts = reordered + (base * m_dim);
+            auto emit = [&](std::size_t i) noexcept {
+              row.push_back(static_cast<std::int32_t>(m_indices[base + i]));
+            };
+            if (useSoa) {
+              math::detail::radiusScanSoa(qp, m_leafSoa.data() + (base * m_dim), count, m_dim,
+                                          radius_sq, emit);
+            } else {
+              math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, emit);
+            }
+            continue;
+          }
+          const std::size_t pivotSlot = node->m_index;
+          const T *pivotRow = reordered + (pivotSlot * m_dim);
+          if (math::detail::sqEuclideanRowPtr(qp, pivotRow, m_dim) <= radius_sq) {
+            row.push_back(static_cast<std::int32_t>(m_indices[pivotSlot]));
+          }
+          stack.push_back(node->m_left);
+          stack.push_back(node->m_right);
+        }
+        out.isCore[rowIdx] =
+            (row.size() + bulkDegree >= minPts) ? std::uint8_t{1} : std::uint8_t{0};
       }
     };
 
@@ -272,6 +356,9 @@ public:
           [&](std::size_t lo, std::size_t hi) { runRange(lo, hi); });
     } else {
       runRange(0, n);
+    }
+    for (const auto &edges : workerEdges) {
+      out.extraEdges.insert(out.extraEdges.end(), edges.begin(), edges.end());
     }
     return out;
   }

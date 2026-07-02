@@ -97,4 +97,33 @@ template <class T>
   return sum;
 }
 
+/**
+ * @brief Squared farthest distance from a point to any point of an axis-aligned bounding box.
+ *
+ * Per dimension the farther face dominates every interior coordinate, so the sum of squared
+ * per-dimension maxima upper-bounds the squared Euclidean distance from the point to every
+ * point inside the box. When this bound is at or below a query radius the whole box lies
+ * inside the ball and a leaf can be accepted without per-point tests.
+ *
+ * @param point  Length-@c d query coordinates.
+ * @param boxMin AABB minimum coordinates; length defines @c d.
+ * @param boxMax AABB maximum coordinates.
+ * @return `sum_{j=0..d-1} max(|point[j]-boxMin[j]|, |point[j]-boxMax[j]|)^2`.
+ */
+template <class T>
+[[nodiscard]] inline T pointAabbFarthestSq(const T *point, std::span<const T> boxMin,
+                                           std::span<const T> boxMax) noexcept {
+  CLUSTERING_ALWAYS_ASSERT(boxMin.size() == boxMax.size());
+  T sum = T{0};
+  for (std::size_t j = 0; j < boxMin.size(); ++j) {
+    const T lo = point[j] - boxMin[j];
+    const T hi = boxMax[j] - point[j];
+    const T loMag = lo < T{0} ? -lo : lo;
+    const T hiMag = hi < T{0} ? -hi : hi;
+    const T farSide = loMag > hiMag ? loMag : hiMag;
+    sum += farSide * farSide;
+  }
+  return sum;
+}
+
 } // namespace clustering::math

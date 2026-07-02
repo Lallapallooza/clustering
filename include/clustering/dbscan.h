@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "clustering/always_assert.h"
@@ -110,11 +111,12 @@ public:
     // The backend derives the core flags from full degrees; core rows may carry only their
     // upper-half neighbours per the @ref clustering::index::CoreAdjacency contract, which is
     // exactly the half the component build below reads.
-    const auto [adj, isCore] = queryModel.query(m_eps, m_minPts, pool);
+    const auto [adj, isCore, extraEdges] = queryModel.query(m_eps, m_minPts, pool);
 
     // Connected components over core-core edges: density-reachability is the transitive closure of
     // "core within eps of core", which a disjoint-set union builds directly.
-    const std::vector<std::uint32_t> componentRoots = buildComponentRoots(adj, isCore, pool);
+    const std::vector<std::uint32_t> componentRoots =
+        buildComponentRoots(adj, isCore, extraEdges, pool);
 
     // Dense cluster ids in first-core-index order so the lowest-index core of each component names
     // its cluster. Writing each core's id into the label buffer now freezes it so the border pass
@@ -184,9 +186,9 @@ private:
    * @param pool   Worker pool borrowed by @ref run, or an unset handle for serial execution.
    * @return Length-@c n root array; entries of the same density-reachable component share a root.
    */
-  static std::vector<std::uint32_t>
-  buildComponentRoots(const std::vector<std::vector<std::int32_t>> &adj,
-                      const std::vector<std::uint8_t> &isCore, math::Pool pool) {
+  static std::vector<std::uint32_t> buildComponentRoots(
+      const std::vector<std::vector<std::int32_t>> &adj, const std::vector<std::uint8_t> &isCore,
+      const std::vector<std::pair<std::int32_t, std::int32_t>> &extraEdges, math::Pool pool) {
     const std::size_t n = adj.size();
     std::vector<std::uint32_t> roots(n);
 
@@ -196,12 +198,22 @@ private:
           continue;
         }
         const auto iu = static_cast<std::uint32_t>(i);
+        // No orientation filter: a backend may carry an edge in either direction only (a
+        // clique shortcut can thin the mirror side), and repeated unions are idempotent.
         for (const std::int32_t neighbor : adj[i]) {
           const auto j = static_cast<std::size_t>(neighbor);
-          if (j > i && isCore[j] != 0) {
+          if (j != i && isCore[j] != 0) {
             dsu.unite(iu, static_cast<std::uint32_t>(j));
           }
         }
+      }
+    };
+    // Representative edges the backend carried outside the rows; both endpoints are cores by
+    // the CoreAdjacency contract, and unions are idempotent, so no filtering is needed.
+    const auto uniteExtraRange = [&](auto &dsu, std::size_t lo, std::size_t hi) {
+      for (std::size_t e = lo; e < hi; ++e) {
+        dsu.unite(static_cast<std::uint32_t>(extraEdges[e].first),
+                  static_cast<std::uint32_t>(extraEdges[e].second));
       }
     };
 
@@ -209,6 +221,7 @@ private:
     if (pool.pool == nullptr || workers <= 1) {
       UnionFind<std::uint32_t> components(n);
       uniteRange(components, 0, n);
+      uniteExtraRange(components, 0, extraEdges.size());
       for (std::size_t i = 0; i < n; ++i) {
         roots[i] = components.find(static_cast<std::uint32_t>(i));
       }

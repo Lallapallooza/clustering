@@ -3,6 +3,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "clustering/math/thread.h"
@@ -21,10 +22,19 @@ namespace clustering::index {
  *
  * `isCore[i]` is nonzero iff point @c i has at least @c minPts neighbours within the radius,
  * counting itself, measured on the full two-sided degree regardless of what @c rows stores.
+ *
+ * Together, @c rows and @c extraEdges cover the core-core connectivity of the eps-graph:
+ * every pair of density-reachable cores is joined by a chain of edges present in one or the
+ * other.
  */
 struct CoreAdjacency {
   std::vector<std::vector<std::int32_t>> rows; ///< Per-point neighbour lists.
   std::vector<std::uint8_t> isCore;            ///< Per-point core flag from the full degree.
+  /// Core-core edges carried outside @c rows. A backend that proves a whole leaf lies inside
+  /// a core point's ball may link the point to one leaf representative here instead of
+  /// materializing every member in the row; both endpoints are cores and the edge is a real
+  /// eps-neighbour pair, so component building treats these exactly like row edges.
+  std::vector<std::pair<std::int32_t, std::int32_t>> extraEdges;
 };
 
 /**
