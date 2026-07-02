@@ -620,7 +620,24 @@ private:
             const std::size_t targetCount = node->m_dim;
             const T *targetPts = reordered + (targetBase * m_dim);
             const T *targetSoa = useSoa ? m_leafSoa.data() + (targetBase * m_dim) : nullptr;
-            for (std::size_t i = 0; i < count; ++i) {
+            std::size_t i = 0;
+            if (useSoa) {
+              // Paired sources share each target-column load and one call setup.
+              for (; i + 2 <= count; i += 2) {
+                std::vector<std::int32_t> &row0 = out.rows[m_indices[base + i]];
+                std::vector<std::int32_t> &row1 = out.rows[m_indices[base + i + 1]];
+                math::detail::radiusScanSoaPair(
+                    reordered + ((base + i) * m_dim), reordered + ((base + i + 1) * m_dim),
+                    targetSoa, targetCount, m_dim, radius_sq,
+                    [&](std::size_t j) noexcept {
+                      row0.push_back(static_cast<std::int32_t>(m_indices[targetBase + j]));
+                    },
+                    [&](std::size_t j) noexcept {
+                      row1.push_back(static_cast<std::int32_t>(m_indices[targetBase + j]));
+                    });
+              }
+            }
+            for (; i < count; ++i) {
               const T *qp = reordered + ((base + i) * m_dim);
               std::vector<std::int32_t> &row = out.rows[m_indices[base + i]];
               auto emit = [&](std::size_t j) noexcept {

@@ -205,4 +205,95 @@ inline void radiusScanSoa(const T *qp, const T *leaf_soa, std::size_t count, std
   }
 }
 
+/**
+ * @brief Paired-source variant of @ref radiusScanSoa: two query points sweep the same leaf in
+ *        one pass.
+ *
+ * The single-source loop is load bound on the feature columns; sharing each column load
+ * between two sources nearly halves the memory operations per scanned pair and folds two
+ * call setups into one. Emit callbacks stay per-source so each caller-side row keeps a single
+ * writer.
+ *
+ * @tparam EmitFn0 `std::invocable<std::size_t>` callable for the first source.
+ * @tparam EmitFn1 `std::invocable<std::size_t>` callable for the second source.
+ */
+template <class T, class EmitFn0, class EmitFn1>
+inline void radiusScanSoaPair(const T *qp0, const T *qp1, const T *leaf_soa, std::size_t count,
+                              std::size_t d, T radius_sq, EmitFn0 &&emit0,
+                              EmitFn1 &&emit1) noexcept {
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float>) {
+    const __m256 rsq = _mm256_set1_ps(radius_sq);
+    const auto emitGroup = [&rsq](__m256 acc, std::size_t outBase, auto &sink) noexcept {
+      auto m = static_cast<unsigned>(_mm256_movemask_ps(_mm256_cmp_ps(acc, rsq, _CMP_LE_OS)));
+      while (m != 0) {
+        sink(outBase + static_cast<std::size_t>(__builtin_ctz(m)));
+        m &= m - 1;
+      }
+    };
+    std::size_t p = 0;
+    // Two point-groups by two sources keeps four accumulator chains in flight, enough to
+    // cover the multiply-add latency while each column load feeds both sources.
+    for (; p + 16 <= count; p += 16) {
+      __m256 a00 = _mm256_setzero_ps();
+      __m256 a01 = _mm256_setzero_ps();
+      __m256 a10 = _mm256_setzero_ps();
+      __m256 a11 = _mm256_setzero_ps();
+      for (std::size_t f = 0; f < d; ++f) {
+        const __m256 q0 = _mm256_broadcast_ss(qp0 + f);
+        const __m256 q1 = _mm256_broadcast_ss(qp1 + f);
+        const float *col = leaf_soa + (f * count) + p;
+        const __m256 c0 = _mm256_loadu_ps(col);
+        const __m256 c1 = _mm256_loadu_ps(col + 8);
+        const __m256 e00 = _mm256_sub_ps(c0, q0);
+        const __m256 e01 = _mm256_sub_ps(c1, q0);
+        const __m256 e10 = _mm256_sub_ps(c0, q1);
+        const __m256 e11 = _mm256_sub_ps(c1, q1);
+        a00 = _mm256_fmadd_ps(e00, e00, a00);
+        a01 = _mm256_fmadd_ps(e01, e01, a01);
+        a10 = _mm256_fmadd_ps(e10, e10, a10);
+        a11 = _mm256_fmadd_ps(e11, e11, a11);
+      }
+      emitGroup(a00, p, emit0);
+      emitGroup(a01, p + 8, emit0);
+      emitGroup(a10, p, emit1);
+      emitGroup(a11, p + 8, emit1);
+    }
+    for (; p + 8 <= count; p += 8) {
+      __m256 a0 = _mm256_setzero_ps();
+      __m256 a1 = _mm256_setzero_ps();
+      for (std::size_t f = 0; f < d; ++f) {
+        const __m256 c = _mm256_loadu_ps(leaf_soa + (f * count) + p);
+        const __m256 e0 = _mm256_sub_ps(c, _mm256_broadcast_ss(qp0 + f));
+        const __m256 e1 = _mm256_sub_ps(c, _mm256_broadcast_ss(qp1 + f));
+        a0 = _mm256_fmadd_ps(e0, e0, a0);
+        a1 = _mm256_fmadd_ps(e1, e1, a1);
+      }
+      emitGroup(a0, p, emit0);
+      emitGroup(a1, p, emit1);
+    }
+    for (; p < count; ++p) {
+      T s0 = T{0};
+      T s1 = T{0};
+      for (std::size_t f = 0; f < d; ++f) {
+        const T v = leaf_soa[(f * count) + p];
+        const T d0 = v - qp0[f];
+        const T d1 = v - qp1[f];
+        s0 += d0 * d0;
+        s1 += d1 * d1;
+      }
+      if (s0 <= radius_sq) {
+        emit0(p);
+      }
+      if (s1 <= radius_sq) {
+        emit1(p);
+      }
+    }
+    return;
+  }
+#endif
+  radiusScanSoa(qp0, leaf_soa, count, d, radius_sq, emit0);
+  radiusScanSoa(qp1, leaf_soa, count, d, radius_sq, emit1);
+}
+
 } // namespace clustering::math::detail
