@@ -47,15 +47,15 @@ public:
       : m_held(pick(points, pool)) {}
 
   /**
-   * @brief Returns the full radius-neighborhood adjacency from the held backend.
+   * @brief Returns the core-aware radius adjacency from the held backend.
    *
    * @param radius Non-negative neighbourhood radius; comparison runs on the squared distance.
+   * @param minPts Core threshold on the self-inclusive neighbour count.
    * @param pool   Parallelism injection forwarded to the held backend.
-   * @return Length-@c n vector where element @c i lists every @c j with
-   *         `||x_i - x_j||^2 <= radius^2`.
+   * @return Rows and core flags per the @ref clustering::index::CoreAdjacency contract.
    */
-  [[nodiscard]] std::vector<std::vector<std::int32_t>> query(T radius, math::Pool pool) const {
-    return std::visit([&](const auto &idx) { return idx.query(radius, pool); }, m_held);
+  [[nodiscard]] CoreAdjacency query(T radius, std::size_t minPts, math::Pool pool) const {
+    return std::visit([&](const auto &idx) { return idx.query(radius, minPts, pool); }, m_held);
   }
 
 private:

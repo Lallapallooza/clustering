@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "clustering/always_assert.h"
+#include "clustering/index/range_query.h"
 #include "clustering/math/aabb.h"
 #include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/detail/radius_scan.h"
@@ -184,18 +185,21 @@ public:
    *
    * Walks the tree once per row, fanning the outer loop out over @p pool. Lets DBSCAN consume
    * the whole neighbor graph in one call rather than threading a per-point query loop through
-   * the caller.
+   * the caller. Every row is complete in both directions -- the walk finds all neighbours of
+   * its query point -- so the core flag is a per-row size check taken in the same pass.
    *
    * @param radius Non-negative neighbourhood radius; comparison runs on the squared distance.
+   * @param minPts Core threshold on the self-inclusive neighbour count.
    * @param pool   Parallelism injection used to fan the outer row loop out across workers.
-   * @return Length-@c n vector where element @c i lists every @c j with
-   *         `||x_i - x_j||^2 <= radius^2`.
+   * @return Rows and core flags per the @ref clustering::index::CoreAdjacency contract.
    */
-  [[nodiscard]] std::vector<std::vector<std::int32_t>> query(T radius, math::Pool pool) const {
+  [[nodiscard]] index::CoreAdjacency query(T radius, std::size_t minPts, math::Pool pool) const {
     const std::size_t n = m_points.dim(0);
-    std::vector<std::vector<std::int32_t>> adj(n);
+    index::CoreAdjacency out;
+    out.rows.resize(n);
+    out.isCore.assign(n, 0);
     if (n == 0) {
-      return adj;
+      return out;
     }
 
     const T radius_sq = radius * radius;
@@ -214,11 +218,13 @@ public:
         // Walk in tree-build order so consecutive queries share tree paths and keep the visited
         // nodes warm in cache; m_indices[k] maps the reordered row back to its original slot.
         const T *qp = reordered + (k * m_dim);
-        std::vector<std::int32_t> &row = adj[m_indices[k]];
+        const std::size_t rowIdx = m_indices[k];
+        std::vector<std::int32_t> &row = out.rows[rowIdx];
         // Each row is filled by exactly this query. Seed a reserve floor so the first survivors do
         // not walk the vector-doubling reallocation cascade from a zero-capacity start.
         row.reserve(adjReserveFloor);
         queryImpl(m_root, qp, radius_sq, row, stack, /*limit=*/-1);
+        out.isCore[rowIdx] = (row.size() >= minPts) ? std::uint8_t{1} : std::uint8_t{0};
       }
     };
 
@@ -233,7 +239,7 @@ public:
     } else {
       runRange(0, n);
     }
-    return adj;
+    return out;
   }
 
   /**

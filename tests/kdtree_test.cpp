@@ -84,10 +84,11 @@ TEST(KDTree, PoolBuiltTreeMatchesSerialBuild) {
     ASSERT_EQ(serialPerm[i], poolPerm[i]) << "permutation diverges at slot " << i;
   }
 
-  const auto serialAdj = serialTree.query(2.0f, clustering::math::Pool{});
-  const auto poolAdj = poolTree.query(2.0f, pool);
-  ASSERT_EQ(serialAdj.size(), poolAdj.size());
-  for (std::size_t i = 0; i < serialAdj.size(); ++i) {
-    ASSERT_EQ(serialAdj[i], poolAdj[i]) << "adjacency diverges at row " << i;
+  const auto serialAdj = serialTree.query(2.0f, 5, clustering::math::Pool{});
+  const auto poolAdj = poolTree.query(2.0f, 5, pool);
+  ASSERT_EQ(serialAdj.rows.size(), poolAdj.rows.size());
+  for (std::size_t i = 0; i < serialAdj.rows.size(); ++i) {
+    ASSERT_EQ(serialAdj.rows[i], poolAdj.rows[i]) << "adjacency diverges at row " << i;
+    ASSERT_EQ(serialAdj.isCore[i], poolAdj.isCore[i]) << "core flag diverges at row " << i;
   }
 }

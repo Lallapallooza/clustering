@@ -1,10 +1,13 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
+#include "clustering/index/range_query.h"
 #include "clustering/math/pairwise.h"
 #include "clustering/math/thread.h"
 #include "clustering/ndarray.h"
@@ -38,22 +41,28 @@ public:
   explicit BruteForcePairwise(const NDArray<T, 2> &points) noexcept : m_points(points) {}
 
   /**
-   * @brief Returns the full radius-neighborhood adjacency over the indexed point cloud.
+   * @brief Returns the core-aware radius adjacency over the indexed point cloud.
    *
    * Emits surviving `(i, j)` pairs directly from the fused AVX2 threshold kernel; the outer
-   * driver partitions X rows across @p pool so per-row pushes are race-free.
+   * driver partitions X rows across @p pool so per-row pushes are race-free. Full two-sided
+   * degrees come from per-worker histograms over the upper halves, so core flags never need
+   * the mirrored edges materialized; only non-core rows receive their `j < i` neighbours,
+   * which the border-assignment scan is the sole reader of.
    *
    * @param radius Non-negative neighbourhood radius; comparison runs on the squared distance.
+   * @param minPts Core threshold on the self-inclusive neighbour count.
    * @param pool   Parallelism injection forwarded to the thresholded sweep.
-   * @return Length-@c n vector where element @c i lists every @c j with
-   *         `||x_i - x_j||^2 <= radius^2`.
+   * @return Rows and core flags per the @ref clustering::index::CoreAdjacency contract.
    */
-  [[nodiscard]] std::vector<std::vector<std::int32_t>> query(T radius, math::Pool pool) const {
+  [[nodiscard]] index::CoreAdjacency query(T radius, std::size_t minPts, math::Pool pool) const {
     const std::size_t n = m_points.dim(0);
-    std::vector<std::vector<std::int32_t>> adj(n);
+    index::CoreAdjacency out;
+    out.rows.resize(n);
+    out.isCore.assign(n, 0);
     if (n == 0) {
-      return adj;
+      return out;
     }
+    std::vector<std::vector<std::int32_t>> &adj = out.rows;
 
     const std::size_t d = m_points.dim(1);
     std::size_t adjReserveFloor = 16;
@@ -72,7 +81,8 @@ public:
         adj[i].reserve(adjReserveFloor);
       }
     };
-    if (pool.shouldParallelize(n, 256, 2)) {
+    const bool fanOut = pool.shouldParallelize(n, 256, 2);
+    if (fanOut) {
       pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, reserveRows);
     } else {
       reserveRows(0, n);
@@ -81,51 +91,89 @@ public:
     const T radiusSq = radius * radius;
     // Symmetric eps-neighbour graph: the kernel emits each unique upper-triangular cell once
     // with `row <= col`. The kernel-side emit only touches `adj[row]` so workers writing
-    // disjoint row chunks remain race-free; the mirror push (`adj[col]`.push(row)) runs as a
-    // single-threaded post-pass below. Halves the pairwise compute on the brute-force path.
+    // disjoint row chunks remain race-free.
     auto emit = [&adj](std::size_t row, std::size_t col) {
       adj[row].push_back(static_cast<std::int32_t>(col));
     };
     math::pairwiseSqEuclideanThresholdedSymmetric(m_points, radiusSq, pool, emit);
 
-    // Mirror pass: each surviving upper-triangular pair `(i, j)` lives in `adj[i]`; the mirror
-    // adds `i` to `adj[j]`. Done sequentially this is an Amdahl tail that caps scaling on dense
-    // graphs at high worker counts. Snapshot the upper neighbours into a flat read-only buffer,
-    // then partition the scatter by destination row: every worker reads only the immutable
-    // snapshot and is the sole writer of its own `adj[j]` shard, so the fan-out is race-free.
-    std::vector<std::size_t> upperOffsets(n + 1);
-    upperOffsets[0] = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-      upperOffsets[i + 1] = upperOffsets[i] + adj[i].size();
-    }
-    std::vector<std::int32_t> upperFlat(upperOffsets[n]);
-    const auto snapshot = [&](std::size_t lo, std::size_t hi) {
-      for (std::size_t i = lo; i < hi; ++i) {
-        std::int32_t *dst = upperFlat.data() + upperOffsets[i];
-        const std::int32_t *src = adj[i].data();
-        for (std::size_t k = 0, e = adj[i].size(); k < e; ++k) {
-          dst[k] = src[k];
-        }
+    // Mirror degrees without mirror edges: workers accumulate `j < i` neighbour counts in
+    // private histograms that stay cache-resident, then a row-partitioned reduction folds them.
+    // Scattering the mirrored edges themselves would be a latency-bound write per edge into a
+    // random destination row; the degree is all the core verdict needs.
+    const std::size_t workers = pool.workerCount();
+    std::vector<std::vector<std::uint32_t>> workerCounts(workers);
+    const auto countRange = [&](std::size_t lo, std::size_t hi) {
+      std::vector<std::uint32_t> &counts = workerCounts[math::Pool::workerIndex()];
+      if (counts.empty()) {
+        counts.assign(n, 0);
       }
-    };
-    const auto mirrorShard = [&](std::size_t destLo, std::size_t destHi) {
-      for (std::size_t i = 0; i < destHi; ++i) {
-        for (std::size_t k = upperOffsets[i]; k < upperOffsets[i + 1]; ++k) {
-          const auto j = static_cast<std::size_t>(upperFlat[k]);
-          if (j > i && j >= destLo && j < destHi) {
-            adj[j].push_back(static_cast<std::int32_t>(i));
+      for (std::size_t i = lo; i < hi; ++i) {
+        for (const std::int32_t neighbor : adj[i]) {
+          const auto j = static_cast<std::size_t>(neighbor);
+          if (j > i) {
+            ++counts[j];
           }
         }
       }
     };
-    if (pool.shouldParallelize(n, 256, 2)) {
-      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, snapshot);
-      pool.parallelForBlocks(std::size_t{0}, n, pool.workerCount() * 2, mirrorShard);
+    std::vector<std::uint32_t> mirrorDeg(n, 0);
+    const auto reduceRange = [&](std::size_t lo, std::size_t hi) {
+      for (const std::vector<std::uint32_t> &counts : workerCounts) {
+        if (counts.empty()) {
+          continue;
+        }
+        for (std::size_t i = lo; i < hi; ++i) {
+          mirrorDeg[i] += counts[i];
+        }
+      }
+    };
+    const auto flagRange = [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i) {
+        out.isCore[i] =
+            (adj[i].size() + mirrorDeg[i] >= minPts) ? std::uint8_t{1} : std::uint8_t{0};
+      }
+    };
+    if (fanOut) {
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, countRange);
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, reduceRange);
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, flagRange);
     } else {
-      snapshot(0, n);
-      mirrorShard(0, n);
+      countRange(0, n);
+      reduceRange(0, n);
+      flagRange(0, n);
     }
-    return adj;
+
+    // Complete the non-core rows only. Workers collect the surviving `(dest, src)` mirrors
+    // into private lists; the survivor set is a vanishing fraction of the edge set, so the
+    // ordered serial apply costs a handful of pushes and keeps row contents deterministic.
+    std::vector<std::vector<std::pair<std::int32_t, std::int32_t>>> workerMirrors(workers);
+    const auto collectRange = [&](std::size_t lo, std::size_t hi) {
+      std::vector<std::pair<std::int32_t, std::int32_t>> &mirrors =
+          workerMirrors[math::Pool::workerIndex()];
+      for (std::size_t i = lo; i < hi; ++i) {
+        for (const std::int32_t neighbor : adj[i]) {
+          const auto j = static_cast<std::size_t>(neighbor);
+          if (j > i && out.isCore[j] == 0) {
+            mirrors.emplace_back(static_cast<std::int32_t>(j), static_cast<std::int32_t>(i));
+          }
+        }
+      }
+    };
+    if (fanOut) {
+      pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, collectRange);
+    } else {
+      collectRange(0, n);
+    }
+    std::vector<std::pair<std::int32_t, std::int32_t>> mirrors;
+    for (const auto &local : workerMirrors) {
+      mirrors.insert(mirrors.end(), local.begin(), local.end());
+    }
+    std::sort(mirrors.begin(), mirrors.end());
+    for (const auto &[dest, src] : mirrors) {
+      adj[static_cast<std::size_t>(dest)].push_back(src);
+    }
+    return out;
   }
 
 private:

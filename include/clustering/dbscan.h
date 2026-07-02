@@ -107,14 +107,10 @@ public:
         return QueryModel(X);
       }
     }();
-    const auto adj = queryModel.query(m_eps, pool);
-
-    // Core flag per point: degree (adjacency size, counts self) at or above minPts. Each entry is
-    // an independent size read with a disjoint write.
-    std::vector<std::uint8_t> isCore(n, 0);
-    for (std::size_t i = 0; i < n; ++i) {
-      isCore[i] = (adj[i].size() >= m_minPts) ? std::uint8_t{1} : std::uint8_t{0};
-    }
+    // The backend derives the core flags from full degrees; core rows may carry only their
+    // upper-half neighbours per the @ref clustering::index::CoreAdjacency contract, which is
+    // exactly the half the component build below reads.
+    const auto [adj, isCore] = queryModel.query(m_eps, m_minPts, pool);
 
     // Connected components over core-core edges: density-reachability is the transitive closure of
     // "core within eps of core", which a disjoint-set union builds directly.
