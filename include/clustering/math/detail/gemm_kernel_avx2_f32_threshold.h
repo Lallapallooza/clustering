@@ -20,9 +20,9 @@ namespace clustering::math::detail {
  *        squared distance lies at or below @p radiusSq.
  *
  * Computes a column-by-column inner product of an 8-row A-panel against a 6-column B-panel.
- * After the @c K-loop, converts each accumulator to `||x_i||^2 + ||y_j||^2` - 2*x_i.y_j,
- * clamps the tiny-negative cancellation region up to zero, and compares against a broadcast
- * @c radiusSq.
+ * After the @c K-loop, converts each accumulator to `||x_i||^2 + ||y_j||^2` - 2*x_i.y_j and
+ * compares against a broadcast @c radiusSq; tiny-negative cancellation values pass the
+ * comparison the same way a zero would, so no clamp is needed.
  *
  * Buffer layouts match @c packA / @c packB from @c gemm_pack.h:
  *   - @p apPanel holds an @c Mr x @c kc A-panel; element `(r, k)` is at `ap[k*Mr + r]`.
@@ -125,17 +125,15 @@ gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::s
   // Fold `dot(x_i, y_j)` into `||x_i||^2 + ||y_j||^2` - 2*dot per column, threshold-compare
   // the 8 lanes in SIMD, then pack the result into an 8-bit column mask. Walking the mask is
   // O(survivors) instead of the old scalar O(Mr * Nr) double loop. Cancellation when
-  // @c x_i ~= y_j can drop the dist fractionally below zero; the `max(.,0)` clamp preserves
-  // the non-negative squared-distance contract and never flips the sign of the comparison.
+  // @c x_i ~= y_j can drop the dist fractionally below zero; that region needs no clamp
+  // because a negative value already compares at or below the non-negative @p radiusSq.
   const __m256 xNorms = _mm256_load_ps(aRowNormsSq);
   const __m256 neg2 = _mm256_set1_ps(-2.0F);
-  const __m256 zero = _mm256_setzero_ps();
   const __m256 radiusVec = _mm256_set1_ps(radiusSq);
 
   auto foldAndMask = [&](__m256 acc, std::size_t colOffset) noexcept -> std::uint8_t {
     const __m256 yNorm = _mm256_set1_ps(bColNormsSq[colOffset]);
-    __m256 dist = _mm256_fmadd_ps(acc, neg2, _mm256_add_ps(xNorms, yNorm));
-    dist = _mm256_max_ps(dist, zero);
+    const __m256 dist = _mm256_fmadd_ps(acc, neg2, _mm256_add_ps(xNorms, yNorm));
     const __m256 survive = _mm256_cmp_ps(dist, radiusVec, _CMP_LE_OQ);
     return static_cast<std::uint8_t>(_mm256_movemask_ps(survive));
   };
@@ -163,6 +161,13 @@ gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::s
   // Clamp mask bits beyond validRows so padding rows in the last M-tile never surface.
   const auto rowMask =
       (validRows >= kMr) ? std::uint8_t{0xFF} : static_cast<std::uint8_t>((1U << validRows) - 1U);
+  // Sparse eps-graphs leave most tiles without a single survivor; one folded test skips the
+  // per-column emit walk on those.
+  const auto anyMask =
+      static_cast<std::uint8_t>(masks[0] | masks[1] | masks[2] | masks[3] | masks[4] | masks[5]);
+  if ((anyMask & rowMask) == 0) {
+    return;
+  }
   for (std::size_t c = 0; c < validCols; ++c) {
     auto m = static_cast<std::uint8_t>(masks[c] & rowMask);
     while (m != 0) {
@@ -242,16 +247,13 @@ gemmKernel16x6Avx2F32Threshold(const float *apPanelLo, const float *apPanelHi, c
   const __m256 xNormsLo = _mm256_load_ps(aRowNormsSq);
   const __m256 xNormsHi = _mm256_load_ps(aRowNormsSq + kMr);
   const __m256 neg2 = _mm256_set1_ps(-2.0F);
-  const __m256 zero = _mm256_setzero_ps();
   const __m256 radiusVec = _mm256_set1_ps(radiusSq);
 
   auto foldAndMask16 = [&](__m256 accLo, __m256 accHi,
                            std::size_t colOffset) noexcept -> std::uint16_t {
     const __m256 yNorm = _mm256_set1_ps(bColNormsSq[colOffset]);
-    __m256 distLo = _mm256_fmadd_ps(accLo, neg2, _mm256_add_ps(xNormsLo, yNorm));
-    __m256 distHi = _mm256_fmadd_ps(accHi, neg2, _mm256_add_ps(xNormsHi, yNorm));
-    distLo = _mm256_max_ps(distLo, zero);
-    distHi = _mm256_max_ps(distHi, zero);
+    const __m256 distLo = _mm256_fmadd_ps(accLo, neg2, _mm256_add_ps(xNormsLo, yNorm));
+    const __m256 distHi = _mm256_fmadd_ps(accHi, neg2, _mm256_add_ps(xNormsHi, yNorm));
     const auto maskLo =
         static_cast<unsigned>(_mm256_movemask_ps(_mm256_cmp_ps(distLo, radiusVec, _CMP_LE_OQ)));
     const auto maskHi =
@@ -281,6 +283,13 @@ gemmKernel16x6Avx2F32Threshold(const float *apPanelLo, const float *apPanelHi, c
 
   const auto rowMask = (validRows >= kRows16) ? std::uint16_t{0xFFFF}
                                               : static_cast<std::uint16_t>((1U << validRows) - 1U);
+  // Sparse eps-graphs leave most tiles without a single survivor; one folded test skips the
+  // per-column emit walk on those.
+  const auto anyMask =
+      static_cast<std::uint16_t>(masks[0] | masks[1] | masks[2] | masks[3] | masks[4] | masks[5]);
+  if ((anyMask & rowMask) == 0) {
+    return;
+  }
   for (std::size_t c = 0; c < validCols; ++c) {
     auto m = static_cast<std::uint16_t>(masks[c] & rowMask);
     while (m != 0) {
