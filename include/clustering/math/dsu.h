@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace clustering {
@@ -140,6 +142,96 @@ private:
   std::vector<std::uint8_t> m_rank;
   std::vector<std::size_t> m_size;
   std::size_t m_components;
+};
+
+/**
+ * @brief Lock-free disjoint-set-union for concurrent edge folding.
+ *
+ * Threads call @ref unite concurrently with no external locking: a root is linked under
+ * another only through a compare-and-swap on its own parent slot, which can succeed only
+ * while it is still a root, so merges linearize. @ref find applies path halving whose
+ * racing writes are benign -- parent pointers only ever move toward a root.
+ *
+ * Links are ordered by index: the larger root always attaches under the smaller, so once
+ * every @ref unite has completed (and the callers have synchronized), the root of each
+ * component is exactly its minimum member. Flattened roots are therefore reproducible
+ * across runs regardless of thread interleaving.
+ *
+ * @tparam Idx Unsigned integer index type; defaults to @c uint32_t.
+ */
+template <class Idx = std::uint32_t> class AtomicUnionFind {
+public:
+  static_assert(std::is_unsigned_v<Idx>, "AtomicUnionFind Idx must be an unsigned integer type");
+
+  /// Construct @p n singleton components numbered `[0, n)`.
+  explicit AtomicUnionFind(std::size_t n) : m_parent(n) {
+    for (std::size_t i = 0; i < n; ++i) {
+      m_parent[i].store(static_cast<Idx>(i), std::memory_order_relaxed);
+    }
+  }
+
+  /**
+   * @brief Root of the component containing @p x at some point during the call.
+   *
+   * Safe to run concurrently with @ref unite; a concurrent merge may retarget the returned
+   * root, so quiescent callers (after a join) read the final component root while racing
+   * callers read a then-current one.
+   *
+   * @param x Element index; must satisfy @c x < size().
+   * @return Root index of @p x's component.
+   */
+  Idx find(Idx x) noexcept {
+    assert(static_cast<std::size_t>(x) < m_parent.size() &&
+           "AtomicUnionFind::find index out of range");
+    while (true) {
+      Idx parent = m_parent[x].load(std::memory_order_acquire);
+      if (parent == x) {
+        return x;
+      }
+      const Idx grandparent = m_parent[parent].load(std::memory_order_acquire);
+      if (grandparent == parent) {
+        return parent;
+      }
+      // Halve the path: retarget x at its grandparent. A lost race means another thread
+      // already advanced the slot; the walk continues from the grandparent either way.
+      m_parent[x].compare_exchange_weak(parent, grandparent, std::memory_order_release,
+                                        std::memory_order_relaxed);
+      x = grandparent;
+    }
+  }
+
+  /**
+   * @brief Merge the components containing @p a and @p b; larger root links under smaller.
+   *
+   * @return @c true if the call merged two distinct components, @c false if they were
+   *         already joined when observed.
+   */
+  bool unite(Idx a, Idx b) noexcept {
+    while (true) {
+      Idx ra = find(a);
+      Idx rb = find(b);
+      if (ra == rb) {
+        return false;
+      }
+      if (rb < ra) {
+        std::swap(ra, rb);
+      }
+      Idx expected = rb;
+      if (m_parent[rb].compare_exchange_strong(expected, ra, std::memory_order_acq_rel,
+                                               std::memory_order_acquire)) {
+        return true;
+      }
+      // rb stopped being a root mid-flight; restart from the advanced positions.
+      a = ra;
+      b = expected;
+    }
+  }
+
+  /// Total number of elements under management (fixed at construction).
+  [[nodiscard]] std::size_t size() const noexcept { return m_parent.size(); }
+
+private:
+  std::vector<std::atomic<Idx>> m_parent;
 };
 
 } // namespace clustering

@@ -118,18 +118,18 @@ public:
 
     // Connected components over core-core edges: density-reachability is the transitive closure of
     // "core within eps of core", which a disjoint-set union builds directly.
-    UnionFind<std::uint32_t> components = buildComponents(adj, isCore, pool);
+    const std::vector<std::uint32_t> componentRoots = buildComponentRoots(adj, isCore, pool);
 
     // Dense cluster ids in first-core-index order so the lowest-index core of each component names
     // its cluster. Writing each core's id into the label buffer now freezes it so the border pass
-    // reads it without touching the mutating @ref UnionFind::find.
+    // reads it without another root lookup.
     std::int32_t *labels = m_labels.data();
     std::vector<std::int32_t> rootCluster(n, UNCLASSIFIED);
     for (std::size_t i = 0; i < n; ++i) {
       if (isCore[i] == 0) {
         continue;
       }
-      const auto root = components.find(static_cast<std::uint32_t>(i));
+      const auto root = componentRoots[i];
       std::int32_t &slot = rootCluster[root];
       if (slot == UNCLASSIFIED) {
         slot = static_cast<std::int32_t>(m_clusterId);
@@ -172,25 +172,29 @@ private:
   }
 
   /**
-   * @brief Connected components over the core-core eps-graph as a disjoint-set union.
+   * @brief Per-point component roots over the core-core eps-graph.
    *
    * Once the range queries fan out, the component build is the dominant serial cost at low
-   * dimension, where dense neighbourhoods make the core-core edge set far larger than @p n. Each
-   * worker folds a disjoint slice of source rows into its own union-find with no shared writes,
-   * then the per-worker sets merge serially. Connectivity is order independent, so the partition
-   * is identical to a single-threaded pass. With no pool attached, or a single worker, the merge
-   * overhead buys nothing so the whole graph unites in one serial pass.
+   * dimension, where dense neighbourhoods make the core-core edge set far larger than @p n. The
+   * parallel path folds edges into one shared @ref AtomicUnionFind: merges linearize through a
+   * compare-and-swap on the losing root's parent slot, so workers share the structure with no
+   * per-worker copies and no serial fold afterwards. Connectivity is order independent, and the
+   * union-by-min link rule pins each parallel component root to its minimum member, so the
+   * flattened roots are reproducible across thread interleavings. Root identity only keys the
+   * first-core-order cluster id mapping in @ref run, which depends on the partition alone.
    *
    * @param adj    Eps-adjacency list indexed by point row.
    * @param isCore Per-point core flag.
    * @param pool   Worker pool borrowed by @ref run, or an unset handle for serial execution.
-   * @return Disjoint-set union whose roots name the density-reachable components.
+   * @return Length-@c n root array; entries of the same density-reachable component share a root.
    */
-  static UnionFind<std::uint32_t> buildComponents(const std::vector<std::vector<std::int32_t>> &adj,
-                                                  const std::vector<std::uint8_t> &isCore,
-                                                  math::Pool pool) {
+  static std::vector<std::uint32_t>
+  buildComponentRoots(const std::vector<std::vector<std::int32_t>> &adj,
+                      const std::vector<std::uint8_t> &isCore, math::Pool pool) {
     const std::size_t n = adj.size();
-    const auto uniteRange = [&](UnionFind<std::uint32_t> &dsu, std::size_t lo, std::size_t hi) {
+    std::vector<std::uint32_t> roots(n);
+
+    const auto uniteRange = [&](auto &dsu, std::size_t lo, std::size_t hi) {
       for (std::size_t i = lo; i < hi; ++i) {
         if (isCore[i] == 0) {
           continue;
@@ -209,34 +213,23 @@ private:
     if (pool.pool == nullptr || workers <= 1) {
       UnionFind<std::uint32_t> components(n);
       uniteRange(components, 0, n);
-      return components;
-    }
-
-    // One union-find per worker, indexed by the worker's stable id inside the task body so no two
-    // threads ever touch the same set. More blocks than workers lets dynamic stealing balance the
-    // skewed per-row degree.
-    std::vector<UnionFind<std::uint32_t>> locals;
-    locals.reserve(workers);
-    for (std::size_t w = 0; w < workers; ++w) {
-      locals.emplace_back(n);
-    }
-    pool.parallelForBlocks(std::size_t{0}, n, workers * 4, [&](std::size_t lo, std::size_t hi) {
-      uniteRange(locals[math::Pool::workerIndex()], lo, hi);
-    });
-
-    // Fold every worker's connectivity into one set: uniting each row with its per-worker root
-    // transfers that worker's unions without revisiting the adjacency.
-    UnionFind<std::uint32_t> components(n);
-    for (std::size_t w = 0; w < workers; ++w) {
-      UnionFind<std::uint32_t> &local = locals[w];
-      for (std::uint32_t x = 0; x < static_cast<std::uint32_t>(n); ++x) {
-        const std::uint32_t root = local.find(x);
-        if (root != x) {
-          components.unite(x, root);
-        }
+      for (std::size_t i = 0; i < n; ++i) {
+        roots[i] = components.find(static_cast<std::uint32_t>(i));
       }
+      return roots;
     }
-    return components;
+
+    // More blocks than workers lets dynamic stealing balance the skewed per-row degree; the
+    // shared structure makes block placement irrelevant to the result.
+    AtomicUnionFind<std::uint32_t> components(n);
+    pool.parallelForBlocks(std::size_t{0}, n, workers * 4,
+                           [&](std::size_t lo, std::size_t hi) { uniteRange(components, lo, hi); });
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) {
+      for (std::size_t i = lo; i < hi; ++i) {
+        roots[i] = components.find(static_cast<std::uint32_t>(i));
+      }
+    });
+    return roots;
   }
 
   /**

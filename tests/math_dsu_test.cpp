@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include "clustering/math/dsu.h"
+#include "clustering/math/thread.h"
 
 using clustering::UnionFind;
 
@@ -174,5 +177,76 @@ TEST(UnionFind, ComponentSizeMatchesBruteForceOverRandomMerges) {
         EXPECT_EQ(uf.componentSize(i), oracle[i]) << "root=" << i << " step=" << step;
       }
     }
+  }
+}
+
+TEST(AtomicUnionFind, MatchesSerialPartitionOnRandomEdges) {
+  constexpr std::size_t kN = 2048;
+  constexpr std::size_t kEdges = 6000;
+  std::mt19937 rng(7);
+  std::uniform_int_distribution<std::uint32_t> pick(0, kN - 1);
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> edges;
+  edges.reserve(kEdges);
+  for (std::size_t e = 0; e < kEdges; ++e) {
+    edges.emplace_back(pick(rng), pick(rng));
+  }
+
+  UnionFind<std::uint32_t> serial(kN);
+  clustering::AtomicUnionFind<std::uint32_t> atomic(kN);
+  for (const auto &[a, b] : edges) {
+    serial.unite(a, b);
+    atomic.unite(a, b);
+  }
+
+  // Same partition: pairs agree on same-component membership everywhere.
+  for (std::uint32_t i = 1; i < kN; ++i) {
+    EXPECT_EQ(serial.find(i) == serial.find(i - 1), atomic.find(i) == atomic.find(i - 1));
+  }
+}
+
+TEST(AtomicUnionFind, RootIsMinimumMemberAfterQuiescence) {
+  clustering::AtomicUnionFind<std::uint32_t> dsu(10);
+  dsu.unite(7, 3);
+  dsu.unite(3, 9);
+  dsu.unite(5, 7);
+  EXPECT_EQ(dsu.find(9), 3u);
+  EXPECT_EQ(dsu.find(5), 3u);
+  EXPECT_EQ(dsu.find(7), 3u);
+  EXPECT_EQ(dsu.find(0), 0u);
+}
+
+TEST(AtomicUnionFind, ConcurrentUnionsMatchSerialRoots) {
+  constexpr std::size_t kN = 4096;
+  std::mt19937 rng(11);
+  std::uniform_int_distribution<std::uint32_t> pick(0, kN - 1);
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> edges;
+  edges.reserve(20000);
+  for (std::size_t e = 0; e < 20000; ++e) {
+    edges.emplace_back(pick(rng), pick(rng));
+  }
+
+  clustering::AtomicUnionFind<std::uint32_t> shared(kN);
+  auto &pool = clustering::math::sharedPool(8);
+  clustering::math::Pool handle{&pool};
+  handle.parallelForBlocks(std::size_t{0}, edges.size(), std::size_t{16},
+                           [&](std::size_t lo, std::size_t hi) {
+                             for (std::size_t e = lo; e < hi; ++e) {
+                               shared.unite(edges[e].first, edges[e].second);
+                             }
+                           });
+
+  UnionFind<std::uint32_t> serial(kN);
+  std::vector<std::uint32_t> minRoot(kN);
+  for (const auto &[a, b] : edges) {
+    serial.unite(a, b);
+  }
+  // Serial min-per-component reference.
+  std::vector<std::uint32_t> componentMin(kN, std::numeric_limits<std::uint32_t>::max());
+  for (std::uint32_t i = 0; i < kN; ++i) {
+    const std::uint32_t r = serial.find(i);
+    componentMin[r] = std::min(componentMin[r], i);
+  }
+  for (std::uint32_t i = 0; i < kN; ++i) {
+    EXPECT_EQ(shared.find(i), componentMin[serial.find(i)]) << "at element " << i;
   }
 }
