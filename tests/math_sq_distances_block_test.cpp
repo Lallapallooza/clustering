@@ -70,7 +70,13 @@ TEST(MathRefreshMinSq, MatchesScalarFoldAcrossShapes) {
         expected[i] = std::min(expected[i], cand);
       }
       std::vector<float> actual = minSq;
-      refreshMinSqAgainstRow(fx.row.data(), fx.points.data(), count, d, actual.data());
+      const float sum =
+          refreshMinSqAgainstRow(fx.row.data(), fx.points.data(), count, d, actual.data());
+      double expectedSum = 0.0;
+      for (std::size_t i = 0; i < count; ++i) {
+        expectedSum += expected[i];
+      }
+      EXPECT_NEAR(sum, expectedSum, 1e-4 * (1.0 + expectedSum)) << "d=" << d << " count=" << count;
       for (std::size_t i = 0; i < count; ++i) {
         EXPECT_NEAR(actual[i], expected[i], relTolerance(expected[i]))
             << "d=" << d << " count=" << count << " i=" << i;

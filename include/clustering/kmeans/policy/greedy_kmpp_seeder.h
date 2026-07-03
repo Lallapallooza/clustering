@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <span>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -79,6 +79,40 @@ using math::detail::sqEuclideanRowPtr;
   }
   const std::size_t cap = std::max<std::size_t>(1, (rows * opsPerRow) / kMinOpsPerBlock);
   return std::min(pool.stealBlocks(rows), cap);
+}
+
+/**
+ * @brief Index of the first element in `[lo, hi)` whose inclusive prefix over @p weights
+ *        exceeds @p rem.
+ *
+ * The 8-lane stride hops whole chunks while their mass stays at or below the draw, then the
+ * scalar walk finishes inside the crossing chunk. Falls back to the last index when rounding
+ * pushes the draw past the range's mass, mirroring the end-iterator clamp of an
+ * `upper_bound` over a materialized prefix array.
+ */
+template <class T>
+[[nodiscard]] inline std::size_t inverseCdfPickInRange(const T *weights, std::size_t lo,
+                                                       std::size_t hi, T rem) noexcept {
+  std::size_t i = lo;
+  T run = T{0};
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float>) {
+    for (; i + 8 <= hi; i += 8) {
+      const float chunk = math::detail::horizontalSumAvx2(_mm256_loadu_ps(weights + i));
+      if (!(run + chunk <= rem)) {
+        break;
+      }
+      run += chunk;
+    }
+  }
+#endif
+  for (; i < hi; ++i) {
+    run += weights[i];
+    if (run > rem) {
+      return i;
+    }
+  }
+  return hi - 1;
 }
 
 #ifdef CLUSTERING_USE_AVX2
@@ -383,7 +417,7 @@ public:
                 "GreedyKmppSeeder<T> requires T to be float or double");
 
   GreedyKmppSeeder()
-      : m_candRows({0, 0}), m_candRowsT({0, 0}), m_candDistSq({0, 0}), m_cumDistSq({0}),
+      : m_candRows({0, 0}), m_candRowsT({0, 0}), m_candDistSq({0, 0}), m_sweepSums({0}),
         m_minSq({0}), m_distsFlat({0, 0}), m_xNormsSq({0}), m_candNormsSq({0}), m_gemmApArena({0}),
         m_gemmBpArena({0}), m_localScores({0}) {}
 
@@ -426,7 +460,7 @@ public:
     T *centroidsData = outCentroids.data();
     T *minSq = m_minSq.data();
     T *candRowsData = m_candRows.data();
-    T *cumDistSq = m_cumDistSq.data();
+    T *sweepSums = m_sweepSums.data();
     T *candDistSqData = m_candDistSq.data();
 #ifdef CLUSTERING_USE_AVX2
     T *candRowsTData = m_candRowsT.data();
@@ -449,18 +483,23 @@ public:
     const auto first = static_cast<std::size_t>(math::randUniformU64(rng) % n);
     std::memcpy(centroidsData, xData + (first * d), d * sizeof(T));
 
+    // Every sweep that mutates minSq banks its block's weight into sweepSums, so candidate
+    // sampling never needs a separate pass over the array. The block partition is the
+    // deterministic sliceLo split of parallelForExactBlocksWithSlot; sweepLo mirrors it.
+    const std::size_t sweepBlocks = detail::greedyKmppSweepBlocks(pool, n, d + 8);
+    auto sweepLo = [n, sweepBlocks](std::size_t s) noexcept { return (n * s) / sweepBlocks; };
+
     {
       const T *firstRow = centroidsData;
-      auto initRange = [&](std::size_t lo, std::size_t hi) noexcept {
-        for (std::size_t i = lo; i < hi; ++i) {
-          minSq[i] = detail::sqEuclideanRowPtr(xData + (i * d), firstRow, d);
-        }
-      };
-      if (pool.shouldParallelize(n, 1024, 2)) {
-        pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n), initRange);
-      } else {
-        initRange(0, n);
-      }
+      pool.parallelForExactBlocksWithSlot(
+          std::size_t{0}, n, sweepBlocks,
+          [&](std::size_t lo, std::size_t hi, std::size_t s) noexcept {
+            for (std::size_t i = lo; i < hi; ++i) {
+              minSq[i] = std::numeric_limits<T>::infinity();
+            }
+            sweepSums[s] = math::detail::refreshMinSqAgainstRow(firstRow, xData + (lo * d), hi - lo,
+                                                                d, minSq + lo);
+          });
     }
 
     if (k == 1) {
@@ -470,13 +509,13 @@ public:
     std::vector<std::size_t> candidates(nLocalTrials, 0);
     std::vector<T> scores(nLocalTrials, T{0});
 
-    // Cumulative weight array driving inverse-CDF candidate sampling. The single-pass
-    // decoupled-lookback inclusiveScan work-steals and weights its lookback chains per CCD, so a
-    // slower cache cluster does not gate the scan the way a block-per-worker Blelloch pass would.
     for (std::size_t c = 1; c < k; ++c) {
-      const T total = pool.template inclusiveScan<citor::HintsDefaults>(
-          std::span<const T>(minSq, n), std::span<T>(cumDistSq, n), T{0},
-          [](T a, T b) noexcept { return a + b; });
+      // The fold visits blocks in slot order, so the total is deterministic no matter which
+      // worker refreshed which block.
+      T total = T{0};
+      for (std::size_t s = 0; s < sweepBlocks; ++s) {
+        total += sweepSums[s];
+      }
 
       // Degenerate guard: when every chosen centroid coincides with every remaining point the
       // total collapses to ~0; pick the next centroid uniformly so the routine cannot stall.
@@ -484,27 +523,28 @@ public:
         const auto pick = static_cast<std::size_t>(math::randUniformU64(rng) % n);
         std::memcpy(centroidsData + (c * d), xData + (pick * d), d * sizeof(T));
         const T *cRow = centroidsData + (c * d);
-        auto degenRange = [&](std::size_t lo, std::size_t hi) noexcept {
-          math::detail::refreshMinSqAgainstRow(cRow, xData + (lo * d), hi - lo, d, minSq + lo);
-        };
-        if (pool.shouldParallelize(n, 1024, 2)) {
-          pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n), degenRange);
-        } else {
-          degenRange(0, n);
-        }
+        pool.parallelForExactBlocksWithSlot(
+            std::size_t{0}, n, sweepBlocks,
+            [&](std::size_t lo, std::size_t hi, std::size_t s) noexcept {
+              sweepSums[s] = math::detail::refreshMinSqAgainstRow(cRow, xData + (lo * d), hi - lo,
+                                                                  d, minSq + lo);
+            });
         continue;
       }
 
-      // Draw nLocalTrials candidates by inverse-CDF sampling on the cumulative array via
-      // std::upper_bound. Determinism: identical seed + identical n produces identical candidate
-      // sets because the @c randUnit draw sequence is the same and the cum array is identical.
-      const T *cumBegin = cumDistSq;
-      const T *cumEnd = cumDistSq + n;
+      // Draw nLocalTrials candidates by inverse-CDF sampling: locate the block whose banked
+      // weight straddles the draw, then walk only that block. An empty or zero-weight block
+      // can never straddle a draw in `[0, total)` because the block fold above accumulates in
+      // the same order. Identical seed + identical n produces identical candidate sets.
       for (std::size_t t = 0; t < nLocalTrials; ++t) {
         const T u = math::randUnit<T>(rng) * total;
-        const T *it = std::upper_bound(cumBegin, cumEnd, u);
-        const std::size_t pick = (it == cumEnd) ? (n - 1) : static_cast<std::size_t>(it - cumBegin);
-        candidates[t] = pick;
+        std::size_t s = 0;
+        T acc = T{0};
+        while (s + 1 < sweepBlocks && acc + sweepSums[s] <= u) {
+          acc += sweepSums[s];
+          ++s;
+        }
+        candidates[t] = detail::inverseCdfPickInRange(minSq, sweepLo(s), sweepLo(s + 1), u - acc);
       }
 
       // Pack the L candidate rows into a contiguous (L, d) buffer so the batched scoring kernel
@@ -823,17 +863,12 @@ public:
       // writes per row in the score sweep.
       const T *winnerRow = xData + (bestCandidate * d);
       std::memcpy(centroidsData + (c * d), winnerRow, d * sizeof(T));
-      auto winnerRange = [&](std::size_t lo, std::size_t hi) noexcept {
-        math::detail::refreshMinSqAgainstRow(winnerRow, xData + (lo * d), hi - lo, d, minSq + lo);
-      };
-      // The refresh reads two rows and conditionally stores per point, so the per-row cost
-      // carries a constant floor on top of the d-term; fold it into the width estimate.
-      const std::size_t blocksW = detail::greedyKmppSweepBlocks(pool, n, d + 8);
-      if (blocksW > 1) {
-        pool.parallelForBlocks(std::size_t{0}, n, blocksW, winnerRange);
-      } else {
-        winnerRange(0, n);
-      }
+      pool.parallelForExactBlocksWithSlot(
+          std::size_t{0}, n, sweepBlocks,
+          [&](std::size_t lo, std::size_t hi, std::size_t s) noexcept {
+            sweepSums[s] = math::detail::refreshMinSqAgainstRow(winnerRow, xData + (lo * d),
+                                                                hi - lo, d, minSq + lo);
+          });
     }
   }
 
@@ -849,8 +884,9 @@ private:
     if (m_candDistSq.dim(0) != n || m_candDistSq.dim(1) != w) {
       m_candDistSq = NDArray<T, 2, Layout::Contig>({n == 0 ? std::size_t{1} : n, w});
     }
-    if (m_cumDistSq.dim(0) != n) {
-      m_cumDistSq = NDArray<T, 1>({n});
+    const std::size_t sweepSlots = std::max<std::size_t>(workers, std::size_t{1}) * 8;
+    if (m_sweepSums.dim(0) != sweepSlots) {
+      m_sweepSums = NDArray<T, 1>({sweepSlots});
     }
     if (m_minSq.dim(0) != n) {
       m_minSq = NDArray<T, 1>({n});
@@ -911,9 +947,9 @@ private:
   /// pack. Lets the commit step pick out the winner column without re-scanning x against the
   /// winner centroid -- saves an O(n*d) pass per outer pick.
   NDArray<T, 2, Layout::Contig> m_candDistSq;
-  /// Per-outer-iteration prefix sum of @c minSq, length @c n. Drives inverse-CDF sampling in
-  /// `log(n)` time instead of an @c L*n linear scan.
-  NDArray<T, 1> m_cumDistSq;
+  /// Per-sweep-block sums of the refreshed @c minSq, banked by every sweep that mutates the
+  /// array. Sampling folds these to the total and walks only the straddling block.
+  NDArray<T, 1> m_sweepSums;
   /// Per-point running min-squared-distance to the selected centroid set. Private to the
   /// seeder; the Lloyd policy owns its own per-point distance scratch.
   NDArray<T, 1> m_minSq;

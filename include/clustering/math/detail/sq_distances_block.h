@@ -149,18 +149,22 @@ template <class T>
  * @param row    Contiguous @p d-element row every point is measured against.
  * @param points Base of @p count rows, each @p d contiguous elements.
  * @param minSq  Length-@p count running minima, updated in place.
+ * @return Sum of the refreshed minima over the block, so a sweep can hand its caller the
+ *         sampling weight of the range it just touched without a second pass.
  */
 template <class T>
-inline void refreshMinSqAgainstRow(const T *row, const T *points, std::size_t count, std::size_t d,
-                                   T *minSq) noexcept {
+inline T refreshMinSqAgainstRow(const T *row, const T *points, std::size_t count, std::size_t d,
+                                T *minSq) noexcept {
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
                 "refreshMinSqAgainstRow: T must be float or double.");
+  T sum = T{0};
   std::size_t i = 0;
 #ifdef CLUSTERING_USE_AVX2
   if constexpr (std::is_same_v<T, float>) {
     if (d == 2) {
       const __m256 cx = _mm256_set1_ps(row[0]);
       const __m256 cy = _mm256_set1_ps(row[1]);
+      __m256 acc = _mm256_setzero_ps();
       // shufps keeps its picks inside each 128-bit lane, so the distances land in
       // [p0 p1 p4 p5 | p2 p3 p6 p7] order; vpermps restores point order before the fold.
       const __m256i order = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
@@ -174,11 +178,15 @@ inline void refreshMinSqAgainstRow(const T *row, const T *points, std::size_t co
         const __m256 lane = _mm256_fmadd_ps(dy, dy, _mm256_mul_ps(dx, dx));
         const __m256 dist = _mm256_permutevar8x32_ps(lane, order);
         const __m256 m = _mm256_loadu_ps(minSq + i);
-        _mm256_storeu_ps(minSq + i, _mm256_min_ps(dist, m));
+        const __m256 mn = _mm256_min_ps(dist, m);
+        _mm256_storeu_ps(minSq + i, mn);
+        acc = _mm256_add_ps(acc, mn);
       }
+      sum += horizontalSumAvx2(acc);
     } else if (d >= kAvx2Lanes<T>) {
       constexpr std::size_t kStage = 64;
       alignas(32) std::array<float, kStage> stage;
+      __m256 acc = _mm256_setzero_ps();
       for (; i + 8 <= count; i += kStage) {
         const std::size_t blk = (count - i < kStage) ? (count - i) : kStage;
         sqDistancesAosBlock(row, points + (i * d), blk, d, stage.data());
@@ -186,19 +194,23 @@ inline void refreshMinSqAgainstRow(const T *row, const T *points, std::size_t co
         for (; j + 8 <= blk; j += 8) {
           const __m256 dist = _mm256_load_ps(stage.data() + j);
           const __m256 m = _mm256_loadu_ps(minSq + i + j);
-          _mm256_storeu_ps(minSq + i + j, _mm256_min_ps(dist, m));
+          const __m256 mn = _mm256_min_ps(dist, m);
+          _mm256_storeu_ps(minSq + i + j, mn);
+          acc = _mm256_add_ps(acc, mn);
         }
         for (; j < blk; ++j) {
           const float cand = stage[j];
           if (cand < minSq[i + j]) {
             minSq[i + j] = cand;
           }
+          sum += minSq[i + j];
         }
         if (blk < kStage) {
           i += blk;
           break;
         }
       }
+      sum += horizontalSumAvx2(acc);
     }
   }
 #endif
@@ -207,7 +219,9 @@ inline void refreshMinSqAgainstRow(const T *row, const T *points, std::size_t co
     if (cand < minSq[i]) {
       minSq[i] = cand;
     }
+    sum += minSq[i];
   }
+  return sum;
 }
 
 } // namespace clustering::math::detail
