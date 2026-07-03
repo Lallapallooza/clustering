@@ -16,11 +16,9 @@ namespace clustering::math::detail {
  * @brief AVX2 f32 8x6 microkernel; produces the same column-major @c Mr x @c Nr output tile as
  *        `gemmKernelMrNrScalar<float, Beta>`.
  *
- * Six @c __m256 accumulators (one per output column) each carry all eight row-elements of that
- * column in a single YMM register. The K-step issues one aligned 32-byte load from the packed A
- * panel, six scalar broadcasts from the packed B panel, and six FMAs that accumulate
- * @c a * broadcast(b_c) into `acc[c]`. The column-major tile lets the epilogue flush each
- * accumulator with a single aligned @c _mm256_store_ps at @c tile + c*Mr.
+ * Two independent accumulator chains per output column carry even and odd K steps, then fold at
+ * the epilogue. The column-major tile lets the epilogue flush each accumulator with a single
+ * aligned @c _mm256_store_ps at @c tile + c*Mr.
  *
  * Buffer layouts are identical to `gemmKernelMrNrScalar<float, Beta>`; see that declaration
  * for the @c ap / @c bp / @c tile contracts and the tail-protocol invariant. The AVX2 kernel
@@ -51,23 +49,55 @@ void gemmKernel8x6Avx2F32(const float *ap, const float *bp, float *tile, std::si
   float *__restrict__ tLocal = tile;
   const std::size_t kcLocal = kc;
 
-  __m256 c0 = _mm256_setzero_ps();
-  __m256 c1 = _mm256_setzero_ps();
-  __m256 c2 = _mm256_setzero_ps();
-  __m256 c3 = _mm256_setzero_ps();
-  __m256 c4 = _mm256_setzero_ps();
-  __m256 c5 = _mm256_setzero_ps();
+  __m256 c0a = _mm256_setzero_ps();
+  __m256 c0b = _mm256_setzero_ps();
+  __m256 c1a = _mm256_setzero_ps();
+  __m256 c1b = _mm256_setzero_ps();
+  __m256 c2a = _mm256_setzero_ps();
+  __m256 c2b = _mm256_setzero_ps();
+  __m256 c3a = _mm256_setzero_ps();
+  __m256 c3b = _mm256_setzero_ps();
+  __m256 c4a = _mm256_setzero_ps();
+  __m256 c4b = _mm256_setzero_ps();
+  __m256 c5a = _mm256_setzero_ps();
+  __m256 c5b = _mm256_setzero_ps();
 
-  for (std::size_t k = 0; k < kcLocal; ++k) {
+  std::size_t k = 0;
+  for (; k + 1 < kcLocal; k += 2) {
+    const __m256 a = _mm256_load_ps(apLocal + (k * kMr));
+    const __m256 b = _mm256_load_ps(apLocal + ((k + 1) * kMr));
+    const float *bRow = bpLocal + (k * kNr);
+    const float *bRowNext = bpLocal + ((k + 1) * kNr);
+    c0a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 0), c0a);
+    c0b = _mm256_fmadd_ps(b, _mm256_broadcast_ss(bRowNext + 0), c0b);
+    c1a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 1), c1a);
+    c1b = _mm256_fmadd_ps(b, _mm256_broadcast_ss(bRowNext + 1), c1b);
+    c2a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 2), c2a);
+    c2b = _mm256_fmadd_ps(b, _mm256_broadcast_ss(bRowNext + 2), c2b);
+    c3a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 3), c3a);
+    c3b = _mm256_fmadd_ps(b, _mm256_broadcast_ss(bRowNext + 3), c3b);
+    c4a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 4), c4a);
+    c4b = _mm256_fmadd_ps(b, _mm256_broadcast_ss(bRowNext + 4), c4b);
+    c5a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 5), c5a);
+    c5b = _mm256_fmadd_ps(b, _mm256_broadcast_ss(bRowNext + 5), c5b);
+  }
+  if (k < kcLocal) {
     const __m256 a = _mm256_load_ps(apLocal + (k * kMr));
     const float *bRow = bpLocal + (k * kNr);
-    c0 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 0), c0);
-    c1 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 1), c1);
-    c2 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 2), c2);
-    c3 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 3), c3);
-    c4 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 4), c4);
-    c5 = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 5), c5);
+    c0a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 0), c0a);
+    c1a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 1), c1a);
+    c2a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 2), c2a);
+    c3a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 3), c3a);
+    c4a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 4), c4a);
+    c5a = _mm256_fmadd_ps(a, _mm256_broadcast_ss(bRow + 5), c5a);
   }
+
+  const __m256 c0 = _mm256_add_ps(c0a, c0b);
+  const __m256 c1 = _mm256_add_ps(c1a, c1b);
+  const __m256 c2 = _mm256_add_ps(c2a, c2b);
+  const __m256 c3 = _mm256_add_ps(c3a, c3b);
+  const __m256 c4 = _mm256_add_ps(c4a, c4b);
+  const __m256 c5 = _mm256_add_ps(c5a, c5b);
 
   const __m256 alphaV = _mm256_broadcast_ss(&alpha);
 
