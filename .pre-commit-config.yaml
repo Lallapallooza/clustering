@@ -49,3 +49,10 @@ repos:
     hooks:
       - id: commitizen
         stages: [commit-msg]
+
+  - repo: https://github.com/jorisroovers/gitlint
+    rev: v0.19.1
+    hooks:
+      - id: gitlint
+        args: [--msg-filename]
+        stages: [commit-msg]
