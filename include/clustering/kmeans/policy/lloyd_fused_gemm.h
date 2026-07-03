@@ -790,12 +790,19 @@ private:
         return;
       }
       if (useFused) {
-        constexpr std::size_t kMr = math::detail::kKernelMr<float>;
-        const std::size_t mTiles = (n + kMr - 1) / kMr;
+        constexpr std::size_t kMr8 = math::detail::kKernelMr<float>;
+        constexpr std::size_t kMr16 = 16;
+        const bool useWideTile = workers > 1;
+        const std::size_t mTiles =
+            useWideTile ? ((n + kMr16 - 1) / kMr16) : ((n + kMr8 - 1) / kMr8);
         pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
             std::size_t{0}, mTiles, workers,
             [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
-              assignScatterFusedTiles(X, labels, k, useKahan, lo, hi, slot);
+              if (useWideTile) {
+                assignScatterFused16Tiles(X, labels, k, useKahan, lo, hi, slot);
+              } else {
+                assignScatterFusedTiles(X, labels, k, useKahan, lo, hi, slot);
+              }
             });
         foldPartialSlabs(useKahan, workers, k, d);
         return;
@@ -949,6 +956,28 @@ private:
     }
   }
 
+  /// Fused 16-row argmin-GEMM + scatter over M-tiles `[tileLo, tileHi)`.
+  void assignScatterFused16Tiles(const NDArray<T, 2, Layout::Contig> &X,
+                                 NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                                 std::size_t tileLo, std::size_t tileHi,
+                                 std::size_t slot) noexcept {
+    constexpr std::size_t kMr = 16;
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const T *xBase = X.data();
+    const std::int32_t *labelsBase = labels.data();
+    const float *bpacked = m_packedB.data();
+    const float *normsPacked = m_packedCSqNorms.data();
+    for (std::size_t t = tileLo; t < tileHi; ++t) {
+      math::detail::argminFusedM16TileF32(X, bpacked, normsPacked, labels, m_minDistSq, t, n, k, d);
+      const std::size_t iBase = t * kMr;
+      const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+      for (std::size_t r = 0; r < mc; ++r) {
+        scatterRowToSlab(xBase, labelsBase, iBase + r, slot, k, d, useKahan);
+      }
+    }
+  }
+
   /**
    * @brief Plex-driven Lloyd loop for the direct, fused, and chunked-Hamerly assignment
    *        families.
@@ -976,9 +1005,7 @@ private:
     const bool useChunked = d > math::defaults::pairwiseArgminMaxD;
     // Partition work units, not rows, so a kernel tile or GEMM chunk never straddles two
     // slots.
-    const std::size_t unit = useChunked
-                                 ? math::pairwiseArgminChunkRows
-                                 : (useDirect ? std::size_t{16} : math::detail::kKernelMr<float>);
+    const std::size_t unit = useChunked ? math::pairwiseArgminChunkRows : std::size_t{16};
     const std::size_t units = (n + unit - 1) / unit;
 
     HamerlyShiftTop2 top2{};
@@ -1054,7 +1081,7 @@ private:
       if (useDirect) {
         assignScatterDirect16Tiles(X, centroids, labels, k, useKahan, lo, hi, s);
       } else {
-        assignScatterFusedTiles(X, labels, k, useKahan, lo, hi, s);
+        assignScatterFused16Tiles(X, labels, k, useKahan, lo, hi, s);
       }
       if (hamerlyEligible && phaseIdx == 0) {
         seedHamerlyBoundsFromMinDistRange(labels, k, d, std::min(lo * unit, n),

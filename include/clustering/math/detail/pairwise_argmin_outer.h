@@ -111,6 +111,83 @@ inline void argminFusedMTileF32(const NDArray<float, 2, Layout::Contig> &X, cons
   std::memcpy(labels.data() + iBase, argBuf.data(), mc * sizeof(std::int32_t));
 }
 
+inline void argminFusedM16TileF32(const NDArray<float, 2, Layout::Contig> &X, const float *bpacked,
+                                  const float *normsPacked, NDArray<std::int32_t, 1> &labels,
+                                  NDArray<float, 1> &outMinSq, std::size_t tileIdx, std::size_t n,
+                                  std::size_t k, std::size_t d) noexcept {
+  constexpr std::size_t kMr = kKernelMr<float>;
+  constexpr std::size_t kTileRows = 16;
+  constexpr std::size_t kNr = kKernelNr<float>;
+  const std::size_t nPanels = (k + kNr - 1) / kNr;
+  const std::size_t cpanelSize = kNr * d;
+
+  const std::size_t iBase = tileIdx * kTileRows;
+  const std::size_t mc = (iBase + kTileRows <= n) ? kTileRows : (n - iBase);
+  const std::size_t mc0 = (mc < kMr) ? mc : kMr;
+  const std::size_t mc1 = mc - mc0;
+
+  alignas(32) std::array<float, kTileRows * defaults::pairwiseArgminMaxD> apScratch{};
+  CLUSTERING_ALWAYS_ASSERT(d <= defaults::pairwiseArgminMaxD);
+  const auto xDesc = ::clustering::detail::describeMatrix(X);
+  packA<float>(xDesc, iBase, mc, 0, d, apScratch.data());
+
+  const float *ap0 = apScratch.data();
+  const float *ap1 = apScratch.data() + (kMr * d);
+  __m256 bestMin0 = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+  __m256 bestMin1 = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+  __m256i bestArg0 = _mm256_set1_epi32(-1);
+  __m256i bestArg1 = _mm256_set1_epi32(-1);
+
+  for (std::size_t p = 0; p < nPanels; ++p) {
+    const auto jBase = static_cast<std::int32_t>(p * kNr);
+    const float *bpPanel = bpacked + (p * cpanelSize);
+    const float *normsPanel = normsPacked + (p * kNr);
+    gemmKernel8x6Avx2F32FusedArgmin(ap0, bpPanel, normsPanel, d, jBase, bestMin0, bestArg0);
+    if (mc1 > 0) {
+      gemmKernel8x6Avx2F32FusedArgmin(ap1, bpPanel, normsPanel, d, jBase, bestMin1, bestArg1);
+    }
+  }
+
+  alignas(32) std::array<float, kMr> xNorms0{};
+  alignas(32) std::array<float, kMr> xNorms1{};
+  for (std::size_t r = 0; r < mc0; ++r) {
+    const float *row = X.data() + ((iBase + r) * d);
+    float s = 0.0F;
+    for (std::size_t t = 0; t < d; ++t) {
+      s += row[t] * row[t];
+    }
+    xNorms0[r] = s;
+  }
+  for (std::size_t r = 0; r < mc1; ++r) {
+    const float *row = X.data() + ((iBase + kMr + r) * d);
+    float s = 0.0F;
+    for (std::size_t t = 0; t < d; ++t) {
+      s += row[t] * row[t];
+    }
+    xNorms1[r] = s;
+  }
+  bestMin0 = _mm256_add_ps(bestMin0, _mm256_load_ps(xNorms0.data()));
+  bestMin0 = _mm256_max_ps(bestMin0, _mm256_setzero_ps());
+  bestMin1 = _mm256_add_ps(bestMin1, _mm256_load_ps(xNorms1.data()));
+  bestMin1 = _mm256_max_ps(bestMin1, _mm256_setzero_ps());
+
+  alignas(32) std::array<float, kMr> minBuf0{};
+  alignas(32) std::array<float, kMr> minBuf1{};
+  alignas(32) std::array<std::int32_t, kMr> argBuf0{};
+  alignas(32) std::array<std::int32_t, kMr> argBuf1{};
+  _mm256_store_ps(minBuf0.data(), bestMin0);
+  _mm256_store_ps(minBuf1.data(), bestMin1);
+  _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf0.data()), bestArg0);
+  _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf1.data()), bestArg1);
+
+  std::memcpy(outMinSq.data() + iBase, minBuf0.data(), mc0 * sizeof(float));
+  std::memcpy(labels.data() + iBase, argBuf0.data(), mc0 * sizeof(std::int32_t));
+  if (mc1 > 0) {
+    std::memcpy(outMinSq.data() + iBase + kMr, minBuf1.data(), mc1 * sizeof(float));
+    std::memcpy(labels.data() + iBase + kMr, argBuf1.data(), mc1 * sizeof(std::int32_t));
+  }
+}
+
 /**
  * @brief Process a single 8-row M-tile of the small-d direct argmin path.
  *
