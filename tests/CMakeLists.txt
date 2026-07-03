@@ -14,6 +14,7 @@ add_executable(
     math_dsu_test.cpp
     math_equality_test.cpp
     math_heap_test.cpp
+    math_inverse_cdf_blocks_test.cpp
     math_pairwise_test.cpp
     math_pairwise_argmin_test.cpp
     math_pairwise_threshold_test.cpp

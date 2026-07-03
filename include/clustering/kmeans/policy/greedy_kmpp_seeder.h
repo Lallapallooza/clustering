@@ -13,6 +13,7 @@
 #include "clustering/always_assert.h"
 #include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/detail/gemm_outer.h"
+#include "clustering/math/detail/inverse_cdf_blocks.h"
 #include "clustering/math/detail/matrix_desc.h"
 #include "clustering/math/detail/sq_distances_block.h"
 #include "clustering/math/pairwise.h"
@@ -79,40 +80,6 @@ using math::detail::sqEuclideanRowPtr;
   }
   const std::size_t cap = std::max<std::size_t>(1, (rows * opsPerRow) / kMinOpsPerBlock);
   return std::min(pool.stealBlocks(rows), cap);
-}
-
-/**
- * @brief Index of the first element in `[lo, hi)` whose inclusive prefix over @p weights
- *        exceeds @p rem.
- *
- * The 8-lane stride hops whole chunks while their mass stays at or below the draw, then the
- * scalar walk finishes inside the crossing chunk. Falls back to the last index when rounding
- * pushes the draw past the range's mass, mirroring the end-iterator clamp of an
- * `upper_bound` over a materialized prefix array.
- */
-template <class T>
-[[nodiscard]] inline std::size_t inverseCdfPickInRange(const T *weights, std::size_t lo,
-                                                       std::size_t hi, T rem) noexcept {
-  std::size_t i = lo;
-  T run = T{0};
-#ifdef CLUSTERING_USE_AVX2
-  if constexpr (std::is_same_v<T, float>) {
-    for (; i + 8 <= hi; i += 8) {
-      const float chunk = math::detail::horizontalSumAvx2(_mm256_loadu_ps(weights + i));
-      if (!(run + chunk <= rem)) {
-        break;
-      }
-      run += chunk;
-    }
-  }
-#endif
-  for (; i < hi; ++i) {
-    run += weights[i];
-    if (run > rem) {
-      return i;
-    }
-  }
-  return hi - 1;
 }
 
 #ifdef CLUSTERING_USE_AVX2
@@ -796,8 +763,8 @@ private:
         acc += sweepSums[s];
         ++s;
       }
-      candidates[t] = detail::inverseCdfPickInRange(minSq, (n * s) / sweepBlocks,
-                                                    (n * (s + 1)) / sweepBlocks, u - acc);
+      candidates[t] = math::detail::inverseCdfPickInRange(minSq, (n * s) / sweepBlocks,
+                                                          (n * (s + 1)) / sweepBlocks, u - acc);
     }
   }
 

@@ -14,6 +14,7 @@
 #include "clustering/always_assert.h"
 #include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/detail/avx2_reductions.h"
+#include "clustering/math/detail/inverse_cdf_blocks.h"
 #include "clustering/math/detail/sq_distances_block.h"
 #include "clustering/math/detail/sq_distances_tile.h"
 #include "clustering/math/pairwise.h"
@@ -24,7 +25,12 @@
 namespace clustering::kmeans {
 
 using math::detail::affineInPlaceAvx2;
+using math::detail::bankWeightBlockSums;
 using math::detail::fillAvx2;
+#ifdef CLUSTERING_USE_AVX2
+using math::detail::inverseCdfPickInBlock8F32;
+#endif
+using math::detail::inverseCdfPickInRange;
 using math::detail::minDistBatchedAvx2F32;
 using math::detail::scaleAvx2;
 using math::detail::sqDistancesAosBlock;
@@ -117,6 +123,12 @@ public:
   }
 
 private:
+  /// Elements per banked q block on the non-alias sampling path. Eight elements let the
+  /// in-block resolve run as one branchless in-register prefix scan while the block prefix
+  /// stays an eighth of `n`, so the batched halving probes a far smaller footprint than a
+  /// full cumulative array would.
+  static constexpr std::size_t kCdfBlockElems = 8;
+
   void runChain(const NDArray<T, 2, Layout::Contig> &X, std::size_t k, std::size_t m,
                 std::uint64_t seed, math::Pool pool, NDArray<T, 2, Layout::Contig> &outCentroids) {
     const std::size_t n = X.dim(0);
@@ -176,16 +188,24 @@ private:
     }
 
     // Walker alias table samples in `O(1)` but its build pass has random writes into
-    // `prob[l]` whose cost grows with `n` once `prob` overflows L2; the prefix-sum builder is
-    // a single sequential pass. They break even when the chain's per-call sample budget
-    // amortises the alias build's `O(n)` random-access overhead. The shape gate below routes
-    // small-`n` workloads to alias and large-`n` workloads to prefix-sum + binary search.
+    // `prob[l]` whose cost grows with `n` once `prob` overflows L2; the block-sum bank is a
+    // throughput-bound streaming pass plus a short prefix over the per-block totals. They
+    // break even when the chain's per-call sample budget amortises the alias build's `O(n)`
+    // random-access overhead. The shape gate below routes small-`n` workloads to alias and
+    // large-`n` workloads to block search + in-block inverse-CDF walk.
     const std::size_t chainSamples = (k - 1) * (m + 1);
     const bool useAlias = chainSamples * 5 > n;
+    const std::size_t qBlocks = (n + kCdfBlockElems - 1) / kCdfBlockElems;
     if (useAlias) {
       buildAliasTable(qData, n);
     } else {
-      buildPrefixSum(qData, m_aliasProb.data(), n);
+      T *blockPrefix = m_aliasProb.data();
+      bankWeightBlockSums(qData, n, kCdfBlockElems, blockPrefix);
+      T running = T{0};
+      for (std::size_t b = 0; b < qBlocks; ++b) {
+        running += blockPrefix[b];
+        blockPrefix[b] = running;
+      }
     }
 
     // Step 3: for each remaining centroid, pre-sample the chain's `m+1` proposals plus their
@@ -204,7 +224,7 @@ private:
           yIdxBatch[t] = sampleFromAlias(rng, n);
         }
       } else {
-        sampleBatchFromPrefix(rng, m_aliasProb.data(), n, m + 1, yIdxBatch);
+        sampleBatchFromBlocks(rng, qData, m_aliasProb.data(), n, qBlocks, m + 1, yIdxBatch);
       }
       for (std::size_t t = 0; t < m; ++t) {
         uBatch[t] = math::randUnit<T>(rng);
@@ -340,25 +360,17 @@ private:
     return (u < m_aliasProb.data()[i]) ? i : m_aliasIdx.data()[i];
   }
 
-  /// Inclusive prefix sum into @p qCumOut so inverse-CDF binary search can sample.
-  void buildPrefixSum(const T *qSrc, T *qCumOut, std::size_t n) noexcept {
-    T running = T{0};
-    for (std::size_t i = 0; i < n; ++i) {
-      running += qSrc[i];
-      qCumOut[i] = running;
-    }
-  }
-
-  /// Level-synchronous batch of inverse-CDF binary searches over @p qCum (length @p n,
-  /// monotonically non-decreasing; total mass `qCum[n-1]`). One draw's search is a chain of
-  /// dependent probes, so a draw-at-a-time walk serializes every cache miss; advancing the
-  /// whole batch one level at a time issues each level's probes independently and lets the
-  /// misses overlap. The draw order matches the one-at-a-time form, so identical seeds keep
-  /// producing identical candidate sequences. Uses @c m_yDistBatch as scratch for the draw
-  /// targets; callers overwrite it after sampling.
-  void sampleBatchFromPrefix(math::pcg64 &rng, const T *qCum, std::size_t n, std::size_t count,
-                             std::size_t *outIdx) noexcept {
-    const T total = qCum[n - 1];
+  /// Level-synchronous batch of inverse-CDF searches over the banked block prefix
+  /// @p blockPrefix (length @p qBlocks, inclusive; total mass `blockPrefix[qBlocks-1]`),
+  /// finished by an in-block walk over the raw @p q weights. The block prefix stays cache
+  /// resident, so the batched halving never chases misses into a length-@p n array; one
+  /// @ref inverseCdfPickInRange per draw resolves the crossing block. The draw order matches
+  /// the one-at-a-time form, so identical seeds keep producing identical candidate
+  /// sequences. Uses @c m_yDistBatch as scratch for the draw targets; callers overwrite it
+  /// after sampling.
+  void sampleBatchFromBlocks(math::pcg64 &rng, const T *q, const T *blockPrefix, std::size_t n,
+                             std::size_t qBlocks, std::size_t count, std::size_t *outIdx) noexcept {
+    const T total = blockPrefix[qBlocks - 1];
     T *u = m_yDistBatch.data();
     for (std::size_t t = 0; t < count; ++t) {
       u[t] = math::randUnit<T>(rng) * total;
@@ -368,17 +380,31 @@ private:
     }
     // Branchless range halving: the live range length depends only on itself, so every draw
     // sits at the same level and the per-level probe loop stays uniform.
-    std::size_t len = n + 1;
+    std::size_t len = qBlocks + 1;
     while (len > 1) {
       const std::size_t half = len / 2;
       for (std::size_t t = 0; t < count; ++t) {
-        outIdx[t] += (qCum[outIdx[t] + half - 1] <= u[t]) ? half : 0;
+        outIdx[t] += (blockPrefix[outIdx[t] + half - 1] <= u[t]) ? half : 0;
       }
       len -= half;
     }
     for (std::size_t t = 0; t < count; ++t) {
-      if (outIdx[t] >= n) {
-        outIdx[t] = n - 1;
+      std::size_t b = outIdx[t];
+      if (b >= qBlocks) {
+        b = qBlocks - 1;
+      }
+      const T rem = u[t] - ((b > 0) ? blockPrefix[b - 1] : T{0});
+      const std::size_t lo = b * kCdfBlockElems;
+      if (n - lo >= kCdfBlockElems) {
+#ifdef CLUSTERING_USE_AVX2
+        if constexpr (std::is_same_v<T, float>) {
+          outIdx[t] = lo + inverseCdfPickInBlock8F32(q + lo, rem);
+          continue;
+        }
+#endif
+        outIdx[t] = inverseCdfPickInRange(q, lo, lo + kCdfBlockElems, rem);
+      } else {
+        outIdx[t] = inverseCdfPickInRange(q, lo, n, rem);
       }
     }
   }
