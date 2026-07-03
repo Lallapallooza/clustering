@@ -192,12 +192,18 @@ public:
     std::size_t iter = 0;
     bool converged = false;
 
-    // Hamerly pruning starts once @c d leaves the direct small-D path. Fused-argmin shapes seed
+    // Hamerly pruning always runs above the direct small-D path. Fused-argmin shapes seed
     // valid per-point bounds after the first dense assignment; chunked shapes seed them inline
-    // during the argmin post-pass. @c k is capped by @c kHamerlyMaxK because the per-row scan
-    // uses a stack-allocated distance buffer; above that, Elkan handles bounded shapes and the
-    // rest fall back to unbounded assignment.
-    const bool hamerlyEligible = (d > detail::kDirectArgminMaxD) && (k <= kHamerlyMaxK) && (k >= 2);
+    // during the argmin post-pass; direct shapes seed them in a post-pass over the first dense
+    // assignment and join only when the scan volume and pool width keep the pruning ahead of
+    // the dense tile kernel (see @ref kHamerlyMinDirectScanDims, @ref kHamerlyDirectWorkerCap).
+    // @c k is capped by @c kHamerlyMaxK because the per-row scan uses a stack-allocated
+    // distance buffer; above that, Elkan handles bounded shapes and the rest fall back to
+    // unbounded assignment.
+    const bool directHamerly =
+        (d * k >= kHamerlyMinDirectScanDims) && (workerCount <= kHamerlyDirectWorkerCap);
+    const bool hamerlyEligible =
+        ((d > detail::kDirectArgminMaxD) || directHamerly) && (k <= kHamerlyMaxK) && (k >= 2);
     // Elkan keeps k lower bounds per sample instead of Hamerly's one, pruning far more distance
     // work once k exceeds Hamerly's regime. The @c n * k bound matrix grows linearly in both,
     // so we gate on an @c n * k envelope bound (memory ceiling) and require @c k above the
@@ -1196,6 +1202,26 @@ private:
    * Hamerly's single lower bound so we'd switch strategies rather than grow the buffer.
    */
   static constexpr std::size_t kHamerlyMaxK = 64;
+
+  /**
+   * @brief Minimum @c d * @c k dense-scan volume for Hamerly bounds on the direct small-D
+   *        path.
+   *
+   * A skipped row saves about `d * k` dims of kernel work against a constant bound check,
+   * so the scan must be wide enough for the upkeep to pay for itself; below the floor the
+   * dense tile kernel recomputes faster than the bounds can prune.
+   */
+  static constexpr std::size_t kHamerlyMinDirectScanDims = 128;
+
+  /**
+   * @brief Widest pool for which Hamerly bounds stay on below the direct-path boundary.
+   *
+   * Bound pruning trades per-row branches for skipped kernel work, which only wins while
+   * the assignment is compute-bound. Wide pools push the low-@c d iteration latency-bound,
+   * where the branchy per-row walk loses to the dense tile kernel's throughput even at
+   * high skip rates.
+   */
+  static constexpr std::size_t kHamerlyDirectWorkerCap = 4;
 
   /**
    * @brief Maximum @c k for which Elkan's @c n * k bound matrix is allowed to fit in memory.
