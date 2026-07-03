@@ -164,7 +164,7 @@ private:
     // op budget amortises the spawn cost.
     const T *firstRow = centroidsData;
     const std::size_t qOps = n * d;
-    if (pool.shouldParallelizeWork(qOps, /*minOpsPerWorker=*/std::size_t{1} << 17)) {
+    if (pool.shouldParallelizeWork(qOps, /*minOpsPerWorker=*/std::size_t{1} << 15)) {
       qPrecomputeParallel(xData, firstRow, n, d, qData, pool);
     } else {
       sqDistancesAosBlock<T>(firstRow, xData, n, d, qData);
