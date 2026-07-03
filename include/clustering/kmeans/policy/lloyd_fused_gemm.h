@@ -772,12 +772,19 @@ private:
 #ifdef CLUSTERING_USE_AVX2
     if constexpr (std::is_same_v<T, float>) {
       if (useDirect) {
-        constexpr std::size_t kMr = 8;
-        const std::size_t mTiles = (n + kMr - 1) / kMr;
+        constexpr std::size_t kMr8 = 8;
+        constexpr std::size_t kMr16 = 16;
+        const bool useWideTile = workers > 1;
+        const std::size_t mTiles =
+            useWideTile ? ((n + kMr16 - 1) / kMr16) : ((n + kMr8 - 1) / kMr8);
         pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
             std::size_t{0}, mTiles, workers,
             [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
-              assignScatterDirectTiles(X, centroids, labels, k, useKahan, lo, hi, slot);
+              if (useWideTile) {
+                assignScatterDirect16Tiles(X, centroids, labels, k, useKahan, lo, hi, slot);
+              } else {
+                assignScatterDirectTiles(X, centroids, labels, k, useKahan, lo, hi, slot);
+              }
             });
         foldPartialSlabs(useKahan, workers, k, d);
         return;
@@ -899,6 +906,27 @@ private:
     }
   }
 
+  /// Direct 16-row argmin + scatter over M-tiles `[tileLo, tileHi)` into slot @p slot's slab.
+  void assignScatterDirect16Tiles(const NDArray<T, 2, Layout::Contig> &X,
+                                  const NDArray<T, 2, Layout::Contig> &centroids,
+                                  NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                                  std::size_t tileLo, std::size_t tileHi,
+                                  std::size_t slot) noexcept {
+    constexpr std::size_t kMr = 16;
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const T *xBase = X.data();
+    const std::int32_t *labelsBase = labels.data();
+    for (std::size_t t = tileLo; t < tileHi; ++t) {
+      math::detail::argminDirectM16TileF32(X, centroids, labels, m_minDistSq, t, n, k, d);
+      const std::size_t iBase = t * kMr;
+      const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+      for (std::size_t r = 0; r < mc; ++r) {
+        scatterRowToSlab(xBase, labelsBase, iBase + r, slot, k, d, useKahan);
+      }
+    }
+  }
+
   /// Fused argmin-GEMM + scatter over M-tiles `[tileLo, tileHi)`; reads the packed centroid
   /// panels in @c m_packedB / @c m_packedCSqNorms, which the caller has already refreshed.
   void assignScatterFusedTiles(const NDArray<T, 2, Layout::Contig> &X,
@@ -950,7 +978,7 @@ private:
     // slots.
     const std::size_t unit = useChunked
                                  ? math::pairwiseArgminChunkRows
-                                 : (useDirect ? std::size_t{8} : math::detail::kKernelMr<float>);
+                                 : (useDirect ? std::size_t{16} : math::detail::kKernelMr<float>);
     const std::size_t units = (n + unit - 1) / unit;
 
     HamerlyShiftTop2 top2{};
@@ -1024,7 +1052,7 @@ private:
         return;
       }
       if (useDirect) {
-        assignScatterDirectTiles(X, centroids, labels, k, useKahan, lo, hi, s);
+        assignScatterDirect16Tiles(X, centroids, labels, k, useKahan, lo, hi, s);
       } else {
         assignScatterFusedTiles(X, labels, k, useKahan, lo, hi, s);
       }

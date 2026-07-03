@@ -165,6 +165,79 @@ inline void argminDirectMTileF32(const NDArray<float, 2, Layout::Contig> &X,
   std::memcpy(labelsData + iBase, argBuf.data(), mc * sizeof(std::int32_t));
 }
 
+inline void argminDirectM16TileF32(const NDArray<float, 2, Layout::Contig> &X,
+                                   const NDArray<float, 2, Layout::Contig> &C,
+                                   NDArray<std::int32_t, 1> &labels, NDArray<float, 1> &outMinSq,
+                                   std::size_t tileIdx, std::size_t n, std::size_t k,
+                                   std::size_t d) noexcept {
+  constexpr std::size_t kMr = 8;
+  constexpr std::size_t kTileRows = 16;
+  const float *xData = X.data();
+  const float *cData = C.data();
+  std::int32_t *labelsData = labels.data();
+  float *minSqData = outMinSq.data();
+
+  const std::size_t iBase = tileIdx * kTileRows;
+  const std::size_t mc = (iBase + kTileRows <= n) ? kTileRows : (n - iBase);
+  const std::size_t mc0 = (mc < kMr) ? mc : kMr;
+  const std::size_t mc1 = mc - mc0;
+
+  alignas(32) std::array<float, kMr * 8> xTile0{};
+  alignas(32) std::array<float, kMr * 8> xTile1{};
+  for (std::size_t r = 0; r < mc0; ++r) {
+    const float *src = xData + ((iBase + r) * d);
+    for (std::size_t t = 0; t < d; ++t) {
+      xTile0[(t * kMr) + r] = src[t];
+    }
+  }
+  for (std::size_t r = 0; r < mc1; ++r) {
+    const float *src = xData + ((iBase + kMr + r) * d);
+    for (std::size_t t = 0; t < d; ++t) {
+      xTile1[(t * kMr) + r] = src[t];
+    }
+  }
+
+  __m256 bestMin0 = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+  __m256 bestMin1 = _mm256_set1_ps(std::numeric_limits<float>::infinity());
+  __m256i bestArg0 = _mm256_set1_epi32(-1);
+  __m256i bestArg1 = _mm256_set1_epi32(-1);
+
+  for (std::size_t j = 0; j < k; ++j) {
+    const float *cRow = cData + (j * d);
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    for (std::size_t t = 0; t < d; ++t) {
+      const __m256 cv = _mm256_set1_ps(cRow[t]);
+      const __m256 diff0 = _mm256_sub_ps(_mm256_load_ps(xTile0.data() + (t * kMr)), cv);
+      const __m256 diff1 = _mm256_sub_ps(_mm256_load_ps(xTile1.data() + (t * kMr)), cv);
+      acc0 = _mm256_fmadd_ps(diff0, diff0, acc0);
+      acc1 = _mm256_fmadd_ps(diff1, diff1, acc1);
+    }
+    const __m256 mask0 = _mm256_cmp_ps(acc0, bestMin0, _CMP_LT_OQ);
+    const __m256 mask1 = _mm256_cmp_ps(acc1, bestMin1, _CMP_LT_OQ);
+    bestMin0 = _mm256_blendv_ps(bestMin0, acc0, mask0);
+    bestMin1 = _mm256_blendv_ps(bestMin1, acc1, mask1);
+    const __m256i jVec = _mm256_set1_epi32(static_cast<std::int32_t>(j));
+    bestArg0 = _mm256_blendv_epi8(bestArg0, jVec, _mm256_castps_si256(mask0));
+    bestArg1 = _mm256_blendv_epi8(bestArg1, jVec, _mm256_castps_si256(mask1));
+  }
+
+  alignas(32) std::array<float, kMr> minBuf0{};
+  alignas(32) std::array<float, kMr> minBuf1{};
+  alignas(32) std::array<std::int32_t, kMr> argBuf0{};
+  alignas(32) std::array<std::int32_t, kMr> argBuf1{};
+  _mm256_store_ps(minBuf0.data(), bestMin0);
+  _mm256_store_ps(minBuf1.data(), bestMin1);
+  _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf0.data()), bestArg0);
+  _mm256_store_si256(reinterpret_cast<__m256i *>(argBuf1.data()), bestArg1);
+  std::memcpy(minSqData + iBase, minBuf0.data(), mc0 * sizeof(float));
+  std::memcpy(labelsData + iBase, argBuf0.data(), mc0 * sizeof(std::int32_t));
+  if (mc1 > 0) {
+    std::memcpy(minSqData + iBase + kMr, minBuf1.data(), mc1 * sizeof(float));
+    std::memcpy(labelsData + iBase + kMr, argBuf1.data(), mc1 * sizeof(std::int32_t));
+  }
+}
+
 /**
  * @brief Pack the centroid matrix into the panel layout used by @ref argminFusedMTileF32.
  */
@@ -349,13 +422,14 @@ inline void pairwiseArgminOuterAvx2F32WithScratch(const NDArray<float, 2, Layout
  * @param C        Centroid matrix (k x d), contiguous.
  * @param labels   Output labels of length n.
  * @param outMinSq Output squared distances of length n.
- * @param pool     Parallelism injection; fans out over 8-row M-tiles.
+ * @param pool     Parallelism injection; pooled calls fan out over 16-row M-tiles.
  */
 inline void pairwiseArgminDirectSmallDF32(const NDArray<float, 2, Layout::Contig> &X,
                                           const NDArray<float, 2, Layout::Contig> &C,
                                           NDArray<std::int32_t, 1> &labels,
                                           NDArray<float, 1> &outMinSq, Pool pool) noexcept {
-  constexpr std::size_t kMr = 8;
+  constexpr std::size_t kMr8 = 8;
+  constexpr std::size_t kMr16 = 16;
   constexpr std::size_t kMaxD = 8;
   const std::size_t n = X.dim(0);
   const std::size_t k = C.dim(0);
@@ -363,11 +437,16 @@ inline void pairwiseArgminDirectSmallDF32(const NDArray<float, 2, Layout::Contig
   CLUSTERING_ALWAYS_ASSERT(d >= 1);
   CLUSTERING_ALWAYS_ASSERT(d <= kMaxD);
 
-  const std::size_t mTiles = (n + kMr - 1) / kMr;
+  const bool useWideTile = pool.workerCount() > 1;
+  const std::size_t mTiles = useWideTile ? ((n + kMr16 - 1) / kMr16) : ((n + kMr8 - 1) / kMr8);
   pool.parallelForBlocks(std::size_t{0}, mTiles, std::size_t{0},
                          [&](std::size_t lo, std::size_t hi) {
                            for (std::size_t t = lo; t < hi; ++t) {
-                             argminDirectMTileF32(X, C, labels, outMinSq, t, n, k, d);
+                             if (useWideTile) {
+                               argminDirectM16TileF32(X, C, labels, outMinSq, t, n, k, d);
+                             } else {
+                               argminDirectMTileF32(X, C, labels, outMinSq, t, n, k, d);
+                             }
                            }
                          });
 }
