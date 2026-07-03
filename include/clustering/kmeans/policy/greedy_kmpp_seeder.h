@@ -14,6 +14,7 @@
 #include "clustering/math/detail/avx2_helpers.h"
 #include "clustering/math/detail/gemm_outer.h"
 #include "clustering/math/detail/matrix_desc.h"
+#include "clustering/math/detail/sq_distances_block.h"
 #include "clustering/math/pairwise.h"
 #include "clustering/math/rng.h"
 #include "clustering/math/thread.h"
@@ -484,12 +485,7 @@ public:
         std::memcpy(centroidsData + (c * d), xData + (pick * d), d * sizeof(T));
         const T *cRow = centroidsData + (c * d);
         auto degenRange = [&](std::size_t lo, std::size_t hi) noexcept {
-          for (std::size_t i = lo; i < hi; ++i) {
-            const T cand = detail::sqEuclideanRowPtr(xData + (i * d), cRow, d);
-            if (cand < minSq[i]) {
-              minSq[i] = cand;
-            }
-          }
+          math::detail::refreshMinSqAgainstRow(cRow, xData + (lo * d), hi - lo, d, minSq + lo);
         };
         if (pool.shouldParallelize(n, 1024, 2)) {
           pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n), degenRange);
@@ -828,12 +824,7 @@ public:
       const T *winnerRow = xData + (bestCandidate * d);
       std::memcpy(centroidsData + (c * d), winnerRow, d * sizeof(T));
       auto winnerRange = [&](std::size_t lo, std::size_t hi) noexcept {
-        for (std::size_t i = lo; i < hi; ++i) {
-          const T cand = detail::sqEuclideanRowPtr(xData + (i * d), winnerRow, d);
-          if (cand < minSq[i]) {
-            minSq[i] = cand;
-          }
-        }
+        math::detail::refreshMinSqAgainstRow(winnerRow, xData + (lo * d), hi - lo, d, minSq + lo);
       };
       // The refresh reads two rows and conditionally stores per point, so the per-row cost
       // carries a constant floor on top of the d-term; fold it into the width estimate.

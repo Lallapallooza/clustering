@@ -19,6 +19,7 @@ add_executable(
     math_pairwise_threshold_test.cpp
     math_reduce_test.cpp
     math_rng_test.cpp
+    math_sq_distances_block_test.cpp
     math_thread_test.cpp
     gemm_scalar_test.cpp
     gemm_avx2_f32_test.cpp

@@ -137,4 +137,77 @@ template <class T>
   }
 }
 
+/**
+ * @brief Fold `minSq[i] = min(minSq[i], ||points_i - row||^2)` over a contiguous AoS block.
+ *
+ * The seeder's per-round refresh sweeps are bound by the scalar load-compare-branch chain on
+ * `minSq[i]`, so this kernel processes eight points per step with a branchless @c vminps and
+ * an unconditional store. At `d == 2` the point pairs are deinterleaved in-register; at
+ * `d >= 8` the distances come from @ref sqDistancesAosBlock through a stack staging buffer.
+ * Remaining shapes keep the scalar walk.
+ *
+ * @param row    Contiguous @p d-element row every point is measured against.
+ * @param points Base of @p count rows, each @p d contiguous elements.
+ * @param minSq  Length-@p count running minima, updated in place.
+ */
+template <class T>
+inline void refreshMinSqAgainstRow(const T *row, const T *points, std::size_t count, std::size_t d,
+                                   T *minSq) noexcept {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
+                "refreshMinSqAgainstRow: T must be float or double.");
+  std::size_t i = 0;
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float>) {
+    if (d == 2) {
+      const __m256 cx = _mm256_set1_ps(row[0]);
+      const __m256 cy = _mm256_set1_ps(row[1]);
+      // shufps keeps its picks inside each 128-bit lane, so the distances land in
+      // [p0 p1 p4 p5 | p2 p3 p6 p7] order; vpermps restores point order before the fold.
+      const __m256i order = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
+      for (; i + 8 <= count; i += 8) {
+        const __m256 a = _mm256_loadu_ps(points + (2 * i));
+        const __m256 b = _mm256_loadu_ps(points + (2 * i) + 8);
+        const __m256 xs = _mm256_shuffle_ps(a, b, 0x88);
+        const __m256 ys = _mm256_shuffle_ps(a, b, 0xDD);
+        const __m256 dx = _mm256_sub_ps(xs, cx);
+        const __m256 dy = _mm256_sub_ps(ys, cy);
+        const __m256 lane = _mm256_fmadd_ps(dy, dy, _mm256_mul_ps(dx, dx));
+        const __m256 dist = _mm256_permutevar8x32_ps(lane, order);
+        const __m256 m = _mm256_loadu_ps(minSq + i);
+        _mm256_storeu_ps(minSq + i, _mm256_min_ps(dist, m));
+      }
+    } else if (d >= kAvx2Lanes<T>) {
+      constexpr std::size_t kStage = 64;
+      alignas(32) std::array<float, kStage> stage;
+      for (; i + 8 <= count; i += kStage) {
+        const std::size_t blk = (count - i < kStage) ? (count - i) : kStage;
+        sqDistancesAosBlock(row, points + (i * d), blk, d, stage.data());
+        std::size_t j = 0;
+        for (; j + 8 <= blk; j += 8) {
+          const __m256 dist = _mm256_load_ps(stage.data() + j);
+          const __m256 m = _mm256_loadu_ps(minSq + i + j);
+          _mm256_storeu_ps(minSq + i + j, _mm256_min_ps(dist, m));
+        }
+        for (; j < blk; ++j) {
+          const float cand = stage[j];
+          if (cand < minSq[i + j]) {
+            minSq[i + j] = cand;
+          }
+        }
+        if (blk < kStage) {
+          i += blk;
+          break;
+        }
+      }
+    }
+  }
+#endif
+  for (; i < count; ++i) {
+    const T cand = sqEuclideanRowPtr(points + (i * d), row, d);
+    if (cand < minSq[i]) {
+      minSq[i] = cand;
+    }
+  }
+}
+
 } // namespace clustering::math::detail
