@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "clustering/math/detail/gemm_kernel_scalar.h"
+#include "clustering/math/detail/gemm_outer.h"
 #include "clustering/math/detail/gemm_pack.h"
 #include "clustering/math/detail/matrix_desc.h"
 #include "clustering/math/thread.h"
@@ -190,6 +191,172 @@ void gemmRunPrepacked(::clustering::detail::MatrixDescC<T> Ad, const T *prepacke
       }
 
       pcOffInJc += kc * roundedNc;
+    }
+
+    jcBase += K * roundedNc;
+  }
+}
+
+template <class T>
+[[nodiscard]] constexpr std::size_t packedAScratchSizeForRows(std::size_t rows,
+                                                              std::size_t kDim) noexcept {
+  constexpr std::size_t kMcVal = kMc<T>;
+  constexpr std::size_t kKcVal = kKc<T>;
+  const std::size_t mcBlocks = (rows + kMcVal - 1) / kMcVal;
+  std::size_t total = 0;
+  for (std::size_t pc = 0; pc < kDim; pc += kKcVal) {
+    const std::size_t kc = (pc + kKcVal <= kDim) ? kKcVal : (kDim - pc);
+    total += mcBlocks * kMcVal * kc;
+  }
+  return total;
+}
+
+template <class T>
+void packAChunk(::clustering::detail::MatrixDescC<T> Ad, std::size_t rows, std::size_t kDim,
+                std::size_t chunkRows, T *prepackedAp) noexcept {
+  constexpr std::size_t kMcVal = kMc<T>;
+  constexpr std::size_t kKcVal = kKc<T>;
+  const std::size_t fullMcBlocks = (chunkRows + kMcVal - 1) / kMcVal;
+  std::size_t pcOff = 0;
+  for (std::size_t pc = 0; pc < kDim; pc += kKcVal) {
+    const std::size_t kc = (pc + kKcVal <= kDim) ? kKcVal : (kDim - pc);
+    const std::size_t mcBlocks = (rows + kMcVal - 1) / kMcVal;
+    for (std::size_t mcIdx = 0; mcIdx < mcBlocks; ++mcIdx) {
+      const std::size_t ic = mcIdx * kMcVal;
+      const std::size_t mc = (ic + kMcVal <= rows) ? kMcVal : (rows - ic);
+      packA<T>(Ad, ic, mc, pc, kc, prepackedAp + pcOff + (mcIdx * kMcVal * kc));
+    }
+    pcOff += fullMcBlocks * kMcVal * kc;
+  }
+}
+
+template <class T>
+void gemmRunPrepackedAB(const T *prepackedAp, std::size_t mRows, std::size_t packedChunkRows,
+                        const T *prepackedBp, std::size_t kDim, std::size_t nDim,
+                        ::clustering::detail::MatrixDesc<T> Cd, T alpha, T beta) noexcept {
+  constexpr std::size_t kMr = kKernelMr<T>;
+  constexpr std::size_t kNr = kKernelNr<T>;
+  constexpr std::size_t kMcVal = kMc<T>;
+  constexpr std::size_t kNcVal = kNc<T>;
+  constexpr std::size_t kKcVal = kKc<T>;
+
+  const std::size_t M = Cd.rows;
+  const std::size_t N = nDim;
+  const std::size_t K = kDim;
+
+  T *cBase = Cd.ptr;
+  const std::ptrdiff_t cRowStride = Cd.rowStride;
+  const std::ptrdiff_t cColStride = Cd.colStride;
+
+  if (M == 0 || N == 0) {
+    return;
+  }
+
+  if (K == 0) {
+    const bool zero = (beta == T{0});
+    for (std::size_t i = 0; i < M; ++i) {
+      for (std::size_t j = 0; j < N; ++j) {
+        T &cell = cBase[(static_cast<std::ptrdiff_t>(i) * cRowStride) +
+                        (static_cast<std::ptrdiff_t>(j) * cColStride)];
+        cell = zero ? T{0} : (beta * cell);
+      }
+    }
+    return;
+  }
+
+  using KernelFn = void (*)(const T *, const T *, T *, std::size_t, T, T) noexcept;
+  KernelFn kernelZero = &gemmKernelMrNrScalar<T, BetaKind::kZero>;
+  KernelFn kernelGeneral = &gemmKernelMrNrScalar<T, BetaKind::kGeneral>;
+#ifdef CLUSTERING_USE_AVX2
+  if constexpr (std::is_same_v<T, float>) {
+    kernelZero = &gemmKernel8x6Avx2F32<BetaKind::kZero>;
+    kernelGeneral = &gemmKernel8x6Avx2F32<BetaKind::kGeneral>;
+  }
+#endif
+
+  const std::size_t fullMcBlocks = (packedChunkRows + kMcVal - 1) / kMcVal;
+  const std::size_t liveMcBlocks = (mRows + kMcVal - 1) / kMcVal;
+
+  std::size_t jcBase = 0;
+  for (std::size_t jc = 0; jc < N; jc += kNcVal) {
+    const std::size_t nc = (jc + kNcVal <= N) ? kNcVal : (N - jc);
+    const std::size_t roundedNc = ((nc + kNr - 1) / kNr) * kNr;
+
+    std::size_t pcOffInJc = 0;
+    std::size_t pcOffInA = 0;
+    for (std::size_t pc = 0; pc < K; pc += kKcVal) {
+      const std::size_t kc = (pc + kKcVal <= K) ? kKcVal : (K - pc);
+      const bool firstKBlock = (pc == 0);
+      const T effBeta = firstKBlock ? beta : T{1};
+      const auto kernel = (effBeta == T{0}) ? kernelZero : kernelGeneral;
+
+      const T *bpArena = prepackedBp + jcBase + pcOffInJc;
+      const T *apPcBase = prepackedAp + pcOffInA;
+
+      for (std::size_t mcIdx = 0; mcIdx < liveMcBlocks; ++mcIdx) {
+        const std::size_t ic = mcIdx * kMcVal;
+        const std::size_t mc = (ic + kMcVal <= M) ? kMcVal : (M - ic);
+        const T *apBlock = apPcBase + (mcIdx * kMcVal * kc);
+
+        for (std::size_t ir = 0; ir < mc; ir += kMr) {
+          const std::size_t mTail = (ir + kMr <= mc) ? kMr : (mc - ir);
+          const std::size_t panelA = ir / kMr;
+          const T *apPanel = apBlock + (panelA * kMr * kc);
+
+          for (std::size_t jr = 0; jr < nc; jr += kNr) {
+            const std::size_t nTail = (jr + kNr <= nc) ? kNr : (nc - jr);
+            const std::size_t panelB = jr / kNr;
+            const T *bpPanel = bpArena + (panelB * kc * kNr);
+
+            alignas(32) std::array<T, kMr * kNr> tile{};
+
+            if (effBeta != T{0}) {
+              for (std::size_t c = 0; c < kNr; ++c) {
+                for (std::size_t r = 0; r < kMr; ++r) {
+                  if (r < mTail && c < nTail) {
+                    const T &cell = cBase[(static_cast<std::ptrdiff_t>(ic + ir + r) * cRowStride) +
+                                          (static_cast<std::ptrdiff_t>(jc + jr + c) * cColStride)];
+                    tile[(c * kMr) + r] = cell;
+                  } else {
+                    tile[(c * kMr) + r] = T{0};
+                  }
+                }
+              }
+            }
+
+            if constexpr (std::is_same_v<T, float>) {
+#ifdef CLUSTERING_USE_AVX2
+              if (nTail == 4) {
+                if (effBeta == T{0}) {
+                  gemmKernel8x4Avx2F32<BetaKind::kZero>(apPanel, bpPanel, tile.data(), kc, alpha,
+                                                        effBeta);
+                } else {
+                  gemmKernel8x4Avx2F32<BetaKind::kGeneral>(apPanel, bpPanel, tile.data(), kc, alpha,
+                                                           effBeta);
+                }
+              } else {
+                kernel(apPanel, bpPanel, tile.data(), kc, alpha, effBeta);
+              }
+#else
+              kernel(apPanel, bpPanel, tile.data(), kc, alpha, effBeta);
+#endif
+            } else {
+              kernel(apPanel, bpPanel, tile.data(), kc, alpha, effBeta);
+            }
+
+            for (std::size_t c = 0; c < nTail; ++c) {
+              for (std::size_t r = 0; r < mTail; ++r) {
+                T &cell = cBase[(static_cast<std::ptrdiff_t>(ic + ir + r) * cRowStride) +
+                                (static_cast<std::ptrdiff_t>(jc + jr + c) * cColStride)];
+                cell = tile[(c * kMr) + r];
+              }
+            }
+          }
+        }
+      }
+
+      pcOffInJc += kc * roundedNc;
+      pcOffInA += fullMcBlocks * kMcVal * kc;
     }
 
     jcBase += K * roundedNc;

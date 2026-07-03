@@ -237,6 +237,46 @@ TEST(GemmPlanF32, AlphaBetaReuse) {
   EXPECT_TRUE(clustering::math::allClose(Cnaive, Cplan, 1e-5F, 1e-5F));
 }
 
+TEST(GemmPlanF32, PrepackedAExecuteMatchesPlanOnChunkTails) {
+  struct Shape {
+    std::size_t m;
+    std::size_t k;
+    std::size_t n;
+  };
+  constexpr Shape shapes[] = {{1, 1, 1},    {7, 0, 5},     {7, 17, 4},    {8, 128, 6},
+                              {9, 129, 15}, {255, 257, 7}, {256, 256, 15}};
+  constexpr std::size_t kPackedRows = 256;
+
+  for (const Shape shape : shapes) {
+    NDArray<float, 2> A({shape.m, shape.k});
+    NDArray<float, 2> B({shape.k, shape.n});
+    NDArray<float, 2> Cplan({shape.m, shape.n});
+    NDArray<float, 2> CpackedA({shape.m, shape.n});
+
+    const auto seed =
+        static_cast<std::uint32_t>((shape.m * 31U) + (shape.k * 17U) + (shape.n * 13U) + 700U);
+    fillRandom(A, seed);
+    fillRandom(B, seed + 1U);
+    fillRandom(Cplan, seed + 2U);
+    fillRandom(CpackedA, seed + 2U);
+
+    const GemmPlan<float> plan(B, Pool{nullptr});
+    plan.execute(A, Cplan, -2.0F, 0.3F);
+
+    const auto Ad = clustering::detail::describeMatrix(A);
+    auto Cd = clustering::detail::describeMatrixMut(CpackedA);
+    const std::size_t apSize =
+        clustering::math::detail::packedAScratchSizeForRows<float>(kPackedRows, shape.k);
+    NDArray<float, 1> ap({apSize});
+    clustering::math::detail::packAChunk<float>(Ad, shape.m, shape.k, kPackedRows, ap.data());
+    clustering::math::detail::gemmRunPrepackedAB<float>(
+        ap.data(), shape.m, kPackedRows, plan.debugBpData(), shape.k, shape.n, Cd, -2.0F, 0.3F);
+
+    EXPECT_TRUE(clustering::math::allClose(Cplan, CpackedA, 1e-5F, 1e-5F))
+        << "M=" << shape.m << " K=" << shape.k << " N=" << shape.n;
+  }
+}
+
 TEST(GemmPlanF32, MultipleKcBlocksPlanReuse) {
   // K=600 forces 3 Kc blocks (kKc=256) so the pre-packed layout exercises pcOffInJc stepping.
   constexpr std::size_t M = 17;

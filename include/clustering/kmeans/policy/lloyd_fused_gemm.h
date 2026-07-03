@@ -105,8 +105,8 @@ public:
       : m_centroidsOld({0, 0}), m_cSqNorms({0}), m_sums({0, 0}), m_counts({0}), m_minDistSq({0}),
         m_shiftSq({0}), m_partialSums({0}), m_partialComps({0}), m_partialCounts({0}),
         m_foldComp({0}), m_packedB({0}), m_packedCSqNorms({0}), m_distsChunk({0, 0}),
-        m_gemmApArena({0}), m_xNormsSq({0}), m_varSum({0}), m_varSumSq({0}), m_varPartialSum({0}),
-        m_varPartialSumSq({0}), m_u({0}), m_l({0}), m_shiftEuclidean({0}),
+        m_gemmApArena({0}), m_packedXAp({0}), m_xNormsSq({0}), m_varSum({0}), m_varSumSq({0}),
+        m_varPartialSum({0}), m_varPartialSumSq({0}), m_u({0}), m_l({0}), m_shiftEuclidean({0}),
         m_halfDistToNearestOther({0}), m_elkanBounds({0, 0}), m_centerDist({0, 0}) {}
 
 #ifdef CLUSTERING_KMEANS_KAHAN_N_THRESHOLD
@@ -415,6 +415,27 @@ private:
         [](double lhs, double rhs) noexcept { return lhs + rhs; });
   }
 
+  [[nodiscard]] static constexpr bool
+  packedXApCacheEnabledForShape(std::size_t n, std::size_t d, std::size_t workerCount) noexcept {
+    if constexpr (std::is_same_v<T, float>) {
+      constexpr std::size_t kPackedXMaxElements = std::size_t{4} << 20;
+      constexpr std::size_t kPackedXMaxWorkers = 4;
+      return workerCount <= kPackedXMaxWorkers && d > math::defaults::pairwiseArgminMaxD &&
+             d != 0 && n <= (kPackedXMaxElements / d);
+    } else {
+      (void)n;
+      (void)d;
+      (void)workerCount;
+      return false;
+    }
+  }
+
+  void resetPackedXApCacheMetadata() noexcept {
+    m_packedXApCachedXData = nullptr;
+    m_packedXApCachedN = 0;
+    m_packedXApCachedD = 0;
+  }
+
   void ensureShape(std::size_t n, std::size_t d, std::size_t k, std::size_t workerCount) {
     const bool shapeChanged = (n != m_n) || (d != m_d) || (k != m_k);
     const bool workerChanged = (workerCount != m_workerCount);
@@ -494,6 +515,20 @@ private:
     // slice indexing stays in-bounds on every fan-out path.
     const std::size_t apSize = blocks * math::detail::kMc<T> * math::detail::kKc<T>;
     m_gemmApArena = NDArray<T, 1>({needsChunk ? apSize : std::size_t{1}});
+
+    if (shapeChanged || workerChanged) {
+      resetPackedXApCacheMetadata();
+      if (packedXApCacheEnabledForShape(n, d, workerCount)) {
+        const std::size_t numChunks = (n + chunkCap - 1) / chunkCap;
+        m_packedXApChunkRows = chunkCap;
+        m_packedXApPerChunk = math::detail::packedAScratchSizeForRows<T>(chunkCap, d);
+        m_packedXAp = NDArray<T, 1>({numChunks * m_packedXApPerChunk});
+      } else {
+        m_packedXApChunkRows = 0;
+        m_packedXApPerChunk = 0;
+        m_packedXAp = NDArray<T, 1>({std::size_t{1}});
+      }
+    }
 
     m_n = n;
     m_d = d;
@@ -636,6 +671,42 @@ private:
     }
   }
 
+  [[nodiscard]] bool ensurePackedXAp(const NDArray<T, 2, Layout::Contig> &X) noexcept {
+    if constexpr (std::is_same_v<T, float>) {
+      const std::size_t n = X.dim(0);
+      const std::size_t d = X.dim(1);
+      const std::size_t chunkCap = math::pairwiseArgminChunkRows;
+      if (!packedXApCacheEnabledForShape(n, d, m_workerCount) || m_packedXApPerChunk == 0 ||
+          m_packedXApChunkRows != chunkCap) {
+        return false;
+      }
+      if (m_packedXApCachedXData == X.data() && m_packedXApCachedN == n &&
+          m_packedXApCachedD == d) {
+        return true;
+      }
+
+      const T *xBase = X.data();
+      const std::size_t numChunks = (n + chunkCap - 1) / chunkCap;
+      for (std::size_t c = 0; c < numChunks; ++c) {
+        const std::size_t iBase = c * chunkCap;
+        const std::size_t chunkRows = (iBase + chunkCap <= n) ? chunkCap : (n - iBase);
+        auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(const_cast<T *>(xBase) + (iBase * d),
+                                                            {chunkRows, d});
+        const auto xDesc = ::clustering::detail::describeMatrix(xChunk);
+        math::detail::packAChunk<T>(xDesc, chunkRows, d, chunkCap,
+                                    m_packedXAp.data() + (c * m_packedXApPerChunk));
+      }
+
+      m_packedXApCachedXData = X.data();
+      m_packedXApCachedN = n;
+      m_packedXApCachedD = d;
+      return true;
+    } else {
+      (void)X;
+      return false;
+    }
+  }
+
   void runChunkedMaterializedAssignment(const NDArray<T, 2, Layout::Contig> &X,
                                         const NDArray<T, 2, Layout::Contig> &centroids,
                                         NDArray<std::int32_t, 1> &labels,
@@ -765,8 +836,10 @@ private:
       }
     }
 #endif
+    bool usePackedXAp = false;
     if (useChunked) {
       packCentroidsTiled(centroids);
+      usePackedXAp = ensurePackedXAp(X);
     }
 
 #ifdef CLUSTERING_USE_AVX2
@@ -816,7 +889,7 @@ private:
     pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
         std::size_t{0}, numChunks, workers,
         [&](std::size_t chunkLo, std::size_t chunkHi, std::size_t slot) noexcept {
-          assignScatterChunkRange(X, labels, k, useKahan, chunkLo, chunkHi, slot);
+          assignScatterChunkRange(X, labels, k, useKahan, chunkLo, chunkHi, slot, usePackedXAp);
         });
 
     foldPartialSlabs(useKahan, workers, k, d);
@@ -828,8 +901,8 @@ private:
   /// Elkan's, when the bound matrix is sized for this shape) inline.
   void assignScatterChunkRange(const NDArray<T, 2, Layout::Contig> &X,
                                NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
-                               std::size_t chunkLo, std::size_t chunkHi,
-                               std::size_t slot) noexcept {
+                               std::size_t chunkLo, std::size_t chunkHi, std::size_t slot,
+                               bool usePackedXAp) noexcept {
     constexpr std::size_t kMcVal = math::detail::kMc<T>;
     constexpr std::size_t kKcVal = math::detail::kKc<T>;
     const std::size_t n = X.dim(0);
@@ -845,19 +918,26 @@ private:
     T *elkanBoundsBase = m_elkanBounds.dim(0) == n ? m_elkanBounds.data() : nullptr;
     T *distsChunk = m_distsChunk.data() + (slot * chunkCap * k);
     T *apSlice = m_gemmApArena.data() + (slot * kMcVal * kKcVal);
+    const T *packedXBase = usePackedXAp ? m_packedXAp.data() : nullptr;
+    const std::size_t packedXStride = m_packedXApPerChunk;
 
     for (std::size_t c = chunkLo; c < chunkHi; ++c) {
       const std::size_t iBase = c * chunkCap;
       const std::size_t chunkRows = (iBase + chunkCap <= n) ? chunkCap : (n - iBase);
 
-      auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(const_cast<T *>(xBase) + (iBase * d),
-                                                          {chunkRows, d});
       auto distsView = NDArray<T, 2>::borrow(distsChunk, {chunkRows, k});
-      const auto xDesc = ::clustering::detail::describeMatrix(xChunk);
       auto distsDesc = ::clustering::detail::describeMatrixMut(distsView);
       // Serial GEMM inside the chunk; the outer fan-out already owns parallelism.
-      math::detail::gemmRunPrepacked<T>(xDesc, bp, d, k, distsDesc, T{-2}, T{0}, apSlice,
-                                        math::Pool{});
+      if (packedXBase != nullptr) {
+        math::detail::gemmRunPrepackedAB<T>(packedXBase + (c * packedXStride), chunkRows, chunkCap,
+                                            bp, d, k, distsDesc, T{-2}, T{0});
+      } else {
+        auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(const_cast<T *>(xBase) + (iBase * d),
+                                                            {chunkRows, d});
+        const auto xDesc = ::clustering::detail::describeMatrix(xChunk);
+        math::detail::gemmRunPrepacked<T>(xDesc, bp, d, k, distsDesc, T{-2}, T{0}, apSlice,
+                                          math::Pool{});
+      }
 
       const T *xNormsChunk = m_xNormsSq.data() + iBase;
       for (std::size_t i = 0; i < chunkRows; ++i) {
@@ -1009,6 +1089,7 @@ private:
     const std::size_t units = (n + unit - 1) / unit;
 
     HamerlyShiftTop2 top2{};
+    bool usePackedXAp = false;
     bool stopPhases = false;
     auto plexTok = citor::CancellationToken::makeOwned();
 
@@ -1040,6 +1121,7 @@ private:
         preZeroPartialSlabs(useKahan, workers, k, d);
         if (useChunked) {
           packCentroidsTiled(centroids);
+          usePackedXAp = ensurePackedXAp(X);
         } else if (!useDirect) {
           packFusedCentroids();
         }
@@ -1057,6 +1139,7 @@ private:
         top2 = prepareHamerlyGeometry(centroids, k, d);
       } else if (useChunked) {
         packCentroidsTiled(centroids);
+        usePackedXAp = ensurePackedXAp(X);
       } else if (!useDirect) {
         packFusedCentroids();
       }
@@ -1075,7 +1158,7 @@ private:
       }
       if (useChunked) {
         // The chunk body seeds the Hamerly bounds inline in its argmin post-pass.
-        assignScatterChunkRange(X, labels, k, useKahan, lo, hi, s);
+        assignScatterChunkRange(X, labels, k, useKahan, lo, hi, s, usePackedXAp);
         return;
       }
       if (useDirect) {
@@ -1848,6 +1931,7 @@ private:
   NDArray<T, 1> m_packedCSqNorms;
   NDArray<T, 2, Layout::Contig> m_distsChunk;
   NDArray<T, 1> m_gemmApArena;
+  NDArray<T, 1> m_packedXAp;
   NDArray<T, 1> m_xNormsSq;
   NDArray<T, 1> m_varSum;
   NDArray<T, 1> m_varSumSq;
@@ -1876,6 +1960,12 @@ private:
   std::size_t m_d = 0;
   std::size_t m_k = 0;
   std::size_t m_workerCount = 0;
+
+  const T *m_packedXApCachedXData = nullptr;
+  std::size_t m_packedXApCachedN = 0;
+  std::size_t m_packedXApCachedD = 0;
+  std::size_t m_packedXApChunkRows = 0;
+  std::size_t m_packedXApPerChunk = 0;
 
   // X-shape-stable cache: the mean column variance and m_xNormsSq depend only on X. The best-of
   // harness calls run() n_init times with the same X; recomputing per call is wasted.
