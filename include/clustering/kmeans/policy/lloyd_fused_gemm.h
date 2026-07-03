@@ -244,7 +244,7 @@ public:
       } else {
         runAssignmentAndScatter(X, centroids, outLabels, k, useKahan, pool);
         if (hamerlyEligible && iter == 0 && assignmentUsesFusedArgmin(X, centroids)) {
-          seedHamerlyBoundsFromLabels(X, centroids, outLabels, pool);
+          seedHamerlyBoundsFromAssignedMinDist(outLabels, k, d, pool);
         }
       }
 
@@ -1027,8 +1027,8 @@ private:
         assignScatterFusedTiles(X, labels, k, useKahan, lo, hi, s);
       }
       if (hamerlyEligible && phaseIdx == 0) {
-        seedHamerlyBoundsRange(X, centroids, labels, std::min(lo * unit, n),
-                               std::min(hi * unit, n));
+        seedHamerlyBoundsFromMinDistRange(labels, k, d, std::min(lo * unit, n),
+                                          std::min(hi * unit, n));
       }
     };
 
@@ -1155,13 +1155,12 @@ private:
                            [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
   }
 
-  /// Seed per-row Hamerly bounds from freshly assigned labels for rows `[lo, hi)`.
-  void seedHamerlyBoundsRange(const NDArray<T, 2, Layout::Contig> &X,
-                              const NDArray<T, 2, Layout::Contig> &centroids,
-                              const NDArray<std::int32_t, 1> &labels, std::size_t lo,
-                              std::size_t hi) noexcept {
-    const std::size_t d = X.dim(1);
-    const std::size_t k = centroids.dim(0);
+  /// Seed per-row Hamerly bounds from the assignment pass' stored minimum distances.
+  void seedHamerlyBoundsFromMinDistRange(const NDArray<std::int32_t, 1> &labels, std::size_t k,
+                                         std::size_t d, std::size_t lo, std::size_t hi) noexcept {
+    // Fused decomposed distances can round below the direct squared-distance sum; inflate the
+    // Euclidean upper bound so Hamerly's prune stays conservative.
+    const T slackScale = static_cast<T>(8) * std::numeric_limits<T>::epsilon() * static_cast<T>(d);
     for (std::size_t i = lo; i < hi; ++i) {
       const std::int32_t lbl = labels(i);
       if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
@@ -1170,28 +1169,27 @@ private:
         m_l(i) = T{0};
         continue;
       }
-      const T *xRow = X.data() + (i * d);
-      const T *cRow = centroids.data() + (static_cast<std::size_t>(lbl) * d);
-      const T tightSq = math::detail::sqEuclideanRowPtr<T>(xRow, cRow, d);
+      T tightSq = m_minDistSq(i);
+      if (tightSq < T{0}) {
+        tightSq = T{0};
+        m_minDistSq(i) = T{0};
+      }
       m_minDistSq(i) = tightSq;
-      m_u(i) = std::sqrt(tightSq);
+      const T u = std::sqrt(tightSq);
+      m_u(i) = u + ((u + T{1}) * slackScale);
       m_l(i) = T{0};
     }
   }
 
-  void seedHamerlyBoundsFromLabels(const NDArray<T, 2, Layout::Contig> &X,
-                                   const NDArray<T, 2, Layout::Contig> &centroids,
-                                   const NDArray<std::int32_t, 1> &labels,
-                                   math::Pool pool) noexcept {
-    const std::size_t n = X.dim(0);
-    const std::size_t d = X.dim(1);
-    const std::size_t k = centroids.dim(0);
+  void seedHamerlyBoundsFromAssignedMinDist(const NDArray<std::int32_t, 1> &labels, std::size_t k,
+                                            std::size_t d, math::Pool pool) noexcept {
+    const std::size_t n = labels.dim(0);
     if (n == 0 || d == 0 || k == 0) {
       return;
     }
 
     pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) {
-      seedHamerlyBoundsRange(X, centroids, labels, lo, hi);
+      seedHamerlyBoundsFromMinDistRange(labels, k, d, lo, hi);
     });
   }
 
