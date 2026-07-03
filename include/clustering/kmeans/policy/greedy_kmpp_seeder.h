@@ -461,9 +461,6 @@ public:
     T *minSq = m_minSq.data();
     T *candRowsData = m_candRows.data();
     T *sweepSums = m_sweepSums.data();
-#ifdef CLUSTERING_USE_AVX2
-    T *candRowsTData = m_candRowsT.data();
-#endif
 
     // GEMM scoring wins only when the candidate width L is >= one kNr panel (6). Below that
     // the 8x6 kernel's fixed 48-FMA body over-computes the 8xL useful tile; the per-row
@@ -484,20 +481,32 @@ public:
 
     // Every sweep that mutates minSq banks its block's weight into sweepSums, so candidate
     // sampling never needs a separate pass over the array. The block partition is the
-    // deterministic sliceLo split of parallelForExactBlocksWithSlot; sweepLo mirrors it.
+    // deterministic sliceLo split of parallelForExactBlocksWithSlot.
     const std::size_t sweepBlocks = detail::greedyKmppSweepBlocks(pool, n, d + 8);
-    auto sweepLo = [n, sweepBlocks](std::size_t s) noexcept { return (n * s) / sweepBlocks; };
+
+#ifdef CLUSTERING_USE_AVX2
+    if constexpr (std::is_same_v<T, float>) {
+      // The init sweep and every pick round run inside one persistent-worker plex: workers
+      // stay spin-resident across the per-round scoring and refresh passes while the serial
+      // glue rides the pre-phase hook, dropping the two fork-joins each round pays in the
+      // dispatch loop below. GEMM-scoring shapes keep the dispatch loop -- their scoring is
+      // one whole-matrix GEMM, not a range-invocable body -- as do runs too small to
+      // amortize the per-phase epoch cost.
+      constexpr std::size_t kMinPlexElems = std::size_t{1} << 16;
+      if (pool.pool != nullptr && pool.workerCount() > 1 && k >= 2 && !useGemmScoring &&
+          (n * d >= kMinPlexElems)) {
+        runPlexRounds(X, k, nLocalTrials, scoreSlab, sweepBlocks, rng, pool, outCentroids);
+        return;
+      }
+    }
+#endif
 
     {
       const T *firstRow = centroidsData;
       pool.parallelForExactBlocksWithSlot(
           std::size_t{0}, n, sweepBlocks,
           [&](std::size_t lo, std::size_t hi, std::size_t s) noexcept {
-            for (std::size_t i = lo; i < hi; ++i) {
-              minSq[i] = std::numeric_limits<T>::infinity();
-            }
-            sweepSums[s] = math::detail::refreshMinSqAgainstRow(firstRow, xData + (lo * d), hi - lo,
-                                                                d, minSq + lo);
+            initSweepBlock(firstRow, xData, d, lo, hi, s);
           });
     }
 
@@ -525,33 +534,20 @@ public:
         pool.parallelForExactBlocksWithSlot(
             std::size_t{0}, n, sweepBlocks,
             [&](std::size_t lo, std::size_t hi, std::size_t s) noexcept {
-              sweepSums[s] = math::detail::refreshMinSqAgainstRow(cRow, xData + (lo * d), hi - lo,
-                                                                  d, minSq + lo);
+              refreshSweepBlock(cRow, xData, d, lo, hi, s);
             });
         continue;
       }
 
-      // Draw nLocalTrials candidates by inverse-CDF sampling: locate the block whose banked
-      // weight straddles the draw, then walk only that block. An empty or zero-weight block
+      // Draw nLocalTrials candidates by inverse-CDF sampling. An empty or zero-weight block
       // can never straddle a draw in `[0, total)` because the block fold above accumulates in
       // the same order. Identical seed + identical n produces identical candidate sets.
-      for (std::size_t t = 0; t < nLocalTrials; ++t) {
-        const T u = math::randUnit<T>(rng) * total;
-        std::size_t s = 0;
-        T acc = T{0};
-        while (s + 1 < sweepBlocks && acc + sweepSums[s] <= u) {
-          acc += sweepSums[s];
-          ++s;
-        }
-        candidates[t] = detail::inverseCdfPickInRange(minSq, sweepLo(s), sweepLo(s + 1), u - acc);
-      }
+      drawCandidates(rng, total, n, sweepBlocks, nLocalTrials, candidates.data());
 
       // Pack the L candidate rows into a contiguous (L, d) buffer so the batched scoring kernel
       // can stream x once across L accumulators. The L*d pack is negligible against the n-pass
       // scoring it amortizes.
-      for (std::size_t t = 0; t < nLocalTrials; ++t) {
-        std::memcpy(candRowsData + (t * d), xData + (candidates[t] * d), d * sizeof(T));
-      }
+      packCandidates(xData, d, nLocalTrials, candidates.data());
 
       for (std::size_t t = 0; t < nLocalTrials; ++t) {
         scores[t] = T{0};
@@ -569,15 +565,7 @@ public:
       // folds 8 (or 16, for the 16-lane unroll) distances at once.
       if constexpr (std::is_same_v<T, float>) {
         if (d > 0 && d <= math::detail::kAvx2Lanes<float>) {
-          for (std::size_t kk = 0; kk < d; ++kk) {
-            float *dstK = candRowsTData + (kk * transposedWidth);
-            for (std::size_t t = 0; t < nLocalTrials; ++t) {
-              dstK[t] = candRowsData[(t * d) + kk];
-            }
-            for (std::size_t t = nLocalTrials; t < transposedWidth; ++t) {
-              dstK[t] = 0.0F;
-            }
-          }
+          packCandidatesTransposed(d, nLocalTrials, transposedWidth);
           // Per-worker score accumulators are reused from @ref m_localScores; the candDistSq
           // writes are row-local so partitioning by `i` is aliasing-free. The fan-out width
           // is capped by the sweep's kernel work; a width of one keeps the sweep on the
@@ -586,96 +574,47 @@ public:
           const bool willParallelizeT = blocksT > 1;
           const std::size_t workersT = willParallelizeT ? pool.workerCount() : std::size_t{1};
           T *localScoresT = m_localScores.data();
-          for (std::size_t e = 0; e < workersT * scoreSlab; ++e) {
-            localScoresT[e] = T{0};
-          }
+          zeroScoreSlabs(workersT, scoreSlab);
 
           if (transposedWidth == 16) {
-            auto rangeFn = [&](std::size_t lo, std::size_t hi, T *dst) noexcept {
-              __m256 scoresLoAcc = _mm256_setzero_ps();
-              __m256 scoresHiAcc = _mm256_setzero_ps();
-              for (std::size_t i = lo; i < hi; ++i) {
-                const float *xi = xData + (i * d);
-                const __m256 miVec = _mm256_set1_ps(minSq[i]);
-                const auto [dLo, dHi] =
-                    detail::sqEuclideanRowAgainst16TransposedReg(xi, candRowsTData, d);
-                scoresLoAcc = _mm256_add_ps(scoresLoAcc, _mm256_min_ps(dLo, miVec));
-                scoresHiAcc = _mm256_add_ps(scoresHiAcc, _mm256_min_ps(dHi, miVec));
-              }
-              std::array<float, 16> tmp{};
-              _mm256_storeu_ps(tmp.data(), scoresLoAcc);
-              _mm256_storeu_ps(tmp.data() + 8, scoresHiAcc);
-              for (std::size_t t = 0; t < nLocalTrials; ++t) {
-                dst[t] += tmp[t];
-              }
-            };
             if (willParallelizeT) {
               pool.parallelForBlocks(std::size_t{0}, n, blocksT,
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
-                                       rangeFn(lo, hi, localScoresT + (w * scoreSlab));
+                                       scoreTransposed16Range(xData, d, nLocalTrials, lo, hi,
+                                                              localScoresT + (w * scoreSlab));
                                      });
             } else {
-              rangeFn(0, n, localScoresT);
+              scoreTransposed16Range(xData, d, nLocalTrials, std::size_t{0}, n, localScoresT);
             }
           } else if (transposedWidth == 8) {
-            auto rangeFn = [&](std::size_t lo, std::size_t hi, T *dst) noexcept {
-              __m256 scoresAcc = _mm256_setzero_ps();
-              for (std::size_t i = lo; i < hi; ++i) {
-                const float *xi = xData + (i * d);
-                const __m256 miVec = _mm256_set1_ps(minSq[i]);
-                const __m256 dv = detail::sqEuclideanRowAgainst8TransposedReg(xi, candRowsTData, d);
-                scoresAcc = _mm256_add_ps(scoresAcc, _mm256_min_ps(dv, miVec));
-              }
-              std::array<float, 8> tmp{};
-              _mm256_storeu_ps(tmp.data(), scoresAcc);
-              for (std::size_t t = 0; t < nLocalTrials; ++t) {
-                dst[t] += tmp[t];
-              }
-            };
             if (willParallelizeT) {
               pool.parallelForBlocks(std::size_t{0}, n, blocksT,
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
-                                       rangeFn(lo, hi, localScoresT + (w * scoreSlab));
+                                       scoreTransposed8Range(xData, d, nLocalTrials, lo, hi,
+                                                             localScoresT + (w * scoreSlab));
                                      });
             } else {
-              rangeFn(0, n, localScoresT);
+              scoreTransposed8Range(xData, d, nLocalTrials, std::size_t{0}, n, localScoresT);
             }
           } else {
             // Generic chunked path for L > 16 (very high k). Walk the transposed layout 8 lanes
             // at a time so each chunk stays on the fully unrolled 8-wide kernel.
-            T *candDistSqData = candDistRows(n, transposedWidth);
-            auto rangeFn = [&](std::size_t lo, std::size_t hi, T *dst) noexcept {
-              for (std::size_t i = lo; i < hi; ++i) {
-                const float *xi = xData + (i * d);
-                const float mi = minSq[i];
-                float *dstRow = candDistSqData + (i * transposedWidth);
-                for (std::size_t base = 0; base < transposedWidth; base += 8) {
-                  detail::sqEuclideanRowAgainst8TransposedStrided(xi, candRowsTData + base, d,
-                                                                  transposedWidth, dstRow + base);
-                }
-                for (std::size_t t = 0; t < nLocalTrials; ++t) {
-                  dst[t] += (dstRow[t] < mi) ? dstRow[t] : mi;
-                }
-              }
-            };
+            (void)candDistRows(n, transposedWidth);
             if (willParallelizeT) {
-              pool.parallelForBlocks(std::size_t{0}, n, blocksT,
-                                     [&](std::size_t lo, std::size_t hi) {
-                                       const std::size_t w = math::Pool::workerIndex();
-                                       rangeFn(lo, hi, localScoresT + (w * scoreSlab));
-                                     });
+              pool.parallelForBlocks(
+                  std::size_t{0}, n, blocksT, [&](std::size_t lo, std::size_t hi) {
+                    const std::size_t w = math::Pool::workerIndex();
+                    scoreTransposedChunkedRange(xData, d, nLocalTrials, transposedWidth, lo, hi,
+                                                localScoresT + (w * scoreSlab));
+                  });
             } else {
-              rangeFn(0, n, localScoresT);
+              scoreTransposedChunkedRange(xData, d, nLocalTrials, transposedWidth, std::size_t{0},
+                                          n, localScoresT);
             }
           }
-          for (std::size_t w = 0; w < workersT; ++w) {
-            const T *row = localScoresT + (w * scoreSlab);
-            for (std::size_t t = 0; t < nLocalTrials; ++t) {
-              scores[t] += row[t];
-            }
-          }
+          foldScoreSlabs(workersT, scoreSlab, nLocalTrials, scores.data());
           scoredViaTransposed = true;
         }
       }
@@ -737,111 +676,46 @@ public:
             // @c outDist, and accumulates min-capped scores. The kernel handles arbitrary row
             // counts, so per-worker row ranges slot in under the same parallel fan-out that
             // feeds the fallback path.
+            // Score-only path: skip the (n, L) cand-dist materialization. The winner row
+            // is recomputed by the commit-step refresh below, trading L stores per row for
+            // one sqEuclideanRowPtr per row at pick time.
             const bool soaEligible = (d >= 8) && (nLocalTrials >= 1) && (nLocalTrials <= 6);
             if (soaEligible) {
-              auto soaRange = [&](std::size_t lo, std::size_t hi, T *localScores) noexcept {
-                const std::size_t rangeN = hi - lo;
-                const float *xSlice = xData + (lo * d);
-                const float *minSlice = minSq + lo;
-                // Score-only path: skip the (n, L) cand-dist materialization. The winner row
-                // is recomputed by @ref winnerRange below, trading L stores per row for one
-                // sqEuclideanRowPtr per row at pick time.
-                switch (nLocalTrials) {
-                case 1:
-                  math::detail::kmppScoreSoaRowsAvx2F32<1, /*WriteOutDist=*/false>(
-                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
-                      localScores);
-                  break;
-                case 2:
-                  math::detail::kmppScoreSoaRowsAvx2F32<2, /*WriteOutDist=*/false>(
-                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
-                      localScores);
-                  break;
-                case 3:
-                  math::detail::kmppScoreSoaRowsAvx2F32<3, /*WriteOutDist=*/false>(
-                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
-                      localScores);
-                  break;
-                case 4:
-                  math::detail::kmppScoreSoaRowsAvx2F32<4, /*WriteOutDist=*/false>(
-                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
-                      localScores);
-                  break;
-                case 5:
-                  math::detail::kmppScoreSoaRowsAvx2F32<5, /*WriteOutDist=*/false>(
-                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
-                      localScores);
-                  break;
-                case 6:
-                  math::detail::kmppScoreSoaRowsAvx2F32<6, /*WriteOutDist=*/false>(
-                      xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth,
-                      localScores);
-                  break;
-                default:
-                  break;
-                }
-              };
-
               if (willParallelize) {
                 const std::size_t workers = pool.workerCount();
                 T *localScores = m_localScores.data();
-                for (std::size_t e = 0; e < workers * scoreSlab; ++e) {
-                  localScores[e] = T{0};
-                }
+                zeroScoreSlabs(workers, scoreSlab);
                 pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
                                        [&](std::size_t lo, std::size_t hi) {
                                          const std::size_t w = math::Pool::workerIndex();
-                                         soaRange(lo, hi, localScores + (w * scoreSlab));
+                                         scoreSoaRange(xData, d, nLocalTrials, transposedWidth, lo,
+                                                       hi, localScores + (w * scoreSlab));
                                        });
-                for (std::size_t w = 0; w < workers; ++w) {
-                  const T *row = localScores + (w * scoreSlab);
-                  for (std::size_t t = 0; t < nLocalTrials; ++t) {
-                    scores[t] += row[t];
-                  }
-                }
+                foldScoreSlabs(workers, scoreSlab, nLocalTrials, scores.data());
               } else {
-                soaRange(0, n, scores.data());
+                scoreSoaRange(xData, d, nLocalTrials, transposedWidth, std::size_t{0}, n,
+                              scores.data());
               }
               scoredViaSoa = true;
             }
           }
 #endif
           if (!scoredViaSoa) {
-            T *candDistSqData = candDistRows(n, transposedWidth);
-            auto scanRange = [&](std::size_t lo, std::size_t hi, T *localScores) noexcept {
-              std::array<T, 32> distRowLocal{};
-              for (std::size_t i = lo; i < hi; ++i) {
-                const T *xi = xData + (i * d);
-                const T mi = minSq[i];
-                detail::sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d,
-                                                 distRowLocal.data());
-                T *dstRow = candDistSqData + (i * transposedWidth);
-                for (std::size_t t = 0; t < nLocalTrials; ++t) {
-                  dstRow[t] = distRowLocal[t];
-                  localScores[t] += (distRowLocal[t] < mi) ? distRowLocal[t] : mi;
-                }
-              }
-            };
-
+            (void)candDistRows(n, transposedWidth);
             if (willParallelize) {
               const std::size_t workers = pool.workerCount();
               T *localScores = m_localScores.data();
-              for (std::size_t e = 0; e < workers * scoreSlab; ++e) {
-                localScores[e] = T{0};
-              }
+              zeroScoreSlabs(workers, scoreSlab);
               pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
-                                       scanRange(lo, hi, localScores + (w * scoreSlab));
+                                       scoreScalarRange(xData, d, nLocalTrials, transposedWidth, lo,
+                                                        hi, localScores + (w * scoreSlab));
                                      });
-              for (std::size_t w = 0; w < workers; ++w) {
-                const T *row = localScores + (w * scoreSlab);
-                for (std::size_t t = 0; t < nLocalTrials; ++t) {
-                  scores[t] += row[t];
-                }
-              }
+              foldScoreSlabs(workers, scoreSlab, nLocalTrials, scores.data());
             } else {
-              scanRange(0, n, scores.data());
+              scoreScalarRange(xData, d, nLocalTrials, transposedWidth, std::size_t{0}, n,
+                               scores.data());
             }
           }
         }
@@ -868,8 +742,7 @@ public:
       pool.parallelForExactBlocksWithSlot(
           std::size_t{0}, n, sweepBlocks,
           [&](std::size_t lo, std::size_t hi, std::size_t s) noexcept {
-            sweepSums[s] = math::detail::refreshMinSqAgainstRow(winnerRow, xData + (lo * d),
-                                                                hi - lo, d, minSq + lo);
+            refreshSweepBlock(winnerRow, xData, d, lo, hi, s);
           });
     }
   }
@@ -888,6 +761,379 @@ private:
     }
     return m_candDistSq.data();
   }
+
+  /// Init-sweep body for one sweep block: reset the block's @c minSq lanes to `+inf`,
+  /// refresh them against @p firstRow, and bank the block's weight into @c m_sweepSums.
+  void initSweepBlock(const T *firstRow, const T *xData, std::size_t d, std::size_t lo,
+                      std::size_t hi, std::size_t s) noexcept {
+    T *minSq = m_minSq.data();
+    for (std::size_t i = lo; i < hi; ++i) {
+      minSq[i] = std::numeric_limits<T>::infinity();
+    }
+    m_sweepSums.data()[s] =
+        math::detail::refreshMinSqAgainstRow(firstRow, xData + (lo * d), hi - lo, d, minSq + lo);
+  }
+
+  /// Refresh-sweep body for one sweep block: fold @p row into the block's @c minSq lanes and
+  /// bank the refreshed weight into @c m_sweepSums.
+  void refreshSweepBlock(const T *row, const T *xData, std::size_t d, std::size_t lo,
+                         std::size_t hi, std::size_t s) noexcept {
+    m_sweepSums.data()[s] = math::detail::refreshMinSqAgainstRow(row, xData + (lo * d), hi - lo, d,
+                                                                 m_minSq.data() + lo);
+  }
+
+  /// Draw candidate indices by inverse-CDF sampling over the banked block sums: locate the
+  /// block whose weight straddles each draw, then walk only that block's @c minSq lanes.
+  void drawCandidates(math::pcg64 &rng, T total, std::size_t n, std::size_t sweepBlocks,
+                      std::size_t nLocalTrials, std::size_t *candidates) noexcept {
+    const T *sweepSums = m_sweepSums.data();
+    const T *minSq = m_minSq.data();
+    for (std::size_t t = 0; t < nLocalTrials; ++t) {
+      const T u = math::randUnit<T>(rng) * total;
+      std::size_t s = 0;
+      T acc = T{0};
+      while (s + 1 < sweepBlocks && acc + sweepSums[s] <= u) {
+        acc += sweepSums[s];
+        ++s;
+      }
+      candidates[t] = detail::inverseCdfPickInRange(minSq, (n * s) / sweepBlocks,
+                                                    (n * (s + 1)) / sweepBlocks, u - acc);
+    }
+  }
+
+  /// Pack the drawn candidate rows into the contiguous `(L, d)` scoring buffer.
+  void packCandidates(const T *xData, std::size_t d, std::size_t nLocalTrials,
+                      const std::size_t *candidates) noexcept {
+    T *candRowsData = m_candRows.data();
+    for (std::size_t t = 0; t < nLocalTrials; ++t) {
+      std::memcpy(candRowsData + (t * d), xData + (candidates[t] * d), d * sizeof(T));
+    }
+  }
+
+  /// Transpose the candidate pack into the zero-padded `(d, W)` feature-major layout the
+  /// low-d transposed kernels stream.
+  void packCandidatesTransposed(std::size_t d, std::size_t nLocalTrials,
+                                std::size_t transposedWidth) noexcept {
+    const T *candRowsData = m_candRows.data();
+    T *candRowsTData = m_candRowsT.data();
+    for (std::size_t kk = 0; kk < d; ++kk) {
+      T *dstK = candRowsTData + (kk * transposedWidth);
+      for (std::size_t t = 0; t < nLocalTrials; ++t) {
+        dstK[t] = candRowsData[(t * d) + kk];
+      }
+      for (std::size_t t = nLocalTrials; t < transposedWidth; ++t) {
+        dstK[t] = T{0};
+      }
+    }
+  }
+
+  void zeroScoreSlabs(std::size_t slabs, std::size_t scoreSlab) noexcept {
+    T *localScores = m_localScores.data();
+    for (std::size_t e = 0; e < slabs * scoreSlab; ++e) {
+      localScores[e] = T{0};
+    }
+  }
+
+  /// Fold the per-slot score slabs into @p scores in ascending-slot order so the reduced
+  /// totals do not depend on which worker ran which range.
+  void foldScoreSlabs(std::size_t slabs, std::size_t scoreSlab, std::size_t nLocalTrials,
+                      T *scores) const noexcept {
+    const T *localScores = m_localScores.data();
+    for (std::size_t w = 0; w < slabs; ++w) {
+      const T *row = localScores + (w * scoreSlab);
+      for (std::size_t t = 0; t < nLocalTrials; ++t) {
+        scores[t] += row[t];
+      }
+    }
+  }
+
+  /// Batched-kernel scoring for rows `[lo, hi)`: @c L distances per row against the candidate
+  /// pack, min-capped sums accumulated into @p dst, distances materialized into the pre-grown
+  /// candidate-distance plane.
+  void scoreScalarRange(const T *xData, std::size_t d, std::size_t nLocalTrials,
+                        std::size_t transposedWidth, std::size_t lo, std::size_t hi,
+                        T *dst) noexcept {
+    const T *candRowsData = m_candRows.data();
+    const T *minSq = m_minSq.data();
+    T *candDistSqData = m_candDistSq.data();
+    std::array<T, 32> distRowLocal{};
+    for (std::size_t i = lo; i < hi; ++i) {
+      const T *xi = xData + (i * d);
+      const T mi = minSq[i];
+      detail::sqEuclideanRowToBatch<T>(xi, candRowsData, nLocalTrials, d, distRowLocal.data());
+      T *dstRow = candDistSqData + (i * transposedWidth);
+      for (std::size_t t = 0; t < nLocalTrials; ++t) {
+        dstRow[t] = distRowLocal[t];
+        dst[t] += (distRowLocal[t] < mi) ? distRowLocal[t] : mi;
+      }
+    }
+  }
+
+#ifdef CLUSTERING_USE_AVX2
+  /// 16-lane transposed scoring for rows `[lo, hi)`: two register-resident 8-lane
+  /// accumulators, one spill into @p dst per range instead of one per row.
+  void scoreTransposed16Range(const T *xData, std::size_t d, std::size_t nLocalTrials,
+                              std::size_t lo, std::size_t hi, T *dst) noexcept {
+    const T *minSq = m_minSq.data();
+    const T *candRowsTData = m_candRowsT.data();
+    __m256 scoresLoAcc = _mm256_setzero_ps();
+    __m256 scoresHiAcc = _mm256_setzero_ps();
+    for (std::size_t i = lo; i < hi; ++i) {
+      const float *xi = xData + (i * d);
+      const __m256 miVec = _mm256_set1_ps(minSq[i]);
+      const auto [dLo, dHi] = detail::sqEuclideanRowAgainst16TransposedReg(xi, candRowsTData, d);
+      scoresLoAcc = _mm256_add_ps(scoresLoAcc, _mm256_min_ps(dLo, miVec));
+      scoresHiAcc = _mm256_add_ps(scoresHiAcc, _mm256_min_ps(dHi, miVec));
+    }
+    std::array<float, 16> tmp{};
+    _mm256_storeu_ps(tmp.data(), scoresLoAcc);
+    _mm256_storeu_ps(tmp.data() + 8, scoresHiAcc);
+    for (std::size_t t = 0; t < nLocalTrials; ++t) {
+      dst[t] += tmp[t];
+    }
+  }
+
+  /// 8-lane sibling of @ref scoreTransposed16Range.
+  void scoreTransposed8Range(const T *xData, std::size_t d, std::size_t nLocalTrials,
+                             std::size_t lo, std::size_t hi, T *dst) noexcept {
+    const T *minSq = m_minSq.data();
+    const T *candRowsTData = m_candRowsT.data();
+    __m256 scoresAcc = _mm256_setzero_ps();
+    for (std::size_t i = lo; i < hi; ++i) {
+      const float *xi = xData + (i * d);
+      const __m256 miVec = _mm256_set1_ps(minSq[i]);
+      const __m256 dv = detail::sqEuclideanRowAgainst8TransposedReg(xi, candRowsTData, d);
+      scoresAcc = _mm256_add_ps(scoresAcc, _mm256_min_ps(dv, miVec));
+    }
+    std::array<float, 8> tmp{};
+    _mm256_storeu_ps(tmp.data(), scoresAcc);
+    for (std::size_t t = 0; t < nLocalTrials; ++t) {
+      dst[t] += tmp[t];
+    }
+  }
+
+  /// Chunked transposed scoring for `L > 16`: slide an 8-wide window across the `(d, W)`
+  /// pack, materializing each row's distances into the pre-grown candidate-distance plane.
+  void scoreTransposedChunkedRange(const T *xData, std::size_t d, std::size_t nLocalTrials,
+                                   std::size_t transposedWidth, std::size_t lo, std::size_t hi,
+                                   T *dst) noexcept {
+    const T *minSq = m_minSq.data();
+    const T *candRowsTData = m_candRowsT.data();
+    T *candDistSqData = m_candDistSq.data();
+    for (std::size_t i = lo; i < hi; ++i) {
+      const float *xi = xData + (i * d);
+      const float mi = minSq[i];
+      float *dstRow = candDistSqData + (i * transposedWidth);
+      for (std::size_t base = 0; base < transposedWidth; base += 8) {
+        detail::sqEuclideanRowAgainst8TransposedStrided(xi, candRowsTData + base, d,
+                                                        transposedWidth, dstRow + base);
+      }
+      for (std::size_t t = 0; t < nLocalTrials; ++t) {
+        dst[t] += (dstRow[t] < mi) ? dstRow[t] : mi;
+      }
+    }
+  }
+
+  /// SoA M-tile scoring for rows `[lo, hi)`; score-only, the winner column is recomputed at
+  /// pick time.
+  void scoreSoaRange(const T *xData, std::size_t d, std::size_t nLocalTrials,
+                     std::size_t transposedWidth, std::size_t lo, std::size_t hi, T *dst) noexcept {
+    const std::size_t rangeN = hi - lo;
+    const float *xSlice = xData + (lo * d);
+    const float *minSlice = m_minSq.data() + lo;
+    const float *candRowsData = m_candRows.data();
+    switch (nLocalTrials) {
+    case 1:
+      math::detail::kmppScoreSoaRowsAvx2F32<1, /*WriteOutDist=*/false>(
+          xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth, dst);
+      break;
+    case 2:
+      math::detail::kmppScoreSoaRowsAvx2F32<2, /*WriteOutDist=*/false>(
+          xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth, dst);
+      break;
+    case 3:
+      math::detail::kmppScoreSoaRowsAvx2F32<3, /*WriteOutDist=*/false>(
+          xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth, dst);
+      break;
+    case 4:
+      math::detail::kmppScoreSoaRowsAvx2F32<4, /*WriteOutDist=*/false>(
+          xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth, dst);
+      break;
+    case 5:
+      math::detail::kmppScoreSoaRowsAvx2F32<5, /*WriteOutDist=*/false>(
+          xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth, dst);
+      break;
+    case 6:
+      math::detail::kmppScoreSoaRowsAvx2F32<6, /*WriteOutDist=*/false>(
+          xSlice, rangeN, d, candRowsData, minSlice, nullptr, transposedWidth, dst);
+      break;
+    default:
+      break;
+    }
+  }
+
+  /// Scoring kernel families whose bodies take arbitrary row ranges; selected once per run,
+  /// dispatched per plex scoring phase.
+  enum class ScoreKernel { kTransposed16, kTransposed8, kTransposedChunked, kSoa, kScalar };
+
+  /// Mirror of the dispatch loop's per-round kernel selection, minus the GEMM family whose
+  /// scoring runs one whole-matrix GEMM instead of a range-invocable body.
+  [[nodiscard]] static ScoreKernel pickScoreKernel(std::size_t d,
+                                                   std::size_t nLocalTrials) noexcept {
+    if (d > 0 && d <= math::detail::kAvx2Lanes<float>) {
+      const std::size_t w = detail::greedyKmppTransposedWidth(nLocalTrials);
+      if (w == 8) {
+        return ScoreKernel::kTransposed8;
+      }
+      if (w == 16) {
+        return ScoreKernel::kTransposed16;
+      }
+      return ScoreKernel::kTransposedChunked;
+    }
+    if (d >= 8 && nLocalTrials >= 1 && nLocalTrials <= 6) {
+      return ScoreKernel::kSoa;
+    }
+    return ScoreKernel::kScalar;
+  }
+
+  /// Route rows `[lo, hi)` to the selected scoring kernel, accumulating into @p dst.
+  void scoreRange(ScoreKernel kernel, const T *xData, std::size_t d, std::size_t nLocalTrials,
+                  std::size_t transposedWidth, std::size_t lo, std::size_t hi, T *dst) noexcept {
+    switch (kernel) {
+    case ScoreKernel::kTransposed16:
+      scoreTransposed16Range(xData, d, nLocalTrials, lo, hi, dst);
+      break;
+    case ScoreKernel::kTransposed8:
+      scoreTransposed8Range(xData, d, nLocalTrials, lo, hi, dst);
+      break;
+    case ScoreKernel::kTransposedChunked:
+      scoreTransposedChunkedRange(xData, d, nLocalTrials, transposedWidth, lo, hi, dst);
+      break;
+    case ScoreKernel::kSoa:
+      scoreSoaRange(xData, d, nLocalTrials, transposedWidth, lo, hi, dst);
+      break;
+    case ScoreKernel::kScalar:
+      scoreScalarRange(xData, d, nLocalTrials, transposedWidth, lo, hi, dst);
+      break;
+    }
+  }
+
+  /**
+   * @brief Plex-driven round loop for the range-invocable scoring families.
+   *
+   * One @c runPlex dispatch drives the init sweep plus all `k - 1` picks as `1 + 2*(k-1)`
+   * phases over the sweep-block partition, so workers stay spin-resident across rounds
+   * instead of paying two fork-joins per pick. Odd phases score the round's candidates into
+   * per-slot slabs over the slot's sweep-block row range; even phases refresh @c m_minSq
+   * against the committed row and bank the block sums exactly as the dispatch loop does. The
+   * serial glue (block-sum fold, degenerate check, candidate draws, pack, winner pick) rides
+   * the pre-phase hook on the producer with happens-before to every worker's phase body.
+   * RNG consumption matches the dispatch loop draw for draw, including degenerate rounds,
+   * which consume one uniform pick and no-op their scoring phase.
+   */
+  void runPlexRounds(const NDArray<T, 2, Layout::Contig> &X, std::size_t k,
+                     std::size_t nLocalTrials, std::size_t scoreSlab, std::size_t sweepBlocks,
+                     math::pcg64 &rng, math::Pool pool,
+                     NDArray<T, 2, Layout::Contig> &outCentroids) {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const T *xData = X.data();
+    T *centroidsData = outCentroids.data();
+    const T *sweepSums = m_sweepSums.data();
+    const std::size_t workers = pool.workerCount();
+    const std::size_t transposedWidth = detail::greedyKmppTransposedWidth(nLocalTrials);
+    const ScoreKernel kernel = pickScoreKernel(d, nLocalTrials);
+    auto sweepLo = [n, sweepBlocks](std::size_t s) noexcept { return (n * s) / sweepBlocks; };
+
+    constexpr std::size_t kMaxLocalTrials = 32;
+    CLUSTERING_ALWAYS_ASSERT(nLocalTrials <= kMaxLocalTrials);
+
+    // Plane-writing kernels grow the (n, W) plane before workers go plex-resident.
+    if (kernel == ScoreKernel::kTransposedChunked || kernel == ScoreKernel::kScalar) {
+      (void)candDistRows(n, transposedWidth);
+    }
+
+    std::vector<std::size_t> candidates(nLocalTrials, 0);
+    std::vector<T> scores(nLocalTrials, T{0});
+    const T *refreshRow = centroidsData; // Phase 0 sweeps against the first centroid.
+    bool roundDegenerate = false;
+
+    auto prePhase = [&](std::size_t phaseIdx) noexcept {
+      if (phaseIdx == 0) {
+        return;
+      }
+      const std::size_t c = (phaseIdx + 1) / 2;
+      if ((phaseIdx & 1U) != 0) {
+        // Scoring glue: fold the banked block sums, then either record the degenerate
+        // uniform pick or draw and pack this round's candidates.
+        T total = T{0};
+        for (std::size_t s = 0; s < sweepBlocks; ++s) {
+          total += sweepSums[s];
+        }
+        roundDegenerate = !(total > T{0});
+        if (roundDegenerate) {
+          const auto pick = static_cast<std::size_t>(math::randUniformU64(rng) % n);
+          std::memcpy(centroidsData + (c * d), xData + (pick * d), d * sizeof(T));
+          refreshRow = centroidsData + (c * d);
+          return;
+        }
+        drawCandidates(rng, total, n, sweepBlocks, nLocalTrials, candidates.data());
+        packCandidates(xData, d, nLocalTrials, candidates.data());
+        if (kernel != ScoreKernel::kSoa && kernel != ScoreKernel::kScalar) {
+          packCandidatesTransposed(d, nLocalTrials, transposedWidth);
+        }
+        zeroScoreSlabs(workers, scoreSlab);
+        return;
+      }
+      // Refresh glue: fold the slot slabs, pick the winner, and stage its row for the sweep.
+      if (roundDegenerate) {
+        return;
+      }
+      for (std::size_t t = 0; t < nLocalTrials; ++t) {
+        scores[t] = T{0};
+      }
+      foldScoreSlabs(workers, scoreSlab, nLocalTrials, scores.data());
+      std::size_t bestT = 0;
+      T bestScore = scores[0];
+      for (std::size_t t = 1; t < nLocalTrials; ++t) {
+        if (scores[t] < bestScore) {
+          bestScore = scores[t];
+          bestT = t;
+        }
+      }
+      const T *winnerRow = xData + (candidates[bestT] * d);
+      std::memcpy(centroidsData + (c * d), winnerRow, d * sizeof(T));
+      refreshRow = winnerRow;
+    };
+
+    auto phase = [&](std::size_t phaseIdx, std::uint32_t slot, std::size_t lo, std::size_t hi,
+                     void * /*tlsArena*/ = nullptr) noexcept {
+      if (lo >= hi) {
+        return;
+      }
+      if (phaseIdx == 0) {
+        for (std::size_t s = lo; s < hi; ++s) {
+          initSweepBlock(refreshRow, xData, d, sweepLo(s), sweepLo(s + 1), s);
+        }
+        return;
+      }
+      if ((phaseIdx & 1U) != 0) {
+        if (roundDegenerate) {
+          return;
+        }
+        scoreRange(kernel, xData, d, nLocalTrials, transposedWidth, sweepLo(lo), sweepLo(hi),
+                   m_localScores.data() + (static_cast<std::size_t>(slot) * scoreSlab));
+        return;
+      }
+      for (std::size_t s = lo; s < hi; ++s) {
+        refreshSweepBlock(refreshRow, xData, d, sweepLo(s), sweepLo(s + 1), s);
+      }
+    };
+
+    pool.parallelRunPlex<citor::HintsDefaults>(1 + (2 * (k - 1)), sweepBlocks, std::move(phase),
+                                               std::move(prePhase));
+  }
+#endif // CLUSTERING_USE_AVX2
 
   void ensureShape(std::size_t n, std::size_t d, std::size_t L, std::size_t workers) {
     const std::size_t w = detail::greedyKmppTransposedWidth(L == 0 ? std::size_t{1} : L);
