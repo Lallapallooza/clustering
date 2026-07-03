@@ -461,7 +461,6 @@ public:
     T *minSq = m_minSq.data();
     T *candRowsData = m_candRows.data();
     T *sweepSums = m_sweepSums.data();
-    T *candDistSqData = m_candDistSq.data();
 #ifdef CLUSTERING_USE_AVX2
     T *candRowsTData = m_candRowsT.data();
 #endif
@@ -646,6 +645,7 @@ public:
           } else {
             // Generic chunked path for L > 16 (very high k). Walk the transposed layout 8 lanes
             // at a time so each chunk stays on the fully unrolled 8-wide kernel.
+            T *candDistSqData = candDistRows(n, transposedWidth);
             auto rangeFn = [&](std::size_t lo, std::size_t hi, T *dst) noexcept {
               for (std::size_t i = lo; i < hi; ++i) {
                 const float *xi = xData + (i * d);
@@ -705,6 +705,7 @@ public:
           }
           const T *xNorms = m_xNormsSq.data();
           const T *distsFlat = m_distsFlat.data();
+          T *candDistSqData = candDistRows(n, transposedWidth);
           for (std::size_t i = 0; i < n; ++i) {
             const T mi = minSq[i];
             const T xn = xNorms[i];
@@ -806,6 +807,7 @@ public:
           }
 #endif
           if (!scoredViaSoa) {
+            T *candDistSqData = candDistRows(n, transposedWidth);
             auto scanRange = [&](std::size_t lo, std::size_t hi, T *localScores) noexcept {
               std::array<T, 32> distRowLocal{};
               for (std::size_t i = lo; i < hi; ++i) {
@@ -873,6 +875,20 @@ public:
   }
 
 private:
+  /**
+   * @brief Grow the `(n, W)` candidate-distance plane on first use and return its base.
+   *
+   * Only the generic transposed walk, the scalar scoring fallback, and the GEMM fold write
+   * this plane; the register-resident and SoA scoring paths never touch it, so eagerly
+   * sizing it in @ref ensureShape would put an untouched @c n-row slab on every fit.
+   */
+  T *candDistRows(std::size_t n, std::size_t w) {
+    if (m_candDistSq.dim(0) != n || m_candDistSq.dim(1) != w) {
+      m_candDistSq = NDArray<T, 2, Layout::Contig>({n == 0 ? std::size_t{1} : n, w});
+    }
+    return m_candDistSq.data();
+  }
+
   void ensureShape(std::size_t n, std::size_t d, std::size_t L, std::size_t workers) {
     const std::size_t w = detail::greedyKmppTransposedWidth(L == 0 ? std::size_t{1} : L);
     if (m_candRows.dim(0) != L || m_candRows.dim(1) != d) {
@@ -880,9 +896,6 @@ private:
     }
     if (m_candRowsT.dim(0) != d || m_candRowsT.dim(1) != w) {
       m_candRowsT = NDArray<T, 2, Layout::Contig>({d == 0 ? std::size_t{1} : d, w});
-    }
-    if (m_candDistSq.dim(0) != n || m_candDistSq.dim(1) != w) {
-      m_candDistSq = NDArray<T, 2, Layout::Contig>({n == 0 ? std::size_t{1} : n, w});
     }
     const std::size_t sweepSlots = std::max<std::size_t>(workers, std::size_t{1}) * 8;
     if (m_sweepSums.dim(0) != sweepSlots) {
@@ -944,8 +957,7 @@ private:
   /// first @c L lanes.
   NDArray<T, 2, Layout::Contig> m_candRowsT;
   /// Per-outer-iteration cache of candidate distances: shape `(n, W)` matching the transposed
-  /// pack. Lets the commit step pick out the winner column without re-scanning x against the
-  /// winner centroid -- saves an O(n*d) pass per outer pick.
+  /// pack. Grown lazily through @ref candDistRows by the scoring paths that materialize it.
   NDArray<T, 2, Layout::Contig> m_candDistSq;
   /// Per-sweep-block sums of the refreshed @c minSq, banked by every sweep that mutates the
   /// array. Sampling folds these to the total and walks only the straddling block.
