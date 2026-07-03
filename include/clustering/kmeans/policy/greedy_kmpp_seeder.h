@@ -60,6 +60,26 @@ using math::detail::sqEuclideanRowPtr;
   return ((L + kChunk - 1) / kChunk) * kChunk;
 }
 
+/**
+ * @brief Fan-out width for one of the seeder's per-round `O(n*d)` sweeps.
+ *
+ * Sweeps that pass the row-count gate keep the full @c stealBlocks width. Below the
+ * gate the width is instead capped at one block per fixed kernel-op budget so every
+ * block still amortizes its share of the dispatch; a width of one keeps the sweep serial.
+ */
+[[nodiscard]] inline std::size_t greedyKmppSweepBlocks(math::Pool pool, std::size_t rows,
+                                                       std::size_t opsPerRow) noexcept {
+  constexpr std::size_t kMinOpsPerBlock = std::size_t{1} << 15;
+  if (pool.pool == nullptr || rows == 0) {
+    return 1;
+  }
+  if (pool.shouldParallelize(rows, 1024, 2)) {
+    return pool.stealBlocks(rows);
+  }
+  const std::size_t cap = std::max<std::size_t>(1, (rows * opsPerRow) / kMinOpsPerBlock);
+  return std::min(pool.stealBlocks(rows), cap);
+}
+
 #ifdef CLUSTERING_USE_AVX2
 
 /**
@@ -524,9 +544,11 @@ public:
             }
           }
           // Per-worker score accumulators are reused from @ref m_localScores; the candDistSq
-          // writes are row-local so partitioning by `i` is aliasing-free. Falls back to a
-          // single worker-zero path when the pool is null or the workload is too small.
-          const bool willParallelizeT = pool.shouldParallelize(n, 1024, 2);
+          // writes are row-local so partitioning by `i` is aliasing-free. The fan-out width
+          // is capped by the sweep's kernel work; a width of one keeps the sweep on the
+          // calling thread.
+          const std::size_t blocksT = detail::greedyKmppSweepBlocks(pool, n, d * transposedWidth);
+          const bool willParallelizeT = blocksT > 1;
           const std::size_t workersT = willParallelizeT ? pool.workerCount() : std::size_t{1};
           T *localScoresT = m_localScores.data();
           for (std::size_t e = 0; e < workersT * scoreSlab; ++e) {
@@ -553,7 +575,7 @@ public:
               }
             };
             if (willParallelizeT) {
-              pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
+              pool.parallelForBlocks(std::size_t{0}, n, blocksT,
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
                                        rangeFn(lo, hi, localScoresT + (w * scoreSlab));
@@ -577,7 +599,7 @@ public:
               }
             };
             if (willParallelizeT) {
-              pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
+              pool.parallelForBlocks(std::size_t{0}, n, blocksT,
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
                                        rangeFn(lo, hi, localScoresT + (w * scoreSlab));
@@ -603,7 +625,7 @@ public:
               }
             };
             if (willParallelizeT) {
-              pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n),
+              pool.parallelForBlocks(std::size_t{0}, n, blocksT,
                                      [&](std::size_t lo, std::size_t hi) {
                                        const std::size_t w = math::Pool::workerIndex();
                                        rangeFn(lo, hi, localScoresT + (w * scoreSlab));
@@ -813,8 +835,11 @@ public:
           }
         }
       };
-      if (pool.shouldParallelize(n, 1024, 2)) {
-        pool.parallelForBlocks(std::size_t{0}, n, pool.stealBlocks(n), winnerRange);
+      // The refresh reads two rows and conditionally stores per point, so the per-row cost
+      // carries a constant floor on top of the d-term; fold it into the width estimate.
+      const std::size_t blocksW = detail::greedyKmppSweepBlocks(pool, n, d + 8);
+      if (blocksW > 1) {
+        pool.parallelForBlocks(std::size_t{0}, n, blocksW, winnerRange);
       } else {
         winnerRange(0, n);
       }
