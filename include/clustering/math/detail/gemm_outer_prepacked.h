@@ -142,7 +142,25 @@ void gemmRunPrepacked(::clustering::detail::MatrixDescC<T> Ad, const T *prepacke
               }
             }
 
-            kernel(apPanel, bpPanel, tile.data(), kc, alpha, effBeta);
+            if constexpr (std::is_same_v<T, float>) {
+#ifdef CLUSTERING_USE_AVX2
+              if (nTail == 4) {
+                if (effBeta == T{0}) {
+                  gemmKernel8x4Avx2F32<BetaKind::kZero>(apPanel, bpPanel, tile.data(), kc, alpha,
+                                                        effBeta);
+                } else {
+                  gemmKernel8x4Avx2F32<BetaKind::kGeneral>(apPanel, bpPanel, tile.data(), kc, alpha,
+                                                           effBeta);
+                }
+              } else {
+                kernel(apPanel, bpPanel, tile.data(), kc, alpha, effBeta);
+              }
+#else
+              kernel(apPanel, bpPanel, tile.data(), kc, alpha, effBeta);
+#endif
+            } else {
+              kernel(apPanel, bpPanel, tile.data(), kc, alpha, effBeta);
+            }
 
             for (std::size_t c = 0; c < nTail; ++c) {
               for (std::size_t r = 0; r < mTail; ++r) {
