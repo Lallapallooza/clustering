@@ -91,8 +91,7 @@ public:
 
 #ifdef CLUSTERING_KMEANS_AFKMC2_CHAIN_LENGTH
   /**
-   * @brief Markov chain length per centroid pick. Bachem 2016 reports @c m=200 as the sweet
-   *        spot for the log-k approximation guarantee.
+   * @brief Markov chain length per centroid pick.
    *
    * Override with @c -DCLUSTERING_KMEANS_AFKMC2_CHAIN_LENGTH=<value>; values below a few dozen
    * trade the provable bound for faster seeding, values above 200 amortize into larger @c n
@@ -101,7 +100,7 @@ public:
   static constexpr std::size_t chainLengthDefault = CLUSTERING_KMEANS_AFKMC2_CHAIN_LENGTH;
 #else
   /// Default Markov-chain length per centroid pick.
-  static constexpr std::size_t chainLengthDefault = 200;
+  static constexpr std::size_t chainLengthDefault = 100;
 #endif
 
   AfkMc2Seeder()
