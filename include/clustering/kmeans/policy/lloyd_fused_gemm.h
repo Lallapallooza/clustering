@@ -425,6 +425,11 @@ private:
     const bool needsChunk = d > math::defaults::pairwiseArgminMaxD;
     const std::size_t chunkCap = math::pairwiseArgminChunkRows;
     const std::size_t blocks = workerCount == 0 ? std::size_t{1} : workerCount;
+    const bool directHamerlyScratch =
+        (d * k >= kHamerlyMinDirectScanDims) && (blocks <= kHamerlyDirectWorkerCap);
+    const bool hamerlyScratch = ((d > detail::kDirectArgminMaxD) || directHamerlyScratch) &&
+                                (k <= kHamerlyMaxK) && (k >= 2);
+    const std::size_t partialBlocks = hamerlyScratch ? hamerlyScatterBlocks(n, blocks) : blocks;
 
     if (shapeChanged) {
       m_centroidsOld = NDArray<T, 2, Layout::Contig>({k, d});
@@ -479,12 +484,11 @@ private:
       }
     }
 
-    // Per-block scratch sizing for scatter-and-fold. Block count caps at workerCount (see
-    // BlockPartition); we size to the upper bound so both serial and parallel dispatch fit
-    // without reallocation inside the loop.
-    m_partialSums = NDArray<T, 1>({blocks * k * d});
-    m_partialComps = NDArray<T, 1>({blocks * k * d});
-    m_partialCounts = NDArray<std::int32_t, 1>({blocks * k});
+    // Per-block scratch sizing for scatter-and-fold. Hamerly may use oversubscribed deterministic
+    // slots so its row ranges fold in a stable order across repeated threaded fits.
+    m_partialSums = NDArray<T, 1>({partialBlocks * k * d});
+    m_partialComps = NDArray<T, 1>({partialBlocks * k * d});
+    m_partialCounts = NDArray<std::int32_t, 1>({partialBlocks * k});
 
     // Gemm A-pack arena sized to @c blocks * kMc * kKc so @c gemmRunPrepacked's per-worker
     // slice indexing stays in-bounds on every fan-out path.
@@ -1126,6 +1130,17 @@ private:
     }
   }
 
+  [[nodiscard]] static std::size_t hamerlyScatterBlocks(std::size_t n,
+                                                        std::size_t workers) noexcept {
+    if (workers <= 1 || n == 0) {
+      return std::max<std::size_t>(workers, std::size_t{1});
+    }
+    constexpr std::size_t kMinRowsPerBlock = 256;
+    const std::size_t byRows = std::max<std::size_t>(1, n / kMinRowsPerBlock);
+    const std::size_t blocks = std::min(workers * 8, byRows);
+    return std::max(blocks, workers);
+  }
+
   void recomputeMinDistSqDirect(const NDArray<T, 2, Layout::Contig> &X,
                                 const NDArray<T, 2, Layout::Contig> &centroids,
                                 const NDArray<std::int32_t, 1> &labels, math::Pool pool) noexcept {
@@ -1392,17 +1407,17 @@ private:
       return;
     }
     const std::size_t workers = pool.workerCount();
-    preZeroPartialSlabs(useKahan, workers, k, d);
+    const std::size_t blocks = hamerlyScatterBlocks(n, workers);
+    preZeroPartialSlabs(useKahan, blocks, k, d);
 
     const HamerlyShiftTop2 top2 = prepareHamerlyGeometry(centroids, k, d);
 
-    pool.parallelForBlocks<citor::HintsDefaults>(
-        std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) noexcept {
-          hamerlyAssignScatterRange(X, centroids, labels, k, useKahan, top2, lo, hi,
-                                    math::Pool::workerIndex());
+    pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
+        std::size_t{0}, n, blocks, [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
+          hamerlyAssignScatterRange(X, centroids, labels, k, useKahan, top2, lo, hi, slot);
         });
 
-    foldPartialSlabs(useKahan, workers, k, d);
+    foldPartialSlabs(useKahan, blocks, k, d);
   }
 
   /**
