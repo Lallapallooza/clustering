@@ -204,9 +204,7 @@ private:
           yIdxBatch[t] = sampleFromAlias(rng, n);
         }
       } else {
-        for (std::size_t t = 0; t <= m; ++t) {
-          yIdxBatch[t] = sampleFromPrefix(rng, m_aliasProb.data(), n);
-        }
+        sampleBatchFromPrefix(rng, m_aliasProb.data(), n, m + 1, yIdxBatch);
       }
       for (std::size_t t = 0; t < m; ++t) {
         uBatch[t] = math::randUnit<T>(rng);
@@ -351,23 +349,38 @@ private:
     }
   }
 
-  /// Inverse-CDF binary search over @p qCum (length @p n, monotonically non-decreasing).
-  /// Total mass is `qCum[n-1]`.
-  [[gnu::always_inline]] std::size_t sampleFromPrefix(math::pcg64 &rng, const T *qCum,
-                                                      std::size_t n) noexcept {
+  /// Level-synchronous batch of inverse-CDF binary searches over @p qCum (length @p n,
+  /// monotonically non-decreasing; total mass `qCum[n-1]`). One draw's search is a chain of
+  /// dependent probes, so a draw-at-a-time walk serializes every cache miss; advancing the
+  /// whole batch one level at a time issues each level's probes independently and lets the
+  /// misses overlap. The draw order matches the one-at-a-time form, so identical seeds keep
+  /// producing identical candidate sequences. Uses @c m_yDistBatch as scratch for the draw
+  /// targets; callers overwrite it after sampling.
+  void sampleBatchFromPrefix(math::pcg64 &rng, const T *qCum, std::size_t n, std::size_t count,
+                             std::size_t *outIdx) noexcept {
     const T total = qCum[n - 1];
-    const T u = math::randUnit<T>(rng) * total;
-    std::size_t lo = 0;
-    std::size_t hi = n;
-    while (lo < hi) {
-      const std::size_t mid = lo + ((hi - lo) / 2);
-      if (qCum[mid] > u) {
-        hi = mid;
-      } else {
-        lo = mid + 1;
+    T *u = m_yDistBatch.data();
+    for (std::size_t t = 0; t < count; ++t) {
+      u[t] = math::randUnit<T>(rng) * total;
+    }
+    for (std::size_t t = 0; t < count; ++t) {
+      outIdx[t] = 0;
+    }
+    // Branchless range halving: the live range length depends only on itself, so every draw
+    // sits at the same level and the per-level probe loop stays uniform.
+    std::size_t len = n + 1;
+    while (len > 1) {
+      const std::size_t half = len / 2;
+      for (std::size_t t = 0; t < count; ++t) {
+        outIdx[t] += (qCum[outIdx[t] + half - 1] <= u[t]) ? half : 0;
+      }
+      len -= half;
+    }
+    for (std::size_t t = 0; t < count; ++t) {
+      if (outIdx[t] >= n) {
+        outIdx[t] = n - 1;
       }
     }
-    return lo < n ? lo : n - 1;
   }
 
   /// Routes the batched min-distance scan to the AVX2 tile kernel for `T == float`; falls
