@@ -1,5 +1,6 @@
 #pragma once
 
+#include <citor/cancellation.h>
 #include <citor/hints.h>
 #include <citor/thread_pool.h>
 
@@ -482,21 +483,33 @@ struct Pool {
     return pool->template inclusiveScan<HintsT>(in, out, std::move(identity), std::move(prefix));
   }
 
+  /**
+   * @brief Pre-phase form of @ref parallelRunPlex with cooperative cancellation.
+   *
+   * A stopped @p tok exits the plex at the next phase boundary; the default sentinel never
+   * stops. Stop it from @p prePhaseFn to end the plex early -- note the phase the hook
+   * precedes still fires once before the producer observes the flag.
+   */
   template <class HintsT = citor::HintsDefaults, class Phase, class PrePhase>
-  void parallelRunPlex(std::size_t nPhases, std::size_t n, Phase phaseFn, PrePhase prePhaseFn) {
+  void parallelRunPlex(std::size_t nPhases, std::size_t n, Phase phaseFn, PrePhase prePhaseFn,
+                       citor::CancellationToken tok = citor::CancellationToken{}) {
     if (nPhases == 0) {
       return;
     }
     if (pool == nullptr) {
-      // Single-slot inline emulation when no pool is attached.
+      // Single-slot inline emulation when no pool is attached; mirrors the backend's
+      // phase-boundary token check.
       for (std::size_t p = 0; p < nPhases; ++p) {
+        if (tok.stop_requested()) {
+          return;
+        }
         prePhaseFn(p);
         phaseFn(p, std::uint32_t{0}, std::size_t{0}, n, static_cast<void *>(nullptr));
       }
       return;
     }
     pool->template runPlex<HintsT>(nPhases, n, std::forward<Phase>(phaseFn),
-                                   std::forward<PrePhase>(prePhaseFn));
+                                   std::forward<PrePhase>(prePhaseFn), std::move(tok));
   }
 };
 

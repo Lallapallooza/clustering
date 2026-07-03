@@ -1,5 +1,7 @@
 #pragma once
 
+#include <citor/cancellation.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -203,7 +205,26 @@ public:
     const bool elkanEligible = (d > math::defaults::pairwiseArgminMaxD) && (k > kHamerlyMaxK) &&
                                (k <= kElkanMaxK) && (n * k <= kElkanNKLimit) && (k >= 2);
 
-    while (iter < maxIter) {
+    bool ranPlex = false;
+#ifdef CLUSTERING_USE_AVX2
+    if constexpr (std::is_same_v<T, float>) {
+      // The direct/fused assignment family runs every iteration inside one persistent-worker
+      // plex: workers stay spin-resident across phases and the serial glue rides the
+      // pre-phase hook, dropping the per-iteration fork/join. Elkan and chunked shapes keep
+      // the per-iteration dispatch below, as do iterations too small to amortize the
+      // per-phase epoch cost, where the dispatcher's small-work gates win.
+      constexpr std::size_t kMinPlexElems = std::size_t{1} << 16;
+      if (pool.pool != nullptr && workerCount > 1 && maxIter > 0 && (n * d >= kMinPlexElems) &&
+          (assignmentProducesDirectMinDistSq(X, centroids) ||
+           assignmentUsesFusedArgmin(X, centroids))) {
+        runPlexLoop(X, centroids, outLabels, k, maxIter, shiftSqThreshold, useKahan,
+                    hamerlyEligible, pool, iter, converged);
+        ranPlex = true;
+      }
+    }
+#endif
+
+    while (!ranPlex && iter < maxIter) {
       std::memcpy(m_centroidsOld.data(), centroids.data(),
                   centroids.dim(0) * centroids.dim(1) * sizeof(T));
 
@@ -256,6 +277,39 @@ public:
   }
 
 private:
+  /// Top-2 Euclidean centroid shifts feeding Hamerly's lower-bound decay: `l(x)` loses the
+  /// largest shift unless x's own cluster is the mover, in which case it loses the runner-up.
+  struct HamerlyShiftTop2 {
+    T sMax = T{0};
+    T s2Max = T{0};
+    std::size_t argMax = 0;
+  };
+
+  /// Scatter row @p i into slot @p slot's partial slab keyed by the row's label. Force-inlined
+  /// so the low-d tile loops keep the slab bases hoisted instead of paying a call per row.
+  [[gnu::always_inline]] inline void scatterRowToSlab(const T *xBase,
+                                                      const std::int32_t *labelsBase, std::size_t i,
+                                                      std::size_t slot, std::size_t k,
+                                                      std::size_t d, bool useKahan) noexcept {
+    const std::int32_t lbl = labelsBase[i];
+    if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
+      return;
+    }
+    const auto row = static_cast<std::size_t>(lbl);
+    const T *xRow = xBase + (i * d);
+    T *sumRow = m_partialSums.data() + (((slot * k) + row) * d);
+    std::int32_t *cslab = m_partialCounts.data() + (slot * k);
+    if (useKahan) {
+      T *compRow = m_partialComps.data() + (((slot * k) + row) * d);
+      math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
+    } else {
+      for (std::size_t t = 0; t < d; ++t) {
+        sumRow[t] += xRow[t];
+      }
+    }
+    cslab[row] += 1;
+  }
+
   /**
    * @brief Compute per-X column variance and per-row squared norms in a single fan-out.
    *
@@ -704,31 +758,8 @@ private:
       packCentroidsTiled(centroids);
     }
 
-    T *partialSums = m_partialSums.data();
-    T *partialComps = m_partialComps.data();
-    std::int32_t *partialCounts = m_partialCounts.data();
     const T *xBase = X.data();
     std::int32_t *labelsBase = labels.data();
-
-    auto scatterOneRow = [=](std::size_t i, std::size_t slot) noexcept {
-      const std::int32_t lbl = labelsBase[i];
-      if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
-        return;
-      }
-      const auto row = static_cast<std::size_t>(lbl);
-      const T *xRow = xBase + (i * d);
-      T *sumRow = partialSums + ((slot * k + row) * d);
-      std::int32_t *cslab = partialCounts + (slot * k);
-      if (useKahan) {
-        T *compRow = partialComps + ((slot * k + row) * d);
-        math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
-      } else {
-        for (std::size_t t = 0; t < d; ++t) {
-          sumRow[t] += xRow[t];
-        }
-      }
-      cslab[row] += 1;
-    };
 
 #ifdef CLUSTERING_USE_AVX2
     if constexpr (std::is_same_v<T, float>) {
@@ -738,14 +769,7 @@ private:
         pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
             std::size_t{0}, mTiles, workers,
             [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
-              for (std::size_t t = lo; t < hi; ++t) {
-                math::detail::argminDirectMTileF32(X, centroids, labels, m_minDistSq, t, n, k, d);
-                const std::size_t iBase = t * kMr;
-                const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
-                for (std::size_t r = 0; r < mc; ++r) {
-                  scatterOneRow(iBase + r, slot);
-                }
-              }
+              assignScatterDirectTiles(X, centroids, labels, k, useKahan, lo, hi, slot);
             });
         foldPartialSlabs(useKahan, workers, k, d);
         return;
@@ -753,20 +777,10 @@ private:
       if (useFused) {
         constexpr std::size_t kMr = math::detail::kKernelMr<float>;
         const std::size_t mTiles = (n + kMr - 1) / kMr;
-        const float *bpacked = m_packedB.data();
-        const float *normsPacked = m_packedCSqNorms.data();
         pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
             std::size_t{0}, mTiles, workers,
             [&](std::size_t lo, std::size_t hi, std::size_t slot) noexcept {
-              for (std::size_t t = lo; t < hi; ++t) {
-                math::detail::argminFusedMTileF32(X, bpacked, normsPacked, labels, m_minDistSq, t,
-                                                  n, k, d);
-                const std::size_t iBase = t * kMr;
-                const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
-                for (std::size_t r = 0; r < mc; ++r) {
-                  scatterOneRow(iBase + r, slot);
-                }
-              }
+              assignScatterFusedTiles(X, labels, k, useKahan, lo, hi, slot);
             });
         foldPartialSlabs(useKahan, workers, k, d);
         return;
@@ -834,13 +848,163 @@ private:
               labelsBase[iBase + i] = bestIdx;
               uBase[iBase + i] = std::sqrt(bestVal);
               lBase[iBase + i] = std::sqrt(secondVal);
-              scatterOneRow(iBase + i, slot);
+              scatterRowToSlab(xBase, labelsBase, iBase + i, slot, k, d, useKahan);
             }
           }
         });
 
     foldPartialSlabs(useKahan, workers, k, d);
   }
+
+#ifdef CLUSTERING_USE_AVX2
+  /// Direct small-d argmin + scatter over M-tiles `[tileLo, tileHi)` into slot @p slot's slab.
+  void assignScatterDirectTiles(const NDArray<T, 2, Layout::Contig> &X,
+                                const NDArray<T, 2, Layout::Contig> &centroids,
+                                NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                                std::size_t tileLo, std::size_t tileHi, std::size_t slot) noexcept {
+    constexpr std::size_t kMr = 8;
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const T *xBase = X.data();
+    const std::int32_t *labelsBase = labels.data();
+    for (std::size_t t = tileLo; t < tileHi; ++t) {
+      math::detail::argminDirectMTileF32(X, centroids, labels, m_minDistSq, t, n, k, d);
+      const std::size_t iBase = t * kMr;
+      const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+      for (std::size_t r = 0; r < mc; ++r) {
+        scatterRowToSlab(xBase, labelsBase, iBase + r, slot, k, d, useKahan);
+      }
+    }
+  }
+
+  /// Fused argmin-GEMM + scatter over M-tiles `[tileLo, tileHi)`; reads the packed centroid
+  /// panels in @c m_packedB / @c m_packedCSqNorms, which the caller has already refreshed.
+  void assignScatterFusedTiles(const NDArray<T, 2, Layout::Contig> &X,
+                               NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                               std::size_t tileLo, std::size_t tileHi, std::size_t slot) noexcept {
+    constexpr std::size_t kMr = math::detail::kKernelMr<float>;
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const T *xBase = X.data();
+    const std::int32_t *labelsBase = labels.data();
+    const float *bpacked = m_packedB.data();
+    const float *normsPacked = m_packedCSqNorms.data();
+    for (std::size_t t = tileLo; t < tileHi; ++t) {
+      math::detail::argminFusedMTileF32(X, bpacked, normsPacked, labels, m_minDistSq, t, n, k, d);
+      const std::size_t iBase = t * kMr;
+      const std::size_t mc = (iBase + kMr <= n) ? kMr : (n - iBase);
+      for (std::size_t r = 0; r < mc; ++r) {
+        scatterRowToSlab(xBase, labelsBase, iBase + r, slot, k, d, useKahan);
+      }
+    }
+  }
+
+  /**
+   * @brief Plex-driven Lloyd loop for the direct/fused assignment family.
+   *
+   * One @c runPlex dispatch drives every iteration: each phase is one assignment+scatter
+   * pass over slot-static M-tile ranges, and the serial glue (fold, reseed, mean step,
+   * shift, convergence test) runs in the pre-phase hook on the producer with happens-before
+   * to every worker's phase body. Convergence stops the plex's cancellation token; the
+   * phase the hook precedes still fires once (the producer observes the token at the next
+   * boundary), so the body no-ops behind @c stopPhases while the plex drains.
+   *
+   * @param iter      Incremented once per completed iteration, exactly as the fallback loop.
+   * @param converged Set when the Kahan-summed shift falls at or below @p shiftSqThreshold.
+   */
+  void runPlexLoop(const NDArray<T, 2, Layout::Contig> &X, NDArray<T, 2, Layout::Contig> &centroids,
+                   NDArray<std::int32_t, 1> &labels, std::size_t k, std::size_t maxIter,
+                   T shiftSqThreshold, bool useKahan, bool hamerlyEligible, math::Pool pool,
+                   std::size_t &iter, bool &converged) {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const std::size_t workers = pool.workerCount();
+    const bool useDirect = d <= detail::kDirectArgminMaxD;
+    // Partition M-tiles, not rows, so a kernel tile never straddles two slots.
+    const std::size_t mr = useDirect ? std::size_t{8} : math::detail::kKernelMr<float>;
+    const std::size_t mTiles = (n + mr - 1) / mr;
+
+    HamerlyShiftTop2 top2{};
+    bool stopPhases = false;
+    auto plexTok = citor::CancellationToken::makeOwned();
+
+    auto packFusedCentroids = [&]() noexcept {
+      math::detail::packCentroidsForFusedArgminF32(centroids, k, d, m_packedB.data());
+      math::detail::packCSqNorms<float>(m_cSqNorms.data(), k, m_packedCSqNorms.data());
+    };
+
+    // Fold + serial glue for the iteration whose scatter just finished; identical to the
+    // fallback loop's tail. Callers inside the plex pass the serial pool because the
+    // workers are plex-resident and cannot pick up a nested dispatch.
+    auto iterationGlue = [&](math::Pool gluePool) {
+      foldPartialSlabs(useKahan, workers, k, d);
+      (void)::clustering::kmeans::detail::reseedEmptyClusters<T>(X, centroids, m_sums, m_counts,
+                                                                 m_minDistSq);
+      finalizeMeans(centroids);
+      refreshCentroidSqNorms(centroids);
+      math::centroidShift<T>(m_centroidsOld, centroids, m_shiftSq, gluePool);
+      const T totalShift = ::clustering::kmeans::detail::totalShiftSqKahan<T>(m_shiftSq);
+      ++iter;
+      if (totalShift <= shiftSqThreshold) {
+        converged = true;
+      }
+    };
+
+    auto prePhase = [&](std::size_t phaseIdx) {
+      if (phaseIdx == 0) {
+        std::memcpy(m_centroidsOld.data(), centroids.data(), k * d * sizeof(T));
+        preZeroPartialSlabs(useKahan, workers, k, d);
+        if (!useDirect) {
+          packFusedCentroids();
+        }
+        return;
+      }
+      iterationGlue(math::Pool{});
+      if (converged) {
+        stopPhases = true;
+        plexTok.request_stop();
+        return;
+      }
+      std::memcpy(m_centroidsOld.data(), centroids.data(), k * d * sizeof(T));
+      preZeroPartialSlabs(useKahan, workers, k, d);
+      if (hamerlyEligible) {
+        top2 = prepareHamerlyGeometry(centroids, k, d);
+      } else if (!useDirect) {
+        packFusedCentroids();
+      }
+    };
+
+    auto phase = [&](std::size_t phaseIdx, std::uint32_t slot, std::size_t lo, std::size_t hi,
+                     void * /*tlsArena*/ = nullptr) noexcept {
+      if (stopPhases) {
+        return;
+      }
+      const auto s = static_cast<std::size_t>(slot);
+      if (hamerlyEligible && phaseIdx > 0) {
+        hamerlyAssignScatterRange(X, centroids, labels, k, useKahan, top2, std::min(lo * mr, n),
+                                  std::min(hi * mr, n), s);
+        return;
+      }
+      if (useDirect) {
+        assignScatterDirectTiles(X, centroids, labels, k, useKahan, lo, hi, s);
+      } else {
+        assignScatterFusedTiles(X, labels, k, useKahan, lo, hi, s);
+      }
+      if (hamerlyEligible && phaseIdx == 0) {
+        seedHamerlyBoundsRange(X, centroids, labels, std::min(lo * mr, n), std::min(hi * mr, n));
+      }
+    };
+
+    pool.parallelRunPlex<citor::HintsDefaults>(maxIter, mTiles, std::move(phase),
+                                               std::move(prePhase), plexTok);
+
+    if (!converged) {
+      // No pre-phase hook follows the last phase; its glue runs here, with the caller's
+      // pool restored now that the plex has drained.
+      iterationGlue(pool);
+    }
+  }
+#endif
 
   void preZeroPartialSlabs(bool useKahan, std::size_t numBlocks, std::size_t k,
                            std::size_t d) noexcept {
@@ -954,6 +1118,30 @@ private:
                            [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
   }
 
+  /// Seed per-row Hamerly bounds from freshly assigned labels for rows `[lo, hi)`.
+  void seedHamerlyBoundsRange(const NDArray<T, 2, Layout::Contig> &X,
+                              const NDArray<T, 2, Layout::Contig> &centroids,
+                              const NDArray<std::int32_t, 1> &labels, std::size_t lo,
+                              std::size_t hi) noexcept {
+    const std::size_t d = X.dim(1);
+    const std::size_t k = centroids.dim(0);
+    for (std::size_t i = lo; i < hi; ++i) {
+      const std::int32_t lbl = labels(i);
+      if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
+        m_minDistSq(i) = T{0};
+        m_u(i) = std::numeric_limits<T>::infinity();
+        m_l(i) = T{0};
+        continue;
+      }
+      const T *xRow = X.data() + (i * d);
+      const T *cRow = centroids.data() + (static_cast<std::size_t>(lbl) * d);
+      const T tightSq = math::detail::sqEuclideanRowPtr<T>(xRow, cRow, d);
+      m_minDistSq(i) = tightSq;
+      m_u(i) = std::sqrt(tightSq);
+      m_l(i) = T{0};
+    }
+  }
+
   void seedHamerlyBoundsFromLabels(const NDArray<T, 2, Layout::Contig> &X,
                                    const NDArray<T, 2, Layout::Contig> &centroids,
                                    const NDArray<std::int32_t, 1> &labels,
@@ -965,26 +1153,9 @@ private:
       return;
     }
 
-    auto seedRange = [&](std::size_t lo, std::size_t hi) noexcept {
-      for (std::size_t i = lo; i < hi; ++i) {
-        const std::int32_t lbl = labels(i);
-        if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
-          m_minDistSq(i) = T{0};
-          m_u(i) = std::numeric_limits<T>::infinity();
-          m_l(i) = T{0};
-          continue;
-        }
-        const T *xRow = X.data() + (i * d);
-        const T *cRow = centroids.data() + (static_cast<std::size_t>(lbl) * d);
-        const T tightSq = math::detail::sqEuclideanRowPtr<T>(xRow, cRow, d);
-        m_minDistSq(i) = tightSq;
-        m_u(i) = std::sqrt(tightSq);
-        m_l(i) = T{0};
-      }
-    };
-
-    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
-                           [&](std::size_t lo, std::size_t hi) { seedRange(lo, hi); });
+    pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) {
+      seedHamerlyBoundsRange(X, centroids, labels, lo, hi);
+    });
   }
 
   /**
@@ -1013,46 +1184,30 @@ private:
   static constexpr std::size_t kElkanNKLimit = std::size_t{32} << 20;
 
   /**
-   * @brief Hamerly assignment fused with per-slot scatter into @c m_partialSums / @c
-   * m_partialCounts.
+   * @brief Per-iteration Hamerly geometry: Euclidean shifts, their top-2, and per-cluster
+   *        half-distance to the nearest other centroid.
    *
-   * Same per-row body as @ref runHamerlyAssignment, but the outer fan-out is one
-   * @c parallelForExactBlocksWithSlot over slot-aligned row ranges, and after each row's label
-   * is decided the row is scattered into the slot's slab. Pre-zeroes slabs and folds at the end
-   * so the assignment and scatter share a single fan-out.
+   * The half-distance feeds the Lemma 1 shortcut: when `u(x)` for a sample assigned to
+   * cluster @c c clears `halfDist[c]`, triangle inequality pins the sample in @c c because
+   * any other centroid is at least `2 * halfDist[c]` away. Fills @c m_shiftEuclidean and
+   * @c m_halfDistToNearestOther from @c m_shiftSq and @p centroids; `O(k^2 * d)`, negligible
+   * next to the per-sample scan at `k <= kHamerlyMaxK`.
    */
-  void runHamerlyAssignmentAndScatter(const NDArray<T, 2, Layout::Contig> &X,
-                                      const NDArray<T, 2, Layout::Contig> &centroids,
-                                      NDArray<std::int32_t, 1> &labels, std::size_t k,
-                                      bool useKahan, math::Pool pool) noexcept {
-    const std::size_t n = X.dim(0);
-    const std::size_t d = X.dim(1);
-    if (n == 0 || d == 0 || k == 0 || k > kHamerlyMaxK) {
-      return;
-    }
-    const std::size_t workers = pool.workerCount();
-    preZeroPartialSlabs(useKahan, workers, k, d);
-
-    const T *xData = X.data();
+  [[nodiscard]] HamerlyShiftTop2
+  prepareHamerlyGeometry(const NDArray<T, 2, Layout::Contig> &centroids, std::size_t k,
+                         std::size_t d) noexcept {
+    HamerlyShiftTop2 top2{};
     const T *cData = centroids.data();
-    T *uData = m_u.data();
-    T *lData = m_l.data();
-    T *minDistData = m_minDistSq.data();
-    std::int32_t *labelsData = labels.data();
-
-    T sMax = T{0};
-    T s2Max = T{0};
-    std::size_t argMax = 0;
     T *shiftData = m_shiftEuclidean.data();
     for (std::size_t c = 0; c < k; ++c) {
       const T s = std::sqrt(m_shiftSq(c));
       shiftData[c] = s;
-      if (s > sMax) {
-        s2Max = sMax;
-        sMax = s;
-        argMax = c;
-      } else if (s > s2Max) {
-        s2Max = s;
+      if (s > top2.sMax) {
+        top2.s2Max = top2.sMax;
+        top2.sMax = s;
+        top2.argMax = c;
+      } else if (s > top2.s2Max) {
+        top2.s2Max = s;
       }
     }
 
@@ -1071,85 +1226,127 @@ private:
       }
       halfDistData[c] = T{0.5} * std::sqrt(nearestSq);
     }
+    return top2;
+  }
 
-    T *partialSums = m_partialSums.data();
-    T *partialComps = m_partialComps.data();
-    std::int32_t *partialCounts = m_partialCounts.data();
+  /// Hamerly bounded assignment + scatter for rows `[lo, hi)` into slot @p slot's slab.
+  /// Reads the geometry @ref prepareHamerlyGeometry left in @c m_shiftEuclidean and
+  /// @c m_halfDistToNearestOther plus the top-2 shifts in @p top2.
+  void hamerlyAssignScatterRange(const NDArray<T, 2, Layout::Contig> &X,
+                                 const NDArray<T, 2, Layout::Contig> &centroids,
+                                 NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                                 const HamerlyShiftTop2 &top2, std::size_t lo, std::size_t hi,
+                                 std::size_t slot) noexcept {
+    const std::size_t d = X.dim(1);
+    const T *xData = X.data();
+    const T *cData = centroids.data();
+    T *uData = m_u.data();
+    T *lData = m_l.data();
+    T *minDistData = m_minDistSq.data();
+    std::int32_t *labelsData = labels.data();
+    const T *shiftData = m_shiftEuclidean.data();
+    const T *halfDistData = m_halfDistToNearestOther.data();
+    T *slabSum = m_partialSums.data() + (slot * k * d);
+    T *slabComp = m_partialComps.data() + (slot * k * d);
+    std::int32_t *slabCnt = m_partialCounts.data() + (slot * k);
+
+    std::array<T, kHamerlyMaxK> distBuf{};
+    for (std::size_t i = lo; i < hi; ++i) {
+      const std::int32_t a = labelsData[i];
+      if (a < 0 || std::cmp_greater_equal(a, k)) {
+        continue;
+      }
+      const auto au = static_cast<std::size_t>(a);
+      T ui = uData[i] + shiftData[au];
+      T li = lData[i] - ((au == top2.argMax) ? top2.s2Max : top2.sMax);
+      std::int32_t bestLabel = a;
+      bool labelDecided = false;
+
+      if (ui <= li || ui <= halfDistData[au]) {
+        uData[i] = ui;
+        lData[i] = li;
+        labelDecided = true;
+      }
+
+      if (!labelDecided) {
+        const T *xi = xData + (i * d);
+        const T *caRow = cData + (au * d);
+        const T tightSq = math::detail::sqEuclideanRowPtr<T>(xi, caRow, d);
+        ui = std::sqrt(tightSq);
+
+        if (ui <= li) {
+          uData[i] = ui;
+          lData[i] = li;
+          minDistData[i] = tightSq;
+          labelDecided = true;
+        } else {
+          detail::sqEuclideanRowToBatch<T>(xi, cData, k, d, distBuf.data());
+          T best = std::numeric_limits<T>::infinity();
+          T second = std::numeric_limits<T>::infinity();
+          std::int32_t bestIdx = 0;
+          for (std::size_t j = 0; j < k; ++j) {
+            const T v = distBuf[j];
+            if (v < best) {
+              second = best;
+              best = v;
+              bestIdx = static_cast<std::int32_t>(j);
+            } else if (v < second) {
+              second = v;
+            }
+          }
+          bestLabel = bestIdx;
+          labelsData[i] = bestIdx;
+          minDistData[i] = best;
+          uData[i] = std::sqrt(best);
+          lData[i] = std::sqrt(second);
+        }
+      }
+
+      if (bestLabel < 0 || std::cmp_greater_equal(bestLabel, k)) {
+        continue;
+      }
+      const auto row = static_cast<std::size_t>(bestLabel);
+      const T *xRow = xData + (i * d);
+      T *sumRow = slabSum + (row * d);
+      if (useKahan) {
+        T *compRow = slabComp + (row * d);
+        math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
+      } else {
+        for (std::size_t t = 0; t < d; ++t) {
+          sumRow[t] += xRow[t];
+        }
+      }
+      slabCnt[row] += 1;
+    }
+  }
+
+  /**
+   * @brief Hamerly assignment fused with per-slot scatter into @c m_partialSums / @c
+   * m_partialCounts.
+   *
+   * Same per-row body as @ref runHamerlyAssignment, but the outer fan-out is one
+   * @c parallelForBlocks over row ranges keyed to the worker slot, and after each row's label
+   * is decided the row is scattered into the slot's slab. Pre-zeroes slabs and folds at the end
+   * so the assignment and scatter share a single fan-out.
+   */
+  void runHamerlyAssignmentAndScatter(const NDArray<T, 2, Layout::Contig> &X,
+                                      const NDArray<T, 2, Layout::Contig> &centroids,
+                                      NDArray<std::int32_t, 1> &labels, std::size_t k,
+                                      bool useKahan, math::Pool pool) noexcept {
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    if (n == 0 || d == 0 || k == 0 || k > kHamerlyMaxK) {
+      return;
+    }
+    const std::size_t workers = pool.workerCount();
+    preZeroPartialSlabs(useKahan, workers, k, d);
+
+    const HamerlyShiftTop2 top2 = prepareHamerlyGeometry(centroids, k, d);
 
     pool.parallelForBlocks<citor::HintsDefaults>(
         std::size_t{0}, n, std::size_t{0}, [&](std::size_t lo, std::size_t hi) noexcept {
-          std::array<T, kHamerlyMaxK> distBuf{};
-          const std::size_t slot = math::Pool::workerIndex();
-          T *slabSum = partialSums + (slot * k * d);
-          T *slabComp = partialComps + (slot * k * d);
-          std::int32_t *slabCnt = partialCounts + (slot * k);
-          for (std::size_t i = lo; i < hi; ++i) {
-            const std::int32_t a = labelsData[i];
-            if (a < 0 || std::cmp_greater_equal(a, k)) {
-              continue;
-            }
-            const auto au = static_cast<std::size_t>(a);
-            T ui = uData[i] + shiftData[au];
-            T li = lData[i] - ((au == argMax) ? s2Max : sMax);
-            std::int32_t bestLabel = a;
-            bool labelDecided = false;
-
-            if (ui <= li || ui <= halfDistData[au]) {
-              uData[i] = ui;
-              lData[i] = li;
-              labelDecided = true;
-            }
-
-            if (!labelDecided) {
-              const T *xi = xData + (i * d);
-              const T *caRow = cData + (au * d);
-              const T tightSq = math::detail::sqEuclideanRowPtr<T>(xi, caRow, d);
-              ui = std::sqrt(tightSq);
-
-              if (ui <= li) {
-                uData[i] = ui;
-                lData[i] = li;
-                minDistData[i] = tightSq;
-                labelDecided = true;
-              } else {
-                detail::sqEuclideanRowToBatch<T>(xi, cData, k, d, distBuf.data());
-                T best = std::numeric_limits<T>::infinity();
-                T second = std::numeric_limits<T>::infinity();
-                std::int32_t bestIdx = 0;
-                for (std::size_t j = 0; j < k; ++j) {
-                  const T v = distBuf[j];
-                  if (v < best) {
-                    second = best;
-                    best = v;
-                    bestIdx = static_cast<std::int32_t>(j);
-                  } else if (v < second) {
-                    second = v;
-                  }
-                }
-                bestLabel = bestIdx;
-                labelsData[i] = bestIdx;
-                minDistData[i] = best;
-                uData[i] = std::sqrt(best);
-                lData[i] = std::sqrt(second);
-              }
-            }
-
-            if (bestLabel < 0 || std::cmp_greater_equal(bestLabel, k)) {
-              continue;
-            }
-            const auto row = static_cast<std::size_t>(bestLabel);
-            const T *xRow = xData + (i * d);
-            T *sumRow = slabSum + (row * d);
-            if (useKahan) {
-              T *compRow = slabComp + (row * d);
-              math::detail::kahanAddRow<T>(xRow, d, sumRow, compRow);
-            } else {
-              for (std::size_t t = 0; t < d; ++t) {
-                sumRow[t] += xRow[t];
-              }
-            }
-            slabCnt[row] += 1;
-          }
+          hamerlyAssignScatterRange(X, centroids, labels, k, useKahan, top2, lo, hi,
+                                    math::Pool::workerIndex());
         });
 
     foldPartialSlabs(useKahan, workers, k, d);
@@ -1316,45 +1513,12 @@ private:
     T *minDistData = m_minDistSq.data();
     std::int32_t *labelsData = labels.data();
 
-    // Per-cluster Euclidean shift + top-2 of shifts. The second-largest shift is the amount we
-    // subtract from `l(x)` when x's assigned cluster is the one with the largest shift --
-    // otherwise the largest shift is the loose bound donor for every non-assigned cluster.
-    T sMax = T{0};
-    T s2Max = T{0};
-    std::size_t argMax = 0;
-    T *shiftData = m_shiftEuclidean.data();
-    for (std::size_t c = 0; c < k; ++c) {
-      const T s = std::sqrt(m_shiftSq(c));
-      shiftData[c] = s;
-      if (s > sMax) {
-        s2Max = sMax;
-        sMax = s;
-        argMax = c;
-      } else if (s > s2Max) {
-        s2Max = s;
-      }
-    }
-
-    // Per-cluster half-distance to the nearest other centroid. When `u(x)` for a sample
-    // assigned to cluster @c c clears this threshold, triangle inequality pins the sample in
-    // @c c: any other @c c' is at least @c 2 * halfDist[c] away, so `||x - c'||` >= 2 *
-    // halfDist[c] - u(x) >= u(x) >= ||x - c||. Populating it is `O(k^2 * d)`, negligible next
-    // to Hamerly's per-sample work at `k <= 64`.
-    T *halfDistData = m_halfDistToNearestOther.data();
-    for (std::size_t c = 0; c < k; ++c) {
-      T nearestSq = std::numeric_limits<T>::infinity();
-      const T *caRow = cData + (c * d);
-      for (std::size_t cp = 0; cp < k; ++cp) {
-        if (cp == c) {
-          continue;
-        }
-        const T dsq = math::detail::sqEuclideanRowPtr<T>(caRow, cData + (cp * d), d);
-        if (dsq < nearestSq) {
-          nearestSq = dsq;
-        }
-      }
-      halfDistData[c] = T{0.5} * std::sqrt(nearestSq);
-    }
+    // The second-largest shift is the amount we subtract from `l(x)` when x's assigned
+    // cluster is the one with the largest shift -- otherwise the largest shift is the loose
+    // bound donor for every non-assigned cluster.
+    const HamerlyShiftTop2 top2 = prepareHamerlyGeometry(centroids, k, d);
+    const T *shiftData = m_shiftEuclidean.data();
+    const T *halfDistData = m_halfDistToNearestOther.data();
 
     auto processRange = [&](std::size_t lo, std::size_t hi) noexcept {
       std::array<T, kHamerlyMaxK> distBuf{};
@@ -1365,7 +1529,7 @@ private:
         }
         const auto au = static_cast<std::size_t>(a);
         T ui = uData[i] + shiftData[au];
-        T li = lData[i] - ((au == argMax) ? s2Max : sMax);
+        T li = lData[i] - ((au == top2.argMax) ? top2.s2Max : top2.sMax);
 
         if (ui <= li) {
           uData[i] = ui;
