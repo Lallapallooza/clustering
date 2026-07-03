@@ -100,7 +100,7 @@ public:
   static constexpr std::size_t chainLengthDefault = CLUSTERING_KMEANS_AFKMC2_CHAIN_LENGTH;
 #else
   /// Default Markov-chain length per centroid pick.
-  static constexpr std::size_t chainLengthDefault = 100;
+  static constexpr std::size_t chainLengthDefault = 64;
 #endif
 
   AfkMc2Seeder()
