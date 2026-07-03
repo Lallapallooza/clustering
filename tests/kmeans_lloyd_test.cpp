@@ -412,6 +412,7 @@ TEST(KMeansEndToEnd, LabelsMatchBruteForceArgminAtMidDim) {
   ASSERT_EQ(centroids.dim(1), d);
   ASSERT_EQ(labels.dim(0), n);
 
+  double refInertia = 0.0;
   for (std::size_t i = 0; i < n; ++i) {
     float bestVal = std::numeric_limits<float>::infinity();
     std::int32_t bestIdx = 0;
@@ -427,5 +428,7 @@ TEST(KMeansEndToEnd, LabelsMatchBruteForceArgminAtMidDim) {
       }
     }
     EXPECT_EQ(labels(i), bestIdx) << "i=" << i;
+    refInertia += static_cast<double>(bestVal);
   }
+  EXPECT_NEAR(km.inertia(), refInertia, std::max(1.0, refInertia) * 1e-5);
 }

@@ -263,20 +263,18 @@ public:
       }
     }
 
-    // Re-assign labels against the final centroids. At convergence the bounds Hamerly maintains
-    // are already tight for the pre-update centroids; feeding one more bound-aware pass against
-    // the tiny final shift prunes nearly every row and is an order of magnitude cheaper than a
-    // full chunked GEMM assignment. Force the serial fan-out so the per-worker submit/wait pair
-    // doesn't dominate the trivial post-convergence work; the chunked fallback still fans out
-    // when the shape never enabled Hamerly.
+    // Re-assign labels against the final centroids. Hamerly can refresh exact assigned
+    // distances while proving labels, so final inertia can consume m_minDistSq directly.
+    bool finalMinDistExact = assignmentProducesDirectMinDistSq(X, centroids);
     if (hamerlyEligible && iter > 0) {
-      runHamerlyAssignment(X, centroids, outLabels, math::Pool{});
+      runHamerlyAssignment(X, centroids, outLabels, pool, true);
+      finalMinDistExact = true;
     } else if (elkanEligible && iter > 0) {
       runElkanAssignment(X, centroids, outLabels, math::Pool{});
     } else {
       runAssignment(X, centroids, outLabels, pool);
     }
-    if (!assignmentProducesDirectMinDistSq(X, centroids)) {
+    if (!finalMinDistExact) {
       recomputeMinDistSqDirect(X, centroids, outLabels, pool);
     }
 
@@ -1550,11 +1548,13 @@ private:
    * computed into @c m_shiftSq, then for each point applies the `u <= l` prune; points that
    * clear the prune have their @c u tightened to the exact distance to the current assigned
    * centroid and rechecked, and only those still above the lower bound fall into the full
-   * @c k-distance scan. Labels, @c m_u, @c m_l, and @c m_minDistSq are all maintained.
+   * @c k-distance scan. With @p refreshAssignedMinDist, pruned rows also refresh
+   * @c m_minDistSq for final inertia.
    */
   void runHamerlyAssignment(const NDArray<T, 2, Layout::Contig> &X,
                             const NDArray<T, 2, Layout::Contig> &centroids,
-                            NDArray<std::int32_t, 1> &labels, math::Pool pool) noexcept {
+                            NDArray<std::int32_t, 1> &labels, math::Pool pool,
+                            bool refreshAssignedMinDist = false) noexcept {
     const std::size_t n = X.dim(0);
     const std::size_t d = X.dim(1);
     const std::size_t k = centroids.dim(0);
@@ -1586,18 +1586,16 @@ private:
         T ui = uData[i] + shiftData[au];
         T li = lData[i] - ((au == top2.argMax) ? top2.s2Max : top2.sMax);
 
-        if (ui <= li) {
-          uData[i] = ui;
-          lData[i] = li;
-          continue;
-        }
-
-        // Lemma 1 shortcut: if the upper bound clears the half-distance to the nearest other
-        // centroid, the sample's label cannot have changed -- no need to recompute
-        // `||x - c_a||`. @c ui is still the post-shift bound, which stays valid; @c li is
-        // allowed to decay here because the outer per-sample gate will exact-recompute it on
-        // the next iteration that forces a tightening or a full scan.
-        if (ui <= halfDistData[au]) {
+        const bool assignedByLower = ui <= li;
+        const bool assignedByCenter = !assignedByLower && ui <= halfDistData[au];
+        if (assignedByLower || assignedByCenter) {
+          if (refreshAssignedMinDist) {
+            const T *xi = xData + (i * d);
+            const T *caRow = cData + (au * d);
+            const T tightSq = math::detail::sqEuclideanRowPtr<T>(xi, caRow, d);
+            minDistData[i] = tightSq;
+            ui = std::sqrt(tightSq);
+          }
           uData[i] = ui;
           lData[i] = li;
           continue;
