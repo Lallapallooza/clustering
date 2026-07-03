@@ -210,13 +210,16 @@ public:
     if constexpr (std::is_same_v<T, float>) {
       // The direct/fused assignment family runs every iteration inside one persistent-worker
       // plex: workers stay spin-resident across phases and the serial glue rides the
-      // pre-phase hook, dropping the per-iteration fork/join. Elkan and chunked shapes keep
-      // the per-iteration dispatch below, as do iterations too small to amortize the
-      // per-phase epoch cost, where the dispatcher's small-work gates win.
+      // pre-phase hook, dropping the per-iteration fork/join. Chunked shapes join under
+      // Hamerly: phase 0 carries the full chunked GEMM assignment, later phases the
+      // bounds-aware row scan. Elkan and non-Hamerly chunked shapes keep the per-iteration
+      // dispatch below, as do iterations too small to amortize the per-phase epoch cost,
+      // where the dispatcher's small-work gates win.
       constexpr std::size_t kMinPlexElems = std::size_t{1} << 16;
+      const bool plexChunkedHamerly = hamerlyEligible && d > math::defaults::pairwiseArgminMaxD;
       if (pool.pool != nullptr && workerCount > 1 && maxIter > 0 && (n * d >= kMinPlexElems) &&
           (assignmentProducesDirectMinDistSq(X, centroids) ||
-           assignmentUsesFusedArgmin(X, centroids))) {
+           assignmentUsesFusedArgmin(X, centroids) || plexChunkedHamerly)) {
         runPlexLoop(X, centroids, outLabels, k, maxIter, shiftSqThreshold, useKahan,
                     hamerlyEligible, pool, iter, converged);
         ranPlex = true;
@@ -758,9 +761,6 @@ private:
       packCentroidsTiled(centroids);
     }
 
-    const T *xBase = X.data();
-    std::int32_t *labelsBase = labels.data();
-
 #ifdef CLUSTERING_USE_AVX2
     if constexpr (std::is_same_v<T, float>) {
       if (useDirect) {
@@ -789,71 +789,85 @@ private:
 #endif
 
     // Chunked path (d > pairwiseArgminMaxD or T == double): fan out over chunks.
-    constexpr std::size_t kMcVal = math::detail::kMc<T>;
-    constexpr std::size_t kKcVal = math::detail::kKc<T>;
     const std::size_t chunkCap = math::pairwiseArgminChunkRows;
     const std::size_t numChunks = (n + chunkCap - 1) / chunkCap;
+    pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
+        std::size_t{0}, numChunks, workers,
+        [&](std::size_t chunkLo, std::size_t chunkHi, std::size_t slot) noexcept {
+          assignScatterChunkRange(X, labels, k, useKahan, chunkLo, chunkHi, slot);
+        });
+
+    foldPartialSlabs(useKahan, workers, k, d);
+  }
+
+  /// Chunked GEMM assignment + scatter over chunks `[chunkLo, chunkHi)` into slot @p slot's
+  /// slab and distance/A-pack slices; reads the tiled centroid pack in @c m_packedB, which
+  /// the caller has already refreshed. The argmin post-pass seeds the Hamerly bounds (and
+  /// Elkan's, when the bound matrix is sized for this shape) inline.
+  void assignScatterChunkRange(const NDArray<T, 2, Layout::Contig> &X,
+                               NDArray<std::int32_t, 1> &labels, std::size_t k, bool useKahan,
+                               std::size_t chunkLo, std::size_t chunkHi,
+                               std::size_t slot) noexcept {
+    constexpr std::size_t kMcVal = math::detail::kMc<T>;
+    constexpr std::size_t kKcVal = math::detail::kKc<T>;
+    const std::size_t n = X.dim(0);
+    const std::size_t d = X.dim(1);
+    const std::size_t chunkCap = math::pairwiseArgminChunkRows;
+    const T *xBase = X.data();
+    std::int32_t *labelsBase = labels.data();
     const T *bp = m_packedB.data();
-    T *apArena = m_gemmApArena.data();
-    T *distsBase = m_distsChunk.data();
     const T *cNormsBase = m_cSqNorms.data();
     T *minDistBase = m_minDistSq.data();
     T *uBase = m_u.data();
     T *lBase = m_l.data();
     T *elkanBoundsBase = m_elkanBounds.dim(0) == n ? m_elkanBounds.data() : nullptr;
+    T *distsChunk = m_distsChunk.data() + (slot * chunkCap * k);
+    T *apSlice = m_gemmApArena.data() + (slot * kMcVal * kKcVal);
 
-    pool.parallelForExactBlocksWithSlot<citor::HintsDefaults>(
-        std::size_t{0}, numChunks, workers,
-        [&](std::size_t chunkLo, std::size_t chunkHi, std::size_t slot) noexcept {
-          T *distsChunk = distsBase + (slot * chunkCap * k);
-          T *apSlice = apArena + (slot * kMcVal * kKcVal);
-          for (std::size_t c = chunkLo; c < chunkHi; ++c) {
-            const std::size_t iBase = c * chunkCap;
-            const std::size_t chunkRows = (iBase + chunkCap <= n) ? chunkCap : (n - iBase);
+    for (std::size_t c = chunkLo; c < chunkHi; ++c) {
+      const std::size_t iBase = c * chunkCap;
+      const std::size_t chunkRows = (iBase + chunkCap <= n) ? chunkCap : (n - iBase);
 
-            auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(
-                const_cast<T *>(xBase) + (iBase * d), {chunkRows, d});
-            auto distsView = NDArray<T, 2>::borrow(distsChunk, {chunkRows, k});
-            const auto xDesc = ::clustering::detail::describeMatrix(xChunk);
-            auto distsDesc = ::clustering::detail::describeMatrixMut(distsView);
-            math::detail::gemmRunPrepacked<T>(xDesc, bp, d, k, distsDesc, T{-2}, T{0}, apSlice,
-                                              math::Pool{});
+      auto xChunk = NDArray<T, 2, Layout::Contig>::borrow(const_cast<T *>(xBase) + (iBase * d),
+                                                          {chunkRows, d});
+      auto distsView = NDArray<T, 2>::borrow(distsChunk, {chunkRows, k});
+      const auto xDesc = ::clustering::detail::describeMatrix(xChunk);
+      auto distsDesc = ::clustering::detail::describeMatrixMut(distsView);
+      // Serial GEMM inside the chunk; the outer fan-out already owns parallelism.
+      math::detail::gemmRunPrepacked<T>(xDesc, bp, d, k, distsDesc, T{-2}, T{0}, apSlice,
+                                        math::Pool{});
 
-            const T *xNormsChunk = m_xNormsSq.data() + iBase;
-            for (std::size_t i = 0; i < chunkRows; ++i) {
-              const T xn = xNormsChunk[i];
-              const T *row = distsChunk + (i * k);
-              T *elkanRow =
-                  elkanBoundsBase != nullptr ? elkanBoundsBase + ((iBase + i) * k) : nullptr;
-              T bestVal = std::numeric_limits<T>::infinity();
-              T secondVal = std::numeric_limits<T>::infinity();
-              std::int32_t bestIdx = 0;
-              for (std::size_t j = 0; j < k; ++j) {
-                T v = row[j] + xn + cNormsBase[j];
-                if (v < T{0}) {
-                  v = T{0};
-                }
-                if (elkanRow != nullptr) {
-                  elkanRow[j] = std::sqrt(v);
-                }
-                if (v < bestVal) {
-                  secondVal = bestVal;
-                  bestVal = v;
-                  bestIdx = static_cast<std::int32_t>(j);
-                } else if (v < secondVal) {
-                  secondVal = v;
-                }
-              }
-              minDistBase[iBase + i] = bestVal;
-              labelsBase[iBase + i] = bestIdx;
-              uBase[iBase + i] = std::sqrt(bestVal);
-              lBase[iBase + i] = std::sqrt(secondVal);
-              scatterRowToSlab(xBase, labelsBase, iBase + i, slot, k, d, useKahan);
-            }
+      const T *xNormsChunk = m_xNormsSq.data() + iBase;
+      for (std::size_t i = 0; i < chunkRows; ++i) {
+        const T xn = xNormsChunk[i];
+        const T *row = distsChunk + (i * k);
+        T *elkanRow = elkanBoundsBase != nullptr ? elkanBoundsBase + ((iBase + i) * k) : nullptr;
+        T bestVal = std::numeric_limits<T>::infinity();
+        T secondVal = std::numeric_limits<T>::infinity();
+        std::int32_t bestIdx = 0;
+        for (std::size_t j = 0; j < k; ++j) {
+          T v = row[j] + xn + cNormsBase[j];
+          if (v < T{0}) {
+            v = T{0};
           }
-        });
-
-    foldPartialSlabs(useKahan, workers, k, d);
+          if (elkanRow != nullptr) {
+            elkanRow[j] = std::sqrt(v);
+          }
+          if (v < bestVal) {
+            secondVal = bestVal;
+            bestVal = v;
+            bestIdx = static_cast<std::int32_t>(j);
+          } else if (v < secondVal) {
+            secondVal = v;
+          }
+        }
+        minDistBase[iBase + i] = bestVal;
+        labelsBase[iBase + i] = bestIdx;
+        uBase[iBase + i] = std::sqrt(bestVal);
+        lBase[iBase + i] = std::sqrt(secondVal);
+        scatterRowToSlab(xBase, labelsBase, iBase + i, slot, k, d, useKahan);
+      }
+    }
   }
 
 #ifdef CLUSTERING_USE_AVX2
@@ -900,14 +914,17 @@ private:
   }
 
   /**
-   * @brief Plex-driven Lloyd loop for the direct/fused assignment family.
+   * @brief Plex-driven Lloyd loop for the direct, fused, and chunked-Hamerly assignment
+   *        families.
    *
    * One @c runPlex dispatch drives every iteration: each phase is one assignment+scatter
-   * pass over slot-static M-tile ranges, and the serial glue (fold, reseed, mean step,
-   * shift, convergence test) runs in the pre-phase hook on the producer with happens-before
-   * to every worker's phase body. Convergence stops the plex's cancellation token; the
-   * phase the hook precedes still fires once (the producer observes the token at the next
-   * boundary), so the body no-ops behind @c stopPhases while the plex drains.
+   * pass over slot-static work ranges (kernel M-tiles for direct/fused, GEMM chunks above
+   * the fused @c d cap), and the serial glue (fold, reseed, mean step, shift, convergence
+   * test) runs in the pre-phase hook on the producer with happens-before to every worker's
+   * phase body. Hamerly phases derive their row range from the slot's unit range, so every
+   * row stays with one slot across phases. Convergence stops the plex's cancellation token;
+   * the phase the hook precedes still fires once (the producer observes the token at the
+   * next boundary), so the body no-ops behind @c stopPhases while the plex drains.
    *
    * @param iter      Incremented once per completed iteration, exactly as the fallback loop.
    * @param converged Set when the Kahan-summed shift falls at or below @p shiftSqThreshold.
@@ -920,9 +937,13 @@ private:
     const std::size_t d = X.dim(1);
     const std::size_t workers = pool.workerCount();
     const bool useDirect = d <= detail::kDirectArgminMaxD;
-    // Partition M-tiles, not rows, so a kernel tile never straddles two slots.
-    const std::size_t mr = useDirect ? std::size_t{8} : math::detail::kKernelMr<float>;
-    const std::size_t mTiles = (n + mr - 1) / mr;
+    const bool useChunked = d > math::defaults::pairwiseArgminMaxD;
+    // Partition work units, not rows, so a kernel tile or GEMM chunk never straddles two
+    // slots.
+    const std::size_t unit = useChunked
+                                 ? math::pairwiseArgminChunkRows
+                                 : (useDirect ? std::size_t{8} : math::detail::kKernelMr<float>);
+    const std::size_t units = (n + unit - 1) / unit;
 
     HamerlyShiftTop2 top2{};
     bool stopPhases = false;
@@ -954,7 +975,9 @@ private:
       if (phaseIdx == 0) {
         std::memcpy(m_centroidsOld.data(), centroids.data(), k * d * sizeof(T));
         preZeroPartialSlabs(useKahan, workers, k, d);
-        if (!useDirect) {
+        if (useChunked) {
+          packCentroidsTiled(centroids);
+        } else if (!useDirect) {
           packFusedCentroids();
         }
         return;
@@ -969,6 +992,8 @@ private:
       preZeroPartialSlabs(useKahan, workers, k, d);
       if (hamerlyEligible) {
         top2 = prepareHamerlyGeometry(centroids, k, d);
+      } else if (useChunked) {
+        packCentroidsTiled(centroids);
       } else if (!useDirect) {
         packFusedCentroids();
       }
@@ -981,8 +1006,13 @@ private:
       }
       const auto s = static_cast<std::size_t>(slot);
       if (hamerlyEligible && phaseIdx > 0) {
-        hamerlyAssignScatterRange(X, centroids, labels, k, useKahan, top2, std::min(lo * mr, n),
-                                  std::min(hi * mr, n), s);
+        hamerlyAssignScatterRange(X, centroids, labels, k, useKahan, top2, std::min(lo * unit, n),
+                                  std::min(hi * unit, n), s);
+        return;
+      }
+      if (useChunked) {
+        // The chunk body seeds the Hamerly bounds inline in its argmin post-pass.
+        assignScatterChunkRange(X, labels, k, useKahan, lo, hi, s);
         return;
       }
       if (useDirect) {
@@ -991,11 +1021,12 @@ private:
         assignScatterFusedTiles(X, labels, k, useKahan, lo, hi, s);
       }
       if (hamerlyEligible && phaseIdx == 0) {
-        seedHamerlyBoundsRange(X, centroids, labels, std::min(lo * mr, n), std::min(hi * mr, n));
+        seedHamerlyBoundsRange(X, centroids, labels, std::min(lo * unit, n),
+                               std::min(hi * unit, n));
       }
     };
 
-    pool.parallelRunPlex<citor::HintsDefaults>(maxIter, mTiles, std::move(phase),
+    pool.parallelRunPlex<citor::HintsDefaults>(maxIter, units, std::move(phase),
                                                std::move(prePhase), plexTok);
 
     if (!converged) {
