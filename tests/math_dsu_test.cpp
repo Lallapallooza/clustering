@@ -76,8 +76,11 @@ TEST(UnionFind, KruskalMstOnKnownGraph) {
     std::uint32_t v;
     int w;
   };
-  std::vector<Edge> edges{{0, 1, 7},  {0, 3, 5}, {1, 2, 8}, {1, 3, 9}, {1, 4, 7}, {2, 4, 5},
-                          {3, 4, 15}, {3, 5, 6}, {4, 5, 8}, {4, 6, 9}, {5, 6, 11}};
+  std::vector<Edge> edges{
+      {.u = 0, .v = 1, .w = 7},  {.u = 0, .v = 3, .w = 5}, {.u = 1, .v = 2, .w = 8},
+      {.u = 1, .v = 3, .w = 9},  {.u = 1, .v = 4, .w = 7}, {.u = 2, .v = 4, .w = 5},
+      {.u = 3, .v = 4, .w = 15}, {.u = 3, .v = 5, .w = 6}, {.u = 4, .v = 5, .w = 8},
+      {.u = 4, .v = 6, .w = 9},  {.u = 5, .v = 6, .w = 11}};
   std::sort(edges.begin(), edges.end(),
             [](const Edge &a, const Edge &b) noexcept { return a.w < b.w; });
   UnionFind uf(7);
@@ -236,7 +239,6 @@ TEST(AtomicUnionFind, ConcurrentUnionsMatchSerialRoots) {
                            });
 
   UnionFind<std::uint32_t> serial(kN);
-  std::vector<std::uint32_t> minRoot(kN);
   for (const auto &[a, b] : edges) {
     serial.unite(a, b);
   }

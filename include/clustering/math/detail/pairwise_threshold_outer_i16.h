@@ -105,14 +105,14 @@ pairwiseThresholdOuterAvx2I16FilteredSymmetric(const NDArray<float, 2, Layout::C
   const double scale =
       std::min(32767.0 / static_cast<double>(maxAbs), 46000.0 / std::sqrt(maxRowNormSq));
   const double eps = std::sqrt(static_cast<double>(radiusSq));
-  const double quantSlack = (2.0 * std::sqrt(static_cast<double>(d)) * eps) / scale +
-                            static_cast<double>(d) / (scale * scale);
+  const double quantSlack = ((2.0 * std::sqrt(static_cast<double>(d)) * eps) / scale) +
+                            (static_cast<double>(d) / (scale * scale));
   if (quantSlack > kI16FilterBoundCeiling * static_cast<double>(radiusSq)) {
     return false;
   }
   const auto scaleF = static_cast<float>(scale);
   const auto qThresholdSq =
-      static_cast<float>((static_cast<double>(radiusSq) + quantSlack) * scale * scale + 8192.0);
+      static_cast<float>(((static_cast<double>(radiusSq) + quantSlack) * scale * scale) + 8192.0);
 
   // ---- Quantize rows and take exact quantized norms. ----
   const std::size_t kcPairs = (d + 1) / 2;

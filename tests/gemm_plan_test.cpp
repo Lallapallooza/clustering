@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -243,8 +244,13 @@ TEST(GemmPlanF32, PrepackedAExecuteMatchesPlanOnChunkTails) {
     std::size_t k;
     std::size_t n;
   };
-  constexpr Shape shapes[] = {{1, 1, 1},    {7, 0, 5},     {7, 17, 4},    {8, 128, 6},
-                              {9, 129, 15}, {255, 257, 7}, {256, 256, 15}};
+  constexpr std::array<Shape, 7> shapes = {{{.m = 1, .k = 1, .n = 1},
+                                            {.m = 7, .k = 0, .n = 5},
+                                            {.m = 7, .k = 17, .n = 4},
+                                            {.m = 8, .k = 128, .n = 6},
+                                            {.m = 9, .k = 129, .n = 15},
+                                            {.m = 255, .k = 257, .n = 7},
+                                            {.m = 256, .k = 256, .n = 15}}};
   constexpr std::size_t kPackedRows = 256;
 
   for (const Shape shape : shapes) {

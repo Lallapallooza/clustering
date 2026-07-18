@@ -61,7 +61,8 @@ TEST(InverseCdfPickInRange, MatchesScalarReferenceOverFullRange) {
   for (const float v : w) {
     total += v;
   }
-  for (float u = 0.0F; u < total; u += 0.37F) {
+  for (int step = 0; static_cast<float>(step) * 0.37F < total; ++step) {
+    const float u = static_cast<float>(step) * 0.37F;
     EXPECT_EQ(inverseCdfPickInRange(w.data(), std::size_t{0}, n, u), referencePick(w, u))
         << "u=" << u;
   }
@@ -81,7 +82,8 @@ TEST(InverseCdfPickInRange, RespectsSubrangeBounds) {
   for (std::size_t i = lo; i < hi; ++i) {
     mass += w[i];
   }
-  for (float rem = 0.0F; rem < mass; rem += 0.51F) {
+  for (int step = 0; static_cast<float>(step) * 0.51F < mass; ++step) {
+    const float rem = static_cast<float>(step) * 0.51F;
     const std::size_t pick = inverseCdfPickInRange(w.data(), lo, hi, rem);
     EXPECT_GE(pick, lo);
     EXPECT_LT(pick, hi);
@@ -105,7 +107,8 @@ TEST(InverseCdfPickInBlock8, MatchesScalarWalkOnIntegerWeights) {
   for (const float v : w) {
     mass += v;
   }
-  for (float rem = 0.0F; rem < mass; rem += 0.29F) {
+  for (int step = 0; static_cast<float>(step) * 0.29F < mass; ++step) {
+    const float rem = static_cast<float>(step) * 0.29F;
     float run = 0.0F;
     std::size_t expected = 7;
     for (std::size_t i = 0; i < 8; ++i) {
@@ -142,7 +145,8 @@ TEST(InverseCdfBlocks, TwoLevelPickMatchesFlatReference) {
     prefix[b] = running;
   }
   const float total = prefix[blocks - 1];
-  for (float u = 0.0F; u < total; u += 0.83F) {
+  for (int step = 0; static_cast<float>(step) * 0.83F < total; ++step) {
+    const float u = static_cast<float>(step) * 0.83F;
     std::size_t b = 0;
     std::size_t len = blocks + 1;
     while (len > 1) {
