@@ -171,10 +171,10 @@ template <class Index> void BM_RangeQuery(benchmark::State &state) {
   std::size_t lastTotal = 0;
   std::size_t lastMax = 0;
   for (auto _ : state) {
-    auto adj = idx.query(eps, pool);
+    auto adj = idx.query(eps, /*minPts=*/5, pool);
     std::size_t total = 0;
     std::size_t rowMax = 0;
-    for (const auto &row : adj) {
+    for (const auto &row : adj.rows) {
       total += row.size();
       if (row.size() > rowMax) {
         rowMax = row.size();
@@ -226,9 +226,9 @@ void BM_BruteForceQuery_VMF_d32_n10k_j1(benchmark::State &state) {
 
   std::size_t lastTotal = 0;
   for (auto _ : state) {
-    auto adj = idx.query(kEps, pool);
+    auto adj = idx.query(kEps, /*minPts=*/5, pool);
     std::size_t total = 0;
-    for (const auto &row : adj) {
+    for (const auto &row : adj.rows) {
       total += row.size();
     }
     lastTotal = total;

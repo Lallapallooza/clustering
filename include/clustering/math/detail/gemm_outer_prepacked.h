@@ -213,10 +213,10 @@ template <class T>
 
 template <class T>
 void packAChunk(::clustering::detail::MatrixDescC<T> Ad, std::size_t rows, std::size_t kDim,
-                std::size_t chunkRows, T *prepackedAp) noexcept {
+                std::size_t chunkCap, T *prepackedAp) noexcept {
   constexpr std::size_t kMcVal = kMc<T>;
   constexpr std::size_t kKcVal = kKc<T>;
-  const std::size_t fullMcBlocks = (chunkRows + kMcVal - 1) / kMcVal;
+  const std::size_t fullMcBlocks = (chunkCap + kMcVal - 1) / kMcVal;
   std::size_t pcOff = 0;
   for (std::size_t pc = 0; pc < kDim; pc += kKcVal) {
     const std::size_t kc = (pc + kKcVal <= kDim) ? kKcVal : (kDim - pc);
@@ -231,7 +231,7 @@ void packAChunk(::clustering::detail::MatrixDescC<T> Ad, std::size_t rows, std::
 }
 
 template <class T>
-void gemmRunPrepackedAB(const T *prepackedAp, std::size_t mRows, std::size_t packedChunkRows,
+void gemmRunPrepackedAB(const T *prepackedAp, std::size_t mRows, std::size_t packedChunkCap,
                         const T *prepackedBp, std::size_t kDim, std::size_t nDim,
                         ::clustering::detail::MatrixDesc<T> Cd, T alpha, T beta) noexcept {
   constexpr std::size_t kMr = kKernelMr<T>;
@@ -274,7 +274,7 @@ void gemmRunPrepackedAB(const T *prepackedAp, std::size_t mRows, std::size_t pac
   }
 #endif
 
-  const std::size_t fullMcBlocks = (packedChunkRows + kMcVal - 1) / kMcVal;
+  const std::size_t fullMcBlocks = (packedChunkCap + kMcVal - 1) / kMcVal;
   const std::size_t liveMcBlocks = (mRows + kMcVal - 1) / kMcVal;
 
   std::size_t jcBase = 0;

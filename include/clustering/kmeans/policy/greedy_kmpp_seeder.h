@@ -941,7 +941,13 @@ private:
 
   /// Scoring kernel families whose bodies take arbitrary row ranges; selected once per run,
   /// dispatched per plex scoring phase.
-  enum class ScoreKernel { kTransposed16, kTransposed8, kTransposedChunked, kSoa, kScalar };
+  enum class ScoreKernel : std::uint8_t {
+    kTransposed16,
+    kTransposed8,
+    kTransposedChunked,
+    kSoa,
+    kScalar
+  };
 
   /// Mirror of the dispatch loop's per-round kernel selection, minus the GEMM family whose
   /// scoring runs one whole-matrix GEMM instead of a range-invocable body.

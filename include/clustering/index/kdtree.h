@@ -157,7 +157,7 @@ public:
       pool.parallelForBlocks(std::size_t{0}, totalNodes, std::size_t{0},
                              [&](std::size_t lo, std::size_t hi) {
                                for (std::size_t s = lo; s < hi; ++s) {
-                                 KDTreeNode &node = arenaNodes[s];
+                                 const KDTreeNode &node = arenaNodes[s];
                                  if (node.m_left == nullptr && node.m_right == nullptr) {
                                    populateLeafBounds(node);
                                  }

@@ -111,7 +111,7 @@ pairwiseThresholdOuterAvx2I16FilteredSymmetric(const NDArray<float, 2, Layout::C
     return false;
   }
   const auto scaleF = static_cast<float>(scale);
-  const float qThresholdSq =
+  const auto qThresholdSq =
       static_cast<float>((static_cast<double>(radiusSq) + quantSlack) * scale * scale + 8192.0);
 
   // ---- Quantize rows and take exact quantized norms. ----
@@ -172,7 +172,8 @@ pairwiseThresholdOuterAvx2I16FilteredSymmetric(const NDArray<float, 2, Layout::C
     const float ds = sqDistRowsF32(a, b, d);
     const float xn = xRowNormsSq(row);
     const float yn = xRowNormsSq(col);
-    const float band = (xn + yn + radiusSq) * (static_cast<float>(d / 2 + 8) * 1.2e-7F);
+    const std::size_t bandDimTerm = (d / 2) + 8;
+    const float band = (xn + yn + radiusSq) * (static_cast<float>(bandDimTerm) * 1.2e-7F);
     if (ds <= radiusSq - band) {
       emit(row, col);
       return;

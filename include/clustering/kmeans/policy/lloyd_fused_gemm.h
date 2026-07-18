@@ -294,10 +294,9 @@ private:
 
   /// Scatter row @p i into slot @p slot's partial slab keyed by the row's label. Force-inlined
   /// so the low-d tile loops keep the slab bases hoisted instead of paying a call per row.
-  [[gnu::always_inline]] inline void scatterRowToSlab(const T *xBase,
-                                                      const std::int32_t *labelsBase, std::size_t i,
-                                                      std::size_t slot, std::size_t k,
-                                                      std::size_t d, bool useKahan) noexcept {
+  [[gnu::always_inline]] void scatterRowToSlab(const T *xBase, const std::int32_t *labelsBase,
+                                               std::size_t i, std::size_t slot, std::size_t k,
+                                               std::size_t d, bool useKahan) noexcept {
     const std::int32_t lbl = labelsBase[i];
     if (lbl < 0 || std::cmp_greater_equal(lbl, k)) {
       return;

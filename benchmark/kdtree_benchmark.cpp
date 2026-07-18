@@ -4,13 +4,9 @@
 #include <random>
 
 #include "clustering/index/kdtree.h"
-#include "clustering/memory/new_alloc.h"
 
 using clustering::KDTree;
-using clustering::KDTreeDistanceType;
-using clustering::KDTreeNode;
 using clustering::NDArray;
-using clustering::NewAllocator;
 
 namespace {
 
@@ -90,16 +86,8 @@ void BM_KDTreeQuery(benchmark::State &state) {
 BENCHMARK(BM_KDTreeConstruction<KDTree<float>>)
     ->Ranges({{2, 1 << 8}, {2, 1 << 5}})
     ->RangeMultiplier(2);
-BENCHMARK(BM_KDTreeConstruction<
-              KDTree<float, KDTreeDistanceType::kEucledian, 16, NewAllocator<KDTreeNode>>>)
-    ->Ranges({{2, 1 << 8}, {2, 1 << 5}})
-    ->RangeMultiplier(2);
 
 BENCHMARK(BM_KDTreeQuery<KDTree<float>>)->Ranges({{2, 1 << 8}, {2, 1 << 5}})->RangeMultiplier(2);
-BENCHMARK(
-    BM_KDTreeQuery<KDTree<float, KDTreeDistanceType::kEucledian, 16, NewAllocator<KDTreeNode>>>)
-    ->Ranges({{2, 1 << 8}, {2, 1 << 5}})
-    ->RangeMultiplier(2);
 
 // NOLINTNEXTLINE(misc-const-correctness,modernize-avoid-c-arrays)
 BENCHMARK_MAIN();
