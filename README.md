@@ -70,8 +70,8 @@ int main() {
   NDArray<float, 2> points({numPoints, dimensions});
   fillPoints(points); // Fill points with data
 
-  DBSCAN<float> dbscan(points, eps, minPts, n_jobs);
-  dbscan.run();
+  DBSCAN<float> dbscan(eps, minPts, n_jobs);
+  dbscan.run(points);
 
   std::cout << "Labels size: " << dbscan.labels().size() << std::endl;
   std::cout << "Number of clusters: " << dbscan.nClusters() << std::endl;
