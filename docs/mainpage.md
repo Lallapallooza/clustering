@@ -32,10 +32,10 @@ CPMAddPackage(
     OPTIONS "CLUSTERING_USE_AVX2 ON"
 )
 
-target_link_libraries(MyTarget PRIVATE clustering_header_lib)
+target_link_libraries(MyTarget PRIVATE clustering::clustering)
 ```
 
-Consumers get the `clustering_header_lib` INTERFACE target with `-mavx2 -mfma` and the `CLUSTERING_USE_AVX2` compile definition. Tests, benchmarks, and clang-tidy default to **OFF** when pulled in as a dependency.
+Consumers get the `clustering::clustering` INTERFACE target with `-mavx2 -mfma` and the `CLUSTERING_USE_AVX2` compile definition. Tests, benchmarks, the demo, install rules, and clang-tidy default to **OFF** when pulled in as a dependency.
 
 ### Install (add_subdirectory)
 
@@ -45,7 +45,45 @@ git clone https://github.com/Lallapallooza/clustering.git third_party/clustering
 
 ```cmake
 add_subdirectory(third_party/clustering)
-target_link_libraries(MyTarget PRIVATE clustering_header_lib)
+target_link_libraries(MyTarget PRIVATE clustering::clustering)
+```
+
+### Install (Conan 2.x)
+
+clustering depends on citor. ConanCenter has no citor package, so build both packages from their recipes. Run these commands in a clustering checkout:
+
+```bash
+git clone --branch v0.6.1 https://github.com/Lallapallooza/citor.git
+conan create citor/packaging/conan
+conan create packaging/conan -s compiler.cppstd=20
+conan install --requires=clustering/0.10.1 -s compiler.cppstd=20
+```
+
+The `with_avx2` option is `True` by default. On x86 it adds the AVX2 compiler flags and the `CLUSTERING_USE_AVX2` define to your targets.
+
+### Install (vcpkg overlay port)
+
+The overlay port builds the clustering checkout that contains it. Check out the tag that you want, then run these commands in the checkout:
+
+```bash
+git clone --branch v0.6.1 https://github.com/Lallapallooza/citor.git
+vcpkg install clustering \
+  --overlay-ports=packaging/vcpkg/ports \
+  --overlay-ports=citor/packaging/vcpkg/ports
+```
+
+### Install (cmake --install)
+
+```bash
+cmake -S . -B build -DCLUSTERING_BUILD_TESTS=OFF -DCLUSTERING_BUILD_BENCHMARK=OFF -DCLUSTERING_BUILD_DEMO=OFF
+cmake --install build --prefix /opt/clustering
+```
+
+The install step also installs citor into the same prefix. Add the prefix to `CMAKE_PREFIX_PATH`, then use:
+
+```cmake
+find_package(clustering 0.10.1 REQUIRED)
+target_link_libraries(MyTarget PRIVATE clustering::clustering)
 ```
 
 ## Install (Python, via uv from GitHub)

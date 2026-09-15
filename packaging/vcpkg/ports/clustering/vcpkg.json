@@ -1,0 +1,19 @@
+{
+  "name": "clustering",
+  "version": "0.10.1",
+  "description": "Header-only C++20 clustering library: DBSCAN, HDBSCAN*, k-means.",
+  "homepage": "https://github.com/Lallapallooza/clustering",
+  "license": "MIT",
+  "supports": "(linux | windows) & x64",
+  "dependencies": [
+    "citor",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ]
+}

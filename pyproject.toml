@@ -52,6 +52,14 @@ version_files = [
     "README.md:clustering.git@v",
     "docs/mainpage.md:GIT_TAG v",
     "docs/mainpage.md:clustering.git@v",
+    "README.md:find_package\\(clustering",
+    "README.md:requires=clustering/",
+    "docs/mainpage.md:find_package\\(clustering",
+    "docs/mainpage.md:requires=clustering/",
+    "CMakeLists.txt:^project\\(clustering VERSION",
+    "packaging/conan/conanfile.py:^    version",
+    "packaging/test/consumer/conanfile.txt:^clustering/",
+    "packaging/vcpkg/ports/clustering/vcpkg.json:\"version\"",
 ]
 
 [tool.scikit-build]

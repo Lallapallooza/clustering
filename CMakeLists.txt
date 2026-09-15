@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(clustering)
+project(clustering VERSION 0.10.1)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES
@@ -19,6 +19,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(CLUSTERING_BUILD_BENCHMARK "Build benchmarks" ${CLUSTERING_IS_TOP_LEVEL})
 option(CLUSTERING_BUILD_TESTS "Build unit tests" ${CLUSTERING_IS_TOP_LEVEL})
 option(
+    CLUSTERING_BUILD_DEMO
+    "Build the clustering_demo executable"
+    ${CLUSTERING_IS_TOP_LEVEL}
+)
+option(CLUSTERING_INSTALL "Generate install rules" ${CLUSTERING_IS_TOP_LEVEL})
+option(
     CLUSTERING_BUILD_DOCS
     "Build API documentation (Doxygen + doxygen-awesome-css)"
     OFF
@@ -32,10 +38,15 @@ set(CLUSTERING_USE_AVX2
 set(CLUSTERING_BUILD_WITH_SANITIZER OFF CACHE BOOL "Build with sanitizer")
 
 add_library(clustering_header_lib INTERFACE)
+add_library(clustering::clustering ALIAS clustering_header_lib)
+set_target_properties(clustering_header_lib PROPERTIES EXPORT_NAME clustering)
 target_include_directories(
     clustering_header_lib
-    INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include
+    INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
 )
+target_compile_features(clustering_header_lib INTERFACE cxx_std_20)
 target_link_libraries(clustering_header_lib INTERFACE citor::citor)
 
 # Top-level-only: enforce -Wall -Wextra -Werror on our executables.
@@ -50,12 +61,14 @@ if(CLUSTERING_IS_TOP_LEVEL)
     )
 endif()
 
-add_executable(clustering_demo app/main.cpp)
-target_link_libraries(
-    clustering_demo
-    PRIVATE clustering_header_lib clustering_warnings
-)
-clustering_enable_tidy(clustering_demo)
+if(CLUSTERING_BUILD_DEMO)
+    add_executable(clustering_demo app/main.cpp)
+    target_link_libraries(
+        clustering_demo
+        PRIVATE clustering_header_lib clustering_warnings
+    )
+    clustering_enable_tidy(clustering_demo)
+endif()
 
 if(CLUSTERING_USE_AVX2)
     if(NOT CLUSTERING_COMPILER_SUPPORTS_AVX2)
@@ -223,4 +236,8 @@ if(CLUSTERING_BUILD_DOCS)
         COMMENT "Generating API documentation with Doxygen"
         VERBATIM
     )
+endif()
+
+if(CLUSTERING_INSTALL)
+    include(${PROJECT_SOURCE_DIR}/cmake/ClusteringInstall.cmake)
 endif()

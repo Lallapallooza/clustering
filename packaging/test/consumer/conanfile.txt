@@ -1,0 +1,9 @@
+[requires]
+clustering/0.10.1
+
+[generators]
+CMakeDeps
+CMakeToolchain
+
+[layout]
+cmake_layout

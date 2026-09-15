@@ -249,3 +249,113 @@ jobs:
               sys.exit(1)
           print(f"all version_files agree at {version}")
           PY
+
+  packaging-cmake-install:
+    name: packaging (cmake install + find_package)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 ninja-build
+      - name: Install clustering
+        run: |
+          cmake -S . -B build-pkg -G Ninja \
+            -DCLUSTERING_BUILD_TESTS=OFF \
+            -DCLUSTERING_BUILD_BENCHMARK=OFF \
+            -DCLUSTERING_BUILD_DEMO=OFF \
+            -DCLUSTERING_ENABLE_CLANG_TIDY=OFF \
+            -DCMAKE_INSTALL_PREFIX=/tmp/clustering-inst
+          cmake --build build-pkg -j
+          cmake --install build-pkg
+      - name: Build + run consumer against installed clustering
+        run: |
+          cmake -S packaging/test/consumer -B /tmp/clustering-consumer -G Ninja \
+            -DCMAKE_PREFIX_PATH=/tmp/clustering-inst
+          cmake --build /tmp/clustering-consumer -j
+          /tmp/clustering-consumer/consumer
+
+  packaging-conan:
+    name: packaging (conan 2.x)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 ninja-build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install conan
+        run: pip install "conan>=2.0,<3.0"
+      - name: Configure conan profile
+        run: conan profile detect --force
+      # Build citor from the tag that the clustering recipe requires.
+      - name: Create citor package
+        run: |
+          CITOR_VERSION=$(grep -oP '"citor/\K[0-9.]+' packaging/conan/conanfile.py)
+          git clone --depth 1 --branch "v${CITOR_VERSION}" \
+            https://github.com/Lallapallooza/citor.git /tmp/citor
+          conan create /tmp/citor/packaging/conan
+      - name: Create clustering package
+        run: conan create packaging/conan -s compiler.cppstd=20
+      - name: Build + run consumer against local conan package
+        run: |
+          mkdir -p /tmp/clustering-conan-test
+          cp -r packaging/test/consumer/* /tmp/clustering-conan-test/
+          cd /tmp/clustering-conan-test
+          conan install . -s compiler.cppstd=20 \
+            -c tools.cmake.cmaketoolchain:generator=Ninja
+          cmake --preset conan-release
+          cmake --build --preset conan-release
+          ./build/Release/consumer
+
+  packaging-fetchcontent:
+    name: packaging (CMake FetchContent)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 ninja-build
+      - name: Build + run consumer via FetchContent
+        run: |
+          cmake -S packaging/test/consumer_fetchcontent -B /tmp/clustering-fc -G Ninja \
+            -DCLUSTERING_SOURCE_DIR="$GITHUB_WORKSPACE"
+          cmake --build /tmp/clustering-fc -j
+          /tmp/clustering-fc/consumer
+
+  packaging-cpm:
+    name: packaging (CPM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 ninja-build
+      - name: Build + run consumer via CPM
+        run: |
+          cmake -S packaging/test/consumer_cpm -B /tmp/clustering-cpm -G Ninja \
+            -DCLUSTERING_SOURCE_DIR="$GITHUB_WORKSPACE"
+          cmake --build /tmp/clustering-cpm -j
+          /tmp/clustering-cpm/consumer

@@ -29,7 +29,7 @@ CPMAddPackage(
     GIT_TAG v0.10.1
     OPTIONS "CLUSTERING_USE_AVX2 ON"
 )
-target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
+target_link_libraries(MyTargetName PRIVATE clustering::clustering)
 ```
 
 ### C++ via add_subdirectory
@@ -40,7 +40,50 @@ git clone git@github.com:Lallapallooza/clustering.git
 
 ```cmake
 add_subdirectory(clustering)
-target_link_libraries(MyTargetName PRIVATE clustering_header_lib)
+target_link_libraries(MyTargetName PRIVATE clustering::clustering)
+```
+
+### C++ via Conan 2.x
+
+clustering depends on citor. ConanCenter has no citor package, so build both packages from their recipes. Run these commands in a clustering checkout:
+
+```bash
+git clone --branch v0.6.1 https://github.com/Lallapallooza/citor.git
+conan create citor/packaging/conan
+conan create packaging/conan -s compiler.cppstd=20
+conan install --requires=clustering/0.10.1 -s compiler.cppstd=20
+```
+
+```cmake
+find_package(clustering REQUIRED)
+target_link_libraries(MyTargetName PRIVATE clustering::clustering)
+```
+
+The `with_avx2` option is `True` by default. On x86 it adds the AVX2 compiler flags and the `CLUSTERING_USE_AVX2` define to your targets.
+
+### C++ via vcpkg (overlay port)
+
+The overlay port builds the clustering checkout that contains it. Check out the tag that you want, then run these commands in the checkout:
+
+```bash
+git clone --branch v0.6.1 https://github.com/Lallapallooza/citor.git
+vcpkg install clustering \
+  --overlay-ports=packaging/vcpkg/ports \
+  --overlay-ports=citor/packaging/vcpkg/ports
+```
+
+### C++ via `cmake --install`
+
+```bash
+cmake -S . -B build -DCLUSTERING_BUILD_TESTS=OFF -DCLUSTERING_BUILD_BENCHMARK=OFF -DCLUSTERING_BUILD_DEMO=OFF
+cmake --install build --prefix /opt/clustering
+```
+
+The install step also installs citor into the same prefix. Add the prefix to `CMAKE_PREFIX_PATH`, then use:
+
+```cmake
+find_package(clustering 0.10.1 REQUIRED)
+target_link_libraries(MyTargetName PRIVATE clustering::clustering)
 ```
 
 ### Python via `uv` from GitHub
