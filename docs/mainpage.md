@@ -124,13 +124,39 @@ int main() {
   clustering::NDArray<float, 2> points({numPoints, dimensions});
   // ... fill points ...
 
-  clustering::DBSCAN<float> dbscan(points, /*eps=*/0.5f, /*minPts=*/5, /*nJobs=*/4);
-  dbscan.run();
+  clustering::DBSCAN<float> dbscan(/*eps=*/0.5f, /*minPts=*/5, /*nJobs=*/4);
+  dbscan.run(points);
 
   std::cout << "labels:     " << dbscan.labels().dim(0) << '\n';
   std::cout << "n_clusters: " << dbscan.nClusters() << '\n';
 }
 ```
+
+A query model that needs runtime configuration can be created with the factory overload:
+
+```cpp
+#include <array>
+#include "clustering/dbscan.h"
+#include "my_toroidal_index.h"
+
+clustering::NDArray<float, 2> points({numPoints, 2});
+// ... fill coordinates in a periodic grid ...
+
+const std::array<float, 2> periods{
+    static_cast<float>(gridRows),
+    static_cast<float>(gridColumns),
+};
+
+clustering::DBSCAN<float, MyToroidalIndex> dbscan(/*eps=*/1.5f, /*minPts=*/3);
+dbscan.run(points, [periods](const auto &input, clustering::math::Pool pool) {
+  return MyToroidalIndex(input, periods, pool);
+});
+```
+
+The factory is called once for each non-empty fit. It must return the query-model type selected as
+the second `DBSCAN` template argument, and the returned model may borrow the input only for the
+duration of `run`. Capture runtime configuration by value when the model needs it to remain stable
+throughout the fit.
 
 ### HDBSCAN
 

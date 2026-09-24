@@ -1,7 +1,9 @@
 #pragma once
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -35,7 +37,7 @@ namespace clustering {
  *                    sweep at or above it.
  */
 template <class T, class QueryModel = index::AutoRangeIndex<T>>
-  requires index::RangeIndex<QueryModel, T>
+requires index::RangeIndex<QueryModel, T>
 class DBSCAN {
 public:
   static constexpr std::int32_t UNCLASSIFIED = -2; ///< Sentinel for a component without a
@@ -78,7 +80,37 @@ public:
    *
    * @warning @p X must remain alive and unchanged for the full duration of this call.
    */
-  void run(const NDArray<T, 2> &X) {
+  void run(const NDArray<T, 2> &X) requires std::constructible_from < QueryModel, const
+      NDArray<T, 2>
+  & > || std::constructible_from<QueryModel, const NDArray<T, 2> &, math::Pool> {
+    run(X, [](const NDArray<T, 2> &points, math::Pool pool) {
+      if constexpr (std::is_constructible_v<QueryModel, const NDArray<T, 2> &, math::Pool>) {
+        return QueryModel(points, pool);
+      } else {
+        return QueryModel(points);
+      }
+    });
+  }
+
+  /**
+   * @brief Fit to @p X using a caller-provided query-model factory.
+   *
+   * This overload supplies runtime configuration to query models whose constructor needs more
+   * than the point cloud and worker pool. For a non-empty fit, the factory is invoked once after
+   * the worker pool has been selected and must return a @c QueryModel that borrows @p X.
+   *
+   * @tparam QueryModelFactory Callable returning @c QueryModel.
+   * @param X Contiguous n x d dataset. The caller retains ownership; @p X must outlive the
+   *           factory result and this call.
+   * @param queryModelFactory Callable receiving @p X and the DBSCAN worker pool, then returning
+   *                           the configured query model.
+   *
+   * @warning @p X must remain alive and unchanged for the full duration of this call.
+   */
+  template <class QueryModelFactory>
+  requires std::same_as < std::invoke_result_t < QueryModelFactory &, const NDArray<T, 2>
+  &, math::Pool >,
+      QueryModel > void run(const NDArray<T, 2> &X, QueryModelFactory &&queryModelFactory) {
     const std::size_t n = X.dim(0);
     ensureLabelsShape(n);
     m_clusterId = 0;
@@ -99,15 +131,8 @@ public:
                               ? &math::sharedPool(poolJobs)
                               : nullptr};
 
-    // Pool-aware query models parallelize their own construction (the KDTree build forks
-    // subtrees); models without that constructor keep the plain shape contract.
-    QueryModel queryModel = [&] {
-      if constexpr (std::is_constructible_v<QueryModel, const NDArray<T, 2> &, math::Pool>) {
-        return QueryModel(X, pool);
-      } else {
-        return QueryModel(X);
-      }
-    }();
+    QueryModel queryModel =
+        std::invoke(std::forward<QueryModelFactory>(queryModelFactory), X, pool);
     // The backend derives the core flags from full degrees; core rows may carry only their
     // upper-half neighbours per the @ref clustering::index::CoreAdjacency contract, which is
     // exactly the half the component build below reads.
