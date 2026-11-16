@@ -50,3 +50,12 @@ clustering_enable_tidy(clustering_tests)
 
 include(GoogleTest)
 gtest_discover_tests(clustering_tests)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(shared_pool_lifetime_test shared_pool_lifetime_test.cpp)
+    target_link_libraries(
+        shared_pool_lifetime_test
+        PRIVATE clustering_header_lib clustering_warnings
+    )
+    add_test(NAME SharedPoolLifetime COMMAND shared_pool_lifetime_test)
+endif()
