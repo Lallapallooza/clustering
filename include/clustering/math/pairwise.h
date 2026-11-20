@@ -507,7 +507,7 @@ bool canUseFusedThreshold(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y
  *        distance via @ref sqEuclideanRow and walk survivors.
  *
  * Used when the fused-path eligibility check rejects (strided view, wrong type, tiny d,
- * AVX2 off). Iterates in global `(row, col)` ascending order so @p emit fires row-major --
+ * AVX2 off). Iterates in global `(row, col)` ascending order so @p sink fires row-major --
  * a tighter guarantee than the fused path gives. No intermediate `(n x m)` tile is
  * materialized: callers with small @p n (e.g. single-seed range queries) avoid per-call heap
  * traffic that a materialized-then-mask path would incur.
@@ -516,7 +516,7 @@ template <class T, Layout LX, Layout LY, class Emit>
   requires std::invocable<Emit &, std::size_t, std::size_t>
 void pairwiseSqEuclideanThresholdedMaterialized(const NDArray<T, 2, LX> &X,
                                                 const NDArray<T, 2, LY> &Y, T radiusSq, Pool pool,
-                                                Emit &&emit) {
+                                                Emit &&sink) {
   const std::size_t n = X.dim(0);
   const std::size_t m = Y.dim(0);
   if (n == 0 || m == 0) {
@@ -528,7 +528,7 @@ void pairwiseSqEuclideanThresholdedMaterialized(const NDArray<T, 2, LX> &X,
       for (std::size_t j = 0; j < m; ++j) {
         const T distSq = sqEuclideanRow<T, LX, LY>(X, i, Y, j);
         if (distSq <= radiusSq) {
-          emit(i, j);
+          sink(i, j);
         }
       }
     }
@@ -536,7 +536,7 @@ void pairwiseSqEuclideanThresholdedMaterialized(const NDArray<T, 2, LX> &X,
 
   // Only fan out across rows: column emit within a row is order-sensitive and consumers rely
   // on the per-row contract. Parallelism at the seed (row) level is safe because each row's
-  // emits land in a distinct key space, but the caller owns thread-safety of @p emit.
+  // emits land in a distinct key space, but the caller owns thread-safety of @p sink.
   if (pool.shouldParallelize(n * m, 64, 2)) {
     pool.parallelForBlocks(std::size_t{0}, n, std::size_t{0},
                            [&](std::size_t lo, std::size_t hi) { runRowRange(lo, hi); });
@@ -552,9 +552,9 @@ void pairwiseSqEuclideanThresholdedMaterialized(const NDArray<T, 2, LX> &X,
  *
  * Dispatches between a fused AVX2 tile kernel that streams survivors directly out of the
  * microkernel epilogue (no materialized `(n x m)` tile) and a materialized fallback
- * (@ref pairwiseSqEuclidean plus a scalar survivor scan). The fused path fires @p emit in
+ * (@ref pairwiseSqEuclidean plus a scalar survivor scan). The fused path fires @p sink in
  * row-major order within each tile; the materialized path fires globally row-major. Both
- * paths invoke @p emit exactly once per surviving cell.
+ * paths invoke @p sink exactly once per surviving cell.
  *
  * @tparam T    Element type (@c float or @c double).
  * @tparam LX   Layout tag of @p X.
@@ -565,14 +565,14 @@ void pairwiseSqEuclideanThresholdedMaterialized(const NDArray<T, 2, LX> &X,
  * @param radiusSq Non-negative squared radius; interpreted as @c r*r so callers already
  *                 squaring the radius avoid a redundant multiplication.
  * @param pool     Parallelism injection forwarded to the selected path.
- * @param emit     Callback invoked for each surviving `(row, col)` pair; row indexes into
- *                 @p X, col indexes into @p Y. The caller owns thread-safety of @p emit if
+ * @param sink     Callback invoked for each surviving `(row, col)` pair; row indexes into
+ *                 @p X, col indexes into @p Y. The caller owns thread-safety of @p sink if
  *                 @p pool is non-serial.
  */
 template <class T, Layout LX = Layout::Contig, Layout LY = Layout::Contig, class Emit>
   requires std::invocable<Emit &, std::size_t, std::size_t>
 void pairwiseSqEuclideanThresholded(const NDArray<T, 2, LX> &X, const NDArray<T, 2, LY> &Y,
-                                    T radiusSq, Pool pool, Emit &&emit) {
+                                    T radiusSq, Pool pool, Emit &&sink) {
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
                 "pairwiseSqEuclideanThresholded<T> requires T to be float or double");
   CLUSTERING_ALWAYS_ASSERT(X.dim(1) == Y.dim(1));
@@ -590,13 +590,13 @@ void pairwiseSqEuclideanThresholded(const NDArray<T, 2, LX> &X, const NDArray<T,
       NDArray<T, 1> yNorms({m});
       detail::rowNormsSq(X, xNorms, pool);
       detail::rowNormsSq(Y, yNorms, pool);
-      detail::pairwiseThresholdOuterAvx2F32(X, Y, xNorms, yNorms, radiusSq, pool, emit);
+      detail::pairwiseThresholdOuterAvx2F32(X, Y, xNorms, yNorms, radiusSq, pool, sink);
       return;
     }
   }
 #endif
 
-  detail::pairwiseSqEuclideanThresholdedMaterialized(X, Y, radiusSq, pool, emit);
+  detail::pairwiseSqEuclideanThresholdedMaterialized(X, Y, radiusSq, pool, sink);
 }
 
 /**
@@ -604,7 +604,7 @@ void pairwiseSqEuclideanThresholded(const NDArray<T, 2, LX> &X, const NDArray<T,
  *
  * Adjacency over a single point cloud is symmetric: `||x_i - x_j||^2` = `||x_j - x_i||^2`,
  * so half the `(i, j)` pairs the general entry would compute are mirrors of the other half.
- * This entry skips the lower-triangular work entirely and invokes @p emit exactly once per
+ * This entry skips the lower-triangular work entirely and invokes @p sink exactly once per
  * surviving upper-triangular cell, with `row <= col` always. The caller is responsible for
  * any mirror push (typically `adj[row]`.push(col) plus `adj[col]`.push(row) when
  * `row != col`), which keeps the kernel agnostic to the consumer's adjacency layout.
@@ -618,13 +618,13 @@ void pairwiseSqEuclideanThresholded(const NDArray<T, 2, LX> &X, const NDArray<T,
  * @param X        Point matrix (n x d).
  * @param radiusSq Non-negative squared radius; interpreted as @c r*r.
  * @param pool     Parallelism injection forwarded to the selected path.
- * @param emit     Callback invoked once per upper-triangular surviving `(row, col)` with
+ * @param sink     Callback invoked once per upper-triangular surviving `(row, col)` with
  *                 `row <= col`; the caller mirrors as needed.
  */
 template <class T, Layout LX = Layout::Contig, class Emit>
   requires std::invocable<Emit &, std::size_t, std::size_t>
 void pairwiseSqEuclideanThresholdedSymmetric(const NDArray<T, 2, LX> &X, T radiusSq, Pool pool,
-                                             Emit &&emit) {
+                                             Emit &&sink) {
   static_assert(std::is_same_v<T, float> || std::is_same_v<T, double>,
                 "pairwiseSqEuclideanThresholdedSymmetric<T> requires T to be float or double");
 
@@ -640,10 +640,10 @@ void pairwiseSqEuclideanThresholdedSymmetric(const NDArray<T, 2, LX> &X, T radiu
       detail::rowNormsSq(X, xNorms, pool);
       // The quantized filter declines degenerate scales (wide-range data whose quantization
       // slack would swallow the pruning); the f32 sweep then covers the call.
-      if (detail::pairwiseThresholdOuterAvx2I16FilteredSymmetric(X, xNorms, radiusSq, pool, emit)) {
+      if (detail::pairwiseThresholdOuterAvx2I16FilteredSymmetric(X, xNorms, radiusSq, pool, sink)) {
         return;
       }
-      detail::pairwiseThresholdOuterAvx2F32Symmetric(X, xNorms, radiusSq, pool, emit);
+      detail::pairwiseThresholdOuterAvx2F32Symmetric(X, xNorms, radiusSq, pool, sink);
       return;
     }
   }
@@ -657,7 +657,7 @@ void pairwiseSqEuclideanThresholdedSymmetric(const NDArray<T, 2, LX> &X, T radiu
       for (std::size_t j = i; j < n; ++j) {
         const T distSq = detail::sqEuclideanRow<T, LX, LX>(X, i, X, j);
         if (distSq <= radiusSq) {
-          emit(i, j);
+          sink(i, j);
         }
       }
     }

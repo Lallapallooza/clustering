@@ -322,14 +322,14 @@ public:
               continue;
             }
             const T *leafPts = reordered + (base * m_dim);
-            auto emit = [&](std::size_t i) noexcept {
+            auto sink = [&](std::size_t i) noexcept {
               row.push_back(static_cast<std::int32_t>(m_indices[base + i]));
             };
             if (useSoa) {
               math::detail::radiusScanSoa(qp, m_leafSoa.data() + (base * m_dim), count, m_dim,
-                                          radius_sq, emit);
+                                          radius_sq, sink);
             } else {
-              math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, emit);
+              math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, sink);
             }
             continue;
           }
@@ -727,13 +727,13 @@ private:
             for (; i < count; ++i) {
               const T *qp = reordered + ((base + i) * m_dim);
               std::vector<std::int32_t> &row = out.rows[m_indices[base + i]];
-              auto emit = [&](std::size_t j) noexcept {
+              auto sink = [&](std::size_t j) noexcept {
                 row.push_back(static_cast<std::int32_t>(m_indices[targetBase + j]));
               };
               if (useSoa) {
-                math::detail::radiusScanSoa(qp, targetSoa, targetCount, m_dim, radius_sq, emit);
+                math::detail::radiusScanSoa(qp, targetSoa, targetCount, m_dim, radius_sq, sink);
               } else {
-                math::detail::radiusScan(qp, targetPts, targetCount, m_dim, radius_sq, emit);
+                math::detail::radiusScan(qp, targetPts, targetCount, m_dim, radius_sq, sink);
               }
             }
             continue;
@@ -845,27 +845,27 @@ private:
         if (!isBounded) {
           // Unbounded radius query (the DBSCAN adjacency sweep): every survivor is kept, so the
           // leaf-scan emit skips the per-point capacity test the bounded path needs.
-          auto emit = [&](std::size_t i) noexcept {
+          auto sink = [&](std::size_t i) noexcept {
             indices.push_back(static_cast<OutIdx>(m_indices[base + i]));
           };
           if (useSoa) {
-            math::detail::radiusScanSoa(qp, leafSoa, count, m_dim, radius_sq, emit);
+            math::detail::radiusScanSoa(qp, leafSoa, count, m_dim, radius_sq, sink);
           } else {
-            math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, emit);
+            math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, sink);
           }
           continue;
         }
         const auto cap = static_cast<std::size_t>(limit);
-        auto emit = [&](std::size_t i) noexcept {
+        auto sink = [&](std::size_t i) noexcept {
           if (indices.size() >= cap) {
             return;
           }
           indices.push_back(static_cast<OutIdx>(m_indices[base + i]));
         };
         if (useSoa) {
-          math::detail::radiusScanSoa(qp, leafSoa, count, m_dim, radius_sq, emit);
+          math::detail::radiusScanSoa(qp, leafSoa, count, m_dim, radius_sq, sink);
         } else {
-          math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, emit);
+          math::detail::radiusScan(qp, leafPts, count, m_dim, radius_sq, sink);
         }
         if (indices.size() >= cap) {
           break;

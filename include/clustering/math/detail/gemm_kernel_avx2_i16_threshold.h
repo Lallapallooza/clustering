@@ -34,13 +34,13 @@ namespace clustering::math::detail {
  * @param aRowNormsQ  Scaled squared norms of the 16 tile rows as float, 32-byte aligned.
  * @param bColNormsQ  Scaled squared norms of the 6 panel columns as float.
  * @param qThresholdSq Scaled squared radius plus quantization and float-fold slack.
- * @param emit        `void(std::size_t, std::size_t)` candidate callback.
+ * @param sink        `void(std::size_t, std::size_t)` candidate callback.
  */
 template <class Emit>
 [[gnu::always_inline]] inline void gemmKernel16x6Avx2I16Threshold(
     const std::int16_t *apPanel, const std::int16_t *bpPanel, std::size_t kcPairs,
     const float *aRowNormsQ, const float *bColNormsQ, std::size_t rowBase, std::size_t colBase,
-    std::size_t validRows, std::size_t validCols, float qThresholdSq, Emit &&emit) {
+    std::size_t validRows, std::size_t validCols, float qThresholdSq, Emit &&sink) {
   constexpr std::size_t kMr = 8;
   constexpr std::size_t kNr = 6;
   constexpr std::size_t kRows16 = 16;
@@ -138,7 +138,7 @@ template <class Emit>
     auto m = static_cast<std::uint16_t>(masks[c] & rowMask);
     while (m != 0) {
       const int bit = __builtin_ctz(static_cast<unsigned>(m));
-      emit(rowBase + static_cast<std::size_t>(bit), colBase + c);
+      sink(rowBase + static_cast<std::size_t>(bit), colBase + c);
       m = static_cast<std::uint16_t>(m & (m - 1));
     }
   }

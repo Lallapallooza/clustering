@@ -109,7 +109,7 @@ inline AlignedFloatScratch makeAlignedFloatScratch(std::size_t n) {
  * @c Y-norms are pre-packed once per call; @c X-row-norms are computed inline per M-tile and
  * staged in `alignas(32)` stack scratch so the kernel can issue aligned loads.
  *
- * Pool fan-out is over row chunks. Each chunk's emit calls are serialized through @p emit
+ * Pool fan-out is over row chunks. Each chunk's emit calls are serialized through @p sink
  * from the worker that owns the chunk; emit implementations that need thread safety across
  * chunks are the caller's responsibility, the kernel itself touches no shared state beyond
  * the read-only packed Y and Y-norms.
@@ -124,14 +124,14 @@ inline AlignedFloatScratch makeAlignedFloatScratch(std::size_t n) {
  * @param yRowNormsSq Row-1 array of `||y_j||^2`, length m.
  * @param radiusSq Non-negative squared radius.
  * @param pool     Parallelism injection; fans out over row chunks when @c shouldParallelize.
- * @param emit     Callback for each surviving `(row, col)` pair.
+ * @param sink     Callback for each surviving `(row, col)` pair.
  */
 template <class Emit>
 inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig> &X,
                                           const NDArray<float, 2, Layout::Contig> &Y,
                                           const NDArray<float, 1> &xRowNormsSq,
                                           const NDArray<float, 1> &yRowNormsSq, float radiusSq,
-                                          Pool pool, Emit &&emit) {
+                                          Pool pool, Emit &&sink) {
   constexpr std::size_t kMr = kKernelMr<float>;
   constexpr std::size_t kNr = kKernelNr<float>;
 
@@ -217,7 +217,7 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
           const float *bpPanel = bpackedStorage.data() + (p * bpanelSize);
           const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
           gemmKernel8x6Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase, mc,
-                                        nc, radiusSq, emit);
+                                        nc, radiusSq, sink);
         }
       }
     }
@@ -245,10 +245,10 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
  * half). Iterates the chunk / M-tile / panel nest as the non-symmetric driver but skips every
  * M-tile / panel pair that lies strictly below the diagonal: tile `(iBase, jBase)` is
  * processed iff @c jBase + kNr > iBase, which collapses tile count from @c n*m / (Mr*Nr) to
- * roughly half. Diagonal-straddling tiles are processed in full and the @p emit wrapper handles
+ * roughly half. Diagonal-straddling tiles are processed in full and the @p sink wrapper handles
  * the per-cell `(row > col)` skip.
  *
- * @p emit is invoked once per surviving cell with `(row, col)` where `row <= col` always; the
+ * @p sink is invoked once per surviving cell with `(row, col)` where `row <= col` always; the
  * caller is responsible for any mirror push (`adj[row]`.push(col) plus `adj[col]`.push(row)
  * when `row != col`) so this driver can stay agnostic to the consumer's adjacency layout.
  *
@@ -257,12 +257,12 @@ inline void pairwiseThresholdOuterAvx2F32(const NDArray<float, 2, Layout::Contig
  * @param xRowNormsSq Row-1 array of `||x_i||^2`, length n.
  * @param radiusSq    Non-negative squared radius.
  * @param pool        Parallelism injection; fans out over row chunks when @c shouldParallelize.
- * @param emit        Callback invoked for each surviving `(row, col)` pair with `row <= col`.
+ * @param sink        Callback invoked for each surviving `(row, col)` pair with `row <= col`.
  */
 template <class Emit>
 inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layout::Contig> &X,
                                                    const NDArray<float, 1> &xRowNormsSq,
-                                                   float radiusSq, Pool pool, Emit &&emit) {
+                                                   float radiusSq, Pool pool, Emit &&sink) {
   constexpr std::size_t kMr = kKernelMr<float>;
   // The triangular sweep is front-loaded by row chunk; the symmetric path uses finer chunks so
   // the dynamic scheduler has more units to steal without changing the rectangular cache geometry.
@@ -364,14 +364,14 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
         // row, i.e. `jBase >= iBase` + mc, equivalently `p >= ceil`((iBase + mc) / kNr).
         // For panels in `[pStart, pStrictUpper)` at least one in-tile cell has @c row > col
         // (the diagonal-straddling band), so the kernel may emit cells the symmetric mirror
-        // already covered. Wrap @p emit with a `row <= col` filter for those tiles. Strictly
+        // already covered. Wrap @p sink with a `row <= col` filter for those tiles. Strictly
         // upper panels skip the filter entirely -- the per-cell branch only matters in the
         // narrow diagonal band, so the ordinary case stays at zero overhead.
         const std::size_t pStrictUpper = (iBase + mc + kNr - 1) / kNr;
 
-        auto filteredEmit = [&emit](std::size_t row, std::size_t col) {
+        auto filteredEmit = [&sink](std::size_t row, std::size_t col) {
           if (row <= col) {
-            emit(row, col);
+            sink(row, col);
           }
         };
 
@@ -400,10 +400,10 @@ inline void pairwiseThresholdOuterAvx2F32Symmetric(const NDArray<float, 2, Layou
           const float *normsPanel = yNormsPackedStorage.data() + (p * kNr);
           if (tileRows == 2 * kMr) {
             gemmKernel16x6Avx2F32Threshold(tileA, tileAHi, bpPanel, d, tileNorms, normsPanel, iBase,
-                                           jBase, mc, nc, radiusSq, emit);
+                                           jBase, mc, nc, radiusSq, sink);
           } else {
             gemmKernel8x6Avx2F32Threshold(tileA, bpPanel, d, tileNorms, normsPanel, iBase, jBase,
-                                          mc, nc, radiusSq, emit);
+                                          mc, nc, radiusSq, sink);
           }
         }
       }
