@@ -46,7 +46,7 @@ class ClusteringConan(ConanFile):
             del self.options.with_avx2
 
     def requirements(self):
-        self.requires("citor/0.6.1", transitive_headers=True)
+        self.requires("citor/0.6.4", transitive_headers=True)
 
     def validate(self):
         check_min_cppstd(self, 20)
