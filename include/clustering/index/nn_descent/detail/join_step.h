@@ -230,7 +230,7 @@ template <class T> struct JoinStep {
 
       std::size_t localUpdates = 0;
 
-      auto emit = [&](std::int32_t target, std::int32_t candidate, T sqDist) {
+      auto sink = [&](std::int32_t target, std::int32_t candidate, T sqDist) {
         if (serial) {
           if (bank.push(target, candidate, sqDist)) {
             ++localUpdates;
@@ -265,8 +265,8 @@ template <class T> struct JoinStep {
             }
             const T *pb = data + (static_cast<std::size_t>(vb) * d);
             const T sqDist = math::detail::sqEuclideanRowPtr(pa, pb, d);
-            emit(va, vb, sqDist);
-            emit(vb, va, sqDist);
+            sink(va, vb, sqDist);
+            sink(vb, va, sqDist);
           }
         }
         // new x old: every cross pair where the new endpoint has not yet been compared to the
@@ -279,8 +279,8 @@ template <class T> struct JoinStep {
             }
             const T *pb = data + (static_cast<std::size_t>(vb) * d);
             const T sqDist = math::detail::sqEuclideanRowPtr(pa, pb, d);
-            emit(va, vb, sqDist);
-            emit(vb, va, sqDist);
+            sink(va, vb, sqDist);
+            sink(vb, va, sqDist);
           }
         }
 

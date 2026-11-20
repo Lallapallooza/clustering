@@ -15,7 +15,7 @@ namespace clustering::math::detail {
 
 /**
  * @brief Scans @p count contiguous points (AoS, row-major with @p d floats per row) and
- *        calls @p emit(i) for each @c i in `[0, count)` whose squared distance to @p qp is
+ *        calls @p sink(i) for each @c i in `[0, count)` whose squared distance to @p qp is
  *        at most @p radius_sq.
  *
  * Dispatches to SIMD-specialized inner kernels when the build is AVX2-enabled and @p d clears
@@ -36,11 +36,11 @@ namespace clustering::math::detail {
  * @param count      Number of candidate rows in the leaf.
  * @param d          Row length (also the stride in elements inside @p pts_aos).
  * @param radius_sq  Squared radius; comparisons are inclusive.
- * @param emit       Callback invoked with `(std::size_t i)` for each matching row.
+ * @param sink       Callback invoked with `(std::size_t i)` for each matching row.
  */
 template <class T, class EmitFn>
 inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::size_t d, T radius_sq,
-                       EmitFn &&emit) noexcept {
+                       EmitFn &&sink) noexcept {
 #ifdef CLUSTERING_USE_AVX2
   if constexpr (std::is_same_v<T, float>) {
     if (d == 2) {
@@ -65,7 +65,7 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
         // each mispredict on a cluster edge.
         auto m = static_cast<unsigned>(_mm_movemask_ps(cmp));
         while (m != 0) {
-          emit(i + static_cast<std::size_t>(__builtin_ctz(m)));
+          sink(i + static_cast<std::size_t>(__builtin_ctz(m)));
           m &= m - 1;
         }
       }
@@ -75,7 +75,7 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
         const float ey = pts_aos[(i * 2) + 1] - qp[1];
         const float sq = (ex * ex) + (ey * ey);
         if (sq <= radius_sq) {
-          emit(i);
+          sink(i);
         }
       }
       return;
@@ -99,7 +99,7 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
           h += static_cast<std::size_t>(dsq[j] <= radius_sq);
         }
         for (std::size_t t = 0; t < h; ++t) {
-          emit(hits[t]);
+          sink(hits[t]);
         }
       }
       return;
@@ -109,7 +109,7 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
   for (std::size_t i = 0; i < count; ++i) {
     const T dsq = sqEuclideanRowPtr(qp, pts_aos + (i * d), d);
     if (dsq <= radius_sq) {
-      emit(i);
+      sink(i);
     }
   }
 }
@@ -130,11 +130,11 @@ inline void radiusScan(const T *qp, const T *pts_aos, std::size_t count, std::si
  * @param count     Point count in the leaf.
  * @param d         Feature count.
  * @param radius_sq Squared radius; comparison is inclusive.
- * @param emit      Callback invoked with `(std::size_t p)` for each matching point.
+ * @param sink      Callback invoked with `(std::size_t p)` for each matching point.
  */
 template <class T, class EmitFn>
 inline void radiusScanSoa(const T *qp, const T *leaf_soa, std::size_t count, std::size_t d,
-                          T radius_sq, EmitFn &&emit) noexcept {
+                          T radius_sq, EmitFn &&sink) noexcept {
 #ifdef CLUSTERING_USE_AVX2
   if constexpr (std::is_same_v<T, float>) {
     const __m256 rsq = _mm256_set1_ps(radius_sq);
@@ -142,7 +142,7 @@ inline void radiusScanSoa(const T *qp, const T *leaf_soa, std::size_t count, std
     const auto emitGroup = [&](__m256 acc, std::size_t outBase) noexcept {
       auto m = static_cast<unsigned>(_mm256_movemask_ps(_mm256_cmp_ps(acc, rsq, _CMP_LE_OS)));
       while (m != 0) {
-        emit(outBase + static_cast<std::size_t>(__builtin_ctz(m)));
+        sink(outBase + static_cast<std::size_t>(__builtin_ctz(m)));
         m &= m - 1;
       }
     };
@@ -187,7 +187,7 @@ inline void radiusScanSoa(const T *qp, const T *leaf_soa, std::size_t count, std
         s += diff * diff;
       }
       if (s <= radius_sq) {
-        emit(p);
+        sink(p);
       }
     }
     return;
@@ -200,7 +200,7 @@ inline void radiusScanSoa(const T *qp, const T *leaf_soa, std::size_t count, std
       s += diff * diff;
     }
     if (s <= radius_sq) {
-      emit(p);
+      sink(p);
     }
   }
 }

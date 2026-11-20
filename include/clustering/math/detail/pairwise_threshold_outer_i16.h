@@ -52,7 +52,7 @@ inline constexpr double kI16FilterBoundCeiling = 0.25;
  * Quantizes @p X once to int16 with a scale that keeps every `vpmaddwd` accumulation inside
  * int32 by construction, sweeps the upper triangle with the quantized kernel against a
  * threshold widened by the quantization and float-fold slack, and re-checks each surviving
- * candidate against the original rows before forwarding it to @p emit. The candidate set is
+ * candidate against the original rows before forwarding it to @p sink. The candidate set is
  * a superset of the true eps-neighbours, so the recheck makes the emitted set exact; pairs
  * whose diff-form distance lands inside a narrow rounding band of the radius are resolved
  * with the same fused-fold arithmetic the f32 kernel lane applies, keeping boundary verdicts
@@ -66,7 +66,7 @@ template <class Emit>
 inline bool
 pairwiseThresholdOuterAvx2I16FilteredSymmetric(const NDArray<float, 2, Layout::Contig> &X,
                                                const NDArray<float, 1> &xRowNormsSq, float radiusSq,
-                                               Pool pool, Emit &&emit) {
+                                               Pool pool, Emit &&sink) {
   constexpr std::size_t kNr = 6;
   constexpr std::size_t kTileRows = 16;
   constexpr std::size_t kSymmetricChunkRows = 64;
@@ -175,7 +175,7 @@ pairwiseThresholdOuterAvx2I16FilteredSymmetric(const NDArray<float, 2, Layout::C
     const std::size_t bandDimTerm = (d / 2) + 8;
     const float band = (xn + yn + radiusSq) * (static_cast<float>(bandDimTerm) * 1.2e-7F);
     if (ds <= radiusSq - band) {
-      emit(row, col);
+      sink(row, col);
       return;
     }
     if (ds > radiusSq + band) {
@@ -186,7 +186,7 @@ pairwiseThresholdOuterAvx2I16FilteredSymmetric(const NDArray<float, 2, Layout::C
       dot = std::fmaf(a[k], b[k], dot);
     }
     if (std::fmaf(dot, -2.0F, xn + yn) <= radiusSq) {
-      emit(row, col);
+      sink(row, col);
     }
   };
 

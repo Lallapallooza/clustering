@@ -4,6 +4,7 @@ add_executable(
     kdtree_knn_test.cpp
     kdtree_bounds_test.cpp
     dbscan_test.cpp
+    qt_keyword_macros_test.cpp
     ndarray_test.cpp
     ndarray_integer_allowlist_test.cpp
     matrix_desc_test.cpp

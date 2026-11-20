@@ -92,10 +92,10 @@ public:
     // Symmetric eps-neighbour graph: the kernel emits each unique upper-triangular cell once
     // with `row <= col`. The kernel-side emit only touches `adj[row]` so workers writing
     // disjoint row chunks remain race-free.
-    auto emit = [&adj](std::size_t row, std::size_t col) {
+    auto sink = [&adj](std::size_t row, std::size_t col) {
       adj[row].push_back(static_cast<std::int32_t>(col));
     };
-    math::pairwiseSqEuclideanThresholdedSymmetric(m_points, radiusSq, pool, emit);
+    math::pairwiseSqEuclideanThresholdedSymmetric(m_points, radiusSq, pool, sink);
 
     // Mirror degrees without mirror edges: workers accumulate `j < i` neighbour counts in
     // private histograms that stay cache-resident, then a row-partitioned reduction folds them.

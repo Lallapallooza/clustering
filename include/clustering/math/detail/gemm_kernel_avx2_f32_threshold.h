@@ -28,10 +28,10 @@ namespace clustering::math::detail {
  *   - @p apPanel holds an @c Mr x @c kc A-panel; element `(r, k)` is at `ap[k*Mr + r]`.
  *   - @p bpPanel holds a @c kc x @c Nr B-panel; element `(k, c)` is at `bp[k*Nr + c]`.
  *
- * Output ordering contract: within a single tile call, @p emit fires in row-major order --
+ * Output ordering contract: within a single tile call, @p sink fires in row-major order --
  * `(rowBase+0, colBase+0)`, `(rowBase+0, colBase+1)`, ... through `(rowBase+validRows-1,`
  * colBase+validCols-1). Rows past @p validRows and columns past @p validCols are never handed
- * to @p emit. The outer driver iterates tiles in its own natural order (row-chunks first, then
+ * to @p sink. The outer driver iterates tiles in its own natural order (row-chunks first, then
  * column-panels within a chunk), so the composite emit order is deterministic but not
  * globally (row, col)-sorted.
  *
@@ -42,16 +42,16 @@ namespace clustering::math::detail {
  *                   padded rows past @p validRows are unread.
  * @param bColNormsSq Per-column squared norms for the Nr columns of this panel; padded
  *                   columns past @p validCols are unread.
- * @param rowBase    Global row index of row 0 of this tile; contributes to @p emit via
+ * @param rowBase    Global row index of row 0 of this tile; contributes to @p sink via
  *                   @c rowBase + rowOffset.
- * @param colBase    Global column index of column 0 of this panel; contributes to @p emit
+ * @param colBase    Global column index of column 0 of this panel; contributes to @p sink
  *                   via @c colBase + columnOffset.
  * @param validRows  Count of valid rows in the tile; `[0, validRows)` rows are scanned.
  * @param validCols  Count of valid columns in the panel; `[0, validCols)` columns are
  *                   scanned.
  * @param radiusSq   Squared radius; cells whose squared distance is at most this value
- *                   trigger @p emit.
- * @param emit       `void(std::size_t, std::size_t)` callable; invoked once per surviving
+ *                   trigger @p sink.
+ * @param sink       `void(std::size_t, std::size_t)` callable; invoked once per surviving
  *                   cell in row-major order.
  */
 template <class Emit>
@@ -59,7 +59,7 @@ template <class Emit>
 gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::size_t kc,
                               const float *aRowNormsSq, const float *bColNormsSq,
                               std::size_t rowBase, std::size_t colBase, std::size_t validRows,
-                              std::size_t validCols, float radiusSq, Emit &&emit) {
+                              std::size_t validCols, float radiusSq, Emit &&sink) {
   constexpr std::size_t kMr = kKernelMr<float>;
   constexpr std::size_t kNr = kKernelNr<float>;
 
@@ -172,7 +172,7 @@ gemmKernel8x6Avx2F32Threshold(const float *apPanel, const float *bpPanel, std::s
     auto m = static_cast<std::uint8_t>(masks[c] & rowMask);
     while (m != 0) {
       const int bit = __builtin_ctz(static_cast<unsigned>(m));
-      emit(rowBase + static_cast<std::size_t>(bit), colBase + c);
+      sink(rowBase + static_cast<std::size_t>(bit), colBase + c);
       m = static_cast<std::uint8_t>(m & (m - 1));
     }
   }
@@ -197,7 +197,7 @@ template <class Emit>
 gemmKernel16x6Avx2F32Threshold(const float *apPanelLo, const float *apPanelHi, const float *bpPanel,
                                std::size_t kc, const float *aRowNormsSq, const float *bColNormsSq,
                                std::size_t rowBase, std::size_t colBase, std::size_t validRows,
-                               std::size_t validCols, float radiusSq, Emit &&emit) {
+                               std::size_t validCols, float radiusSq, Emit &&sink) {
   constexpr std::size_t kMr = 8;
   constexpr std::size_t kNr = kKernelNr<float>;
   constexpr std::size_t kRows16 = 16;
@@ -294,7 +294,7 @@ gemmKernel16x6Avx2F32Threshold(const float *apPanelLo, const float *apPanelHi, c
     auto m = static_cast<std::uint16_t>(masks[c] & rowMask);
     while (m != 0) {
       const int bit = __builtin_ctz(static_cast<unsigned>(m));
-      emit(rowBase + static_cast<std::size_t>(bit), colBase + c);
+      sink(rowBase + static_cast<std::size_t>(bit), colBase + c);
       m = static_cast<std::uint16_t>(m & (m - 1));
     }
   }
