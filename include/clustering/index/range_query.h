@@ -50,9 +50,8 @@ struct CoreAdjacency {
  * @tparam T Element type of the point cloud.
  */
 template <class Q, class T>
-concept RangeIndex = std::constructible_from<Q, const NDArray<T, 2> &> &&
-                     requires(const Q &q, T radius, std::size_t minPts, math::Pool pool) {
-                       { q.query(radius, minPts, pool) } -> std::same_as<CoreAdjacency>;
-                     };
+concept RangeIndex = requires(const Q &q, T radius, std::size_t minPts, math::Pool pool) {
+  { q.query(radius, minPts, pool) } -> std::same_as<CoreAdjacency>;
+};
 
 } // namespace clustering::index

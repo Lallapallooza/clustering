@@ -515,13 +515,18 @@ struct Pool {
 
 inline OwnedPool &sharedPool(std::size_t nJobs) {
   const std::size_t effective = clampedJobCount(nJobs);
-  // Inline-static map: shared across translation units thanks to the inline keyword on the
-  // enclosing function. Mutex protects the registry against first-time-init races; lookups
-  // are O(1) and gated by Python's GIL or other caller-side serialization in practice.
-  static std::unordered_map<std::size_t, std::unique_ptr<OwnedPool>> registry;
-  static std::mutex registryMutex;
-  const std::scoped_lock guard{registryMutex};
-  auto &slot = registry[effective];
+  struct SharedPoolRegistry {
+    std::unordered_map<std::size_t, std::unique_ptr<OwnedPool>> pools;
+    std::mutex mutex;
+  };
+
+  // Keep the registry alive until the loader reclaims the process. A pool may
+  // remember a producer pthread that has exited by static-destruction time, so
+  // destroying it from an exit handler would pass an expired pthread_t to the
+  // affinity-restoration path.
+  static auto *registry = new SharedPoolRegistry;
+  const std::scoped_lock guard{registry->mutex};
+  auto &slot = registry->pools[effective];
   if (!slot) {
     // Seed citor's coherence-probe cache from disk before constructing the pool
     // so a short-lived or single-fit process skips the live inter-core

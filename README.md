@@ -121,6 +121,39 @@ int main() {
 }
 ```
 
+### DBSCAN with a caller-provided query-model factory
+
+A query model can receive runtime configuration through the factory overload of `run`. This is
+useful for indexes whose geometry depends on the input, such as a toroidal index whose periods
+match a periodic grid:
+
+```cpp
+#include <array>
+#include <cstddef>
+
+#include "clustering/dbscan.h"
+#include "my_toroidal_index.h"
+
+using clustering::DBSCAN;
+using clustering::NDArray;
+
+int main() {
+  NDArray<float, 2> points({numPoints, 2});
+  fillCoordinates(points);
+
+  const std::array<float, 2> periods{
+      static_cast<float>(gridRows),
+      static_cast<float>(gridColumns),
+  };
+
+  DBSCAN<float, MyToroidalIndex> dbscan(/*eps=*/1.5f, /*minPts=*/3, /*nJobs=*/4);
+  dbscan.run(points, [&](const NDArray<float, 2> &input, clustering::math::Pool pool) {
+    return MyToroidalIndex(input, periods, pool);
+  });
+
+  std::cout << "Number of clusters: " << dbscan.nClusters() << '\n';
+}
+
 ### k-means
 
 ```cpp
