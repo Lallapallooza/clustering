@@ -26,7 +26,7 @@ API docs: [Lallapallooza.github.io/clustering](https://Lallapallooza.github.io/c
 CPMAddPackage(
     NAME clustering
     GITHUB_REPOSITORY Lallapallooza/clustering
-    GIT_TAG v0.11.0
+    GIT_TAG v0.11.1
     OPTIONS "CLUSTERING_USE_AVX2 ON"
 )
 target_link_libraries(MyTargetName PRIVATE clustering::clustering)
@@ -51,7 +51,7 @@ clustering depends on citor. ConanCenter has no citor package, so build both pac
 git clone --branch v0.6.1 https://github.com/Lallapallooza/citor.git
 conan create citor/packaging/conan
 conan create packaging/conan -s compiler.cppstd=20
-conan install --requires=clustering/0.11.0 -s compiler.cppstd=20
+conan install --requires=clustering/0.11.1 -s compiler.cppstd=20
 ```
 
 ```cmake
@@ -82,7 +82,7 @@ cmake --install build --prefix /opt/clustering
 The install step also installs citor into the same prefix. Add the prefix to `CMAKE_PREFIX_PATH`, then use:
 
 ```cmake
-find_package(clustering 0.11.0 REQUIRED)
+find_package(clustering 0.11.1 REQUIRED)
 target_link_libraries(MyTargetName PRIVATE clustering::clustering)
 ```
 
@@ -91,7 +91,7 @@ target_link_libraries(MyTargetName PRIVATE clustering::clustering)
 Install a specific tag:
 
 ```bash
-uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git@v0.11.0"
+uv pip install "clustering @ git+https://github.com/Lallapallooza/clustering.git@v0.11.1"
 ```
 
 Or the latest `main`:
