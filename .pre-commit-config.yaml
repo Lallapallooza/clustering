@@ -16,10 +16,18 @@ repos:
       - id: clang-format
         types_or: [c++, c]
 
-  - repo: https://github.com/BlankSpruce/gersemi
-    rev: 0.27.0
+  # gersemi's own hook builds the formatter from source, which needs a Rust
+  # toolchain. Installing the published wheel keeps the hook toolchain-free.
+  - repo: local
     hooks:
       - id: gersemi
+        name: gersemi
+        entry: gersemi
+        args: ["-i"]
+        require_serial: true
+        language: python
+        additional_dependencies: ["gersemi==0.27.0"]
+        types: [cmake]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.10

@@ -201,14 +201,16 @@ Useful flags (all default ON when this is the top-level project, OFF when consum
 
 ### Pre-commit
 
-Formatting and linting hooks run via [pre-commit](https://pre-commit.com/). The dev tools are declared in `pyproject.toml` under the `dev` group and installed through `uv`:
+Formatting and linting hooks run via [pre-commit](https://pre-commit.com/). pre-commit builds an isolated environment for each hook, so it does not need the Python extension built; install it as a standalone tool:
 
 ```bash
-uv sync --group dev
-uv run pre-commit install                        # pre-commit hook (once)
-uv run pre-commit install --hook-type commit-msg # commit-msg hook (once)
-uv run pre-commit run --all-files                # run every hook on the repo
+uv tool install pre-commit
+pre-commit install                        # pre-commit hook (once)
+pre-commit install --hook-type commit-msg # commit-msg hook (once)
+pre-commit run --all-files                # run every hook on the repo
 ```
+
+The `doxygen-build` hook also needs `doxygen`, `dot` (Graphviz), `cmake` and `ninja` on `PATH`. `uv sync --group dev` builds the `_clustering` extension, which needs the Python development headers (`python3-dev` on Debian and Ubuntu).
 
 After `install`, hooks run automatically on `git commit`. The configured hooks are `clang-format` for C++, `gersemi` for CMake, `ruff` for Python, the standard whitespace/YAML checks, and `commitizen` which enforces [Conventional Commits](https://www.conventionalcommits.org/) on the commit message itself (e.g. `feat:`, `fix:`, `build:`, `chore:`, `docs:`).
 
