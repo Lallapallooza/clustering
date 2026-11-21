@@ -120,6 +120,7 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja \
             -DCLUSTERING_BUILD_BENCHMARK=OFF \
+            -DCLUSTERING_ENABLE_CLANG_TIDY=OFF \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -175,6 +176,7 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCLUSTERING_BUILD_BENCHMARK=OFF \
             -DCLUSTERING_BUILD_WITH_SANITIZER=ON \
+            -DCLUSTERING_ENABLE_CLANG_TIDY=OFF \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
